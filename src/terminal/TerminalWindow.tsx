@@ -70,6 +70,21 @@ function longestCommonPrefix(strs: string[]): string {
   })
 }
 
+interface SearchState {
+  query: string
+  /** Index into `history` of the entry currently shown, or null if `query` matches nothing. */
+  matchIndex: number | null
+}
+
+/** Most recent entry at or before `fromIndex` (inclusive) containing `query` as a substring — bash/zsh-style reverse-i-search (roadmap-v4.md §1.3). An empty query never matches (nothing to search for yet). */
+function findMatch(history: string[], query: string, fromIndex: number): number | null {
+  if (!query) return null
+  for (let i = Math.min(fromIndex, history.length - 1); i >= 0; i--) {
+    if (history[i]!.includes(query)) return i
+  }
+  return null
+}
+
 export function TerminalWindow() {
   const lines = useSimStore((s) => s.terminalLines)
   const runCommand = useSimStore((s) => s.runCommand)
@@ -79,6 +94,7 @@ export function TerminalWindow() {
   const [value, setValue] = useState('')
   const [history, setHistory] = useState<string[]>(() => loadHistory())
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
+  const [search, setSearch] = useState<SearchState | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -118,8 +134,50 @@ export function TerminalWindow() {
     setValue([...prefixParts, completion].join(' ') + trailer)
   }
 
+  /** Re-runs the search for `query` and mirrors the match (or '') into the normal input buffer, so Enter can just reuse submit(). */
+  function updateSearch(query: string, fromIndex: number) {
+    const matchIndex = findMatch(history, query, fromIndex)
+    setSearch({ query, matchIndex })
+    setValue(matchIndex !== null ? history[matchIndex]! : '')
+  }
+
+  function handleSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>, current: SearchState) {
+    e.preventDefault()
+    if (e.key === 'Escape') {
+      setSearch(null)
+      setValue('')
+    } else if (e.key === 'Enter') {
+      if (current.matchIndex === null) return // nothing matched — stay in search rather than submit a blank line
+      setSearch(null)
+      submit()
+    } else if (e.key === 'Backspace') {
+      updateSearch(current.query.slice(0, -1), history.length - 1)
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      updateSearch(current.query + e.key, history.length - 1)
+    }
+    // Any other key (Shift, arrows, etc.) while searching is swallowed — see the unconditional preventDefault above.
+  }
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (demo.active) return // input is read-only during the scripted demo — ignore stray keystrokes/Enter
+
+    if (e.ctrlKey && e.key === 'r') {
+      e.preventDefault()
+      if (search === null) {
+        setSearch({ query: '', matchIndex: null })
+        setValue('')
+      } else {
+        // Ctrl+R again with the same query: step to the next older match.
+        updateSearch(search.query, (search.matchIndex ?? history.length) - 1)
+      }
+      return
+    }
+
+    if (search !== null) {
+      handleSearchKeyDown(e, search)
+      return
+    }
+
     if (e.key === 'Enter') {
       submit()
     } else if (e.key === 'Tab') {
@@ -177,8 +235,16 @@ export function TerminalWindow() {
           {lastAnnouncement}
         </div>
         <div className="term-input-row">
-          <span className="term-user">guest@os-sim</span>
-          <span className="term-muted">:{cwd}$</span>
+          {search !== null ? (
+            <span className="term-muted">
+              ({search.matchIndex === null && search.query ? 'failed ' : ''}reverse-i-search)`{search.query}':
+            </span>
+          ) : (
+            <>
+              <span className="term-user">guest@os-sim</span>
+              <span className="term-muted">:{cwd}$</span>
+            </>
+          )}
           <input
             ref={inputRef}
             id="terminal-input"
@@ -189,7 +255,7 @@ export function TerminalWindow() {
             readOnly={demo.active}
             spellCheck={false}
             autoFocus
-            aria-label="Terminal input"
+            aria-label={search !== null ? 'Reverse history search' : 'Terminal input'}
           />
           <span className="term-cursor" />
         </div>

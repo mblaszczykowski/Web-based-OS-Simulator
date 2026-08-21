@@ -74,4 +74,45 @@ describe('TerminalWindow', () => {
 
     expect(input).toHaveValue('help ')
   })
+
+  it('Ctrl+R opens reverse-i-search, filters live, and Enter submits the match', async () => {
+    const user = userEvent.setup()
+    render(<TerminalWindow />)
+    const input = getInput()
+
+    await user.type(input, 'pwd')
+    await user.keyboard('{Enter}')
+    await user.type(input, 'help')
+    await user.keyboard('{Enter}')
+
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true })
+    expect(screen.getByLabelText('Reverse history search')).toBe(input)
+
+    fireEvent.keyDown(input, { key: 'p' })
+    expect(input).toHaveValue('help') // most recent history entry containing 'p'
+
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true }) // step to the next older match
+    expect(input).toHaveValue('pwd')
+
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(screen.getByLabelText('Terminal input')).toBe(input) // search closed
+    expect(input).toHaveValue('') // and the match was submitted
+  })
+
+  it('Ctrl+R with no match shows a failed search and Escape restores the prompt', async () => {
+    const user = userEvent.setup()
+    render(<TerminalWindow />)
+    const input = getInput()
+
+    await user.type(input, 'pwd')
+    await user.keyboard('{Enter}')
+
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true })
+    fireEvent.keyDown(input, { key: 'z' })
+    expect(screen.getByText("(failed reverse-i-search)`z':")).toBeInTheDocument()
+
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(screen.getByLabelText('Terminal input')).toBe(input)
+    expect(input).toHaveValue('')
+  })
 })
