@@ -110,7 +110,7 @@ export interface DiskBlock {
   owner: number | null
 }
 
-export type JournalOp = 'create' | 'write' | 'delete' | 'mkdir' | 'move' | 'copy'
+export type JournalOp = 'create' | 'write' | 'delete' | 'mkdir' | 'move' | 'copy' | 'link'
 
 export interface JournalEntry {
   id: number

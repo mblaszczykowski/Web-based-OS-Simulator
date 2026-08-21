@@ -94,6 +94,9 @@ export function syscallTraceFor(input: string, ok: boolean, cwd: string): string
         : [`open("${path}", O_RDONLY) = -1`]
     }
 
+    case 'ln':
+      return [`link("${path}", "${resolvePath(cwd, args[1])}") = ${ok ? '0' : '-1'}`]
+
     case 'rm':
       return [`unlink("${path}") = ${ok ? '0' : '-1'}`]
 

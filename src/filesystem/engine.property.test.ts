@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest'
 import { FilesystemEngine } from './engine'
 
 // roadmap.md §2.4 — block accounting across arbitrary sequences of
-// create/write/delete/mkdir/mv/cp, including ones the engine rejects
+// create/write/delete/mkdir/mv/cp/ln, including ones the engine rejects
 // (wrong type, no space, crashed) — a rejected op must never partially
-// mutate the block table.
+// mutate the block table. `link` (roadmap-v3.md §2.1) is included
+// specifically because it's the one op that can make a block "used by two
+// directory entries at once" without allocating anything new — exactly
+// the kind of accounting edge case this test exists to catch.
 
 const PATHS = ['/a.txt', '/b.txt', '/c.txt'] as const
 const opArb = fc.oneof(
@@ -23,6 +26,11 @@ const opArb = fc.oneof(
     path: fc.constantFrom(...PATHS),
     target: fc.constantFrom(...PATHS),
   }),
+  fc.record({
+    kind: fc.constant('link' as const),
+    path: fc.constantFrom(...PATHS),
+    target: fc.constantFrom(...PATHS),
+  }),
 )
 
 describe('FilesystemEngine — property: block accounting always reconciles', () => {
@@ -37,7 +45,8 @@ describe('FilesystemEngine — property: block accounting always reconciles', ()
           else if (op.kind === 'delete') fs.delete(op.path)
           else if (op.kind === 'mkdir') fs.mkdir(op.path)
           else if (op.kind === 'move') fs.move(op.path, op.target)
-          else fs.copy(op.path, op.target)
+          else if (op.kind === 'copy') fs.copy(op.path, op.target)
+          else fs.link(op.path, op.target)
 
           const m = fs.getMetrics()
           expect(m.usedBlocks + m.freeBlocks).toBe(m.totalBlocks)

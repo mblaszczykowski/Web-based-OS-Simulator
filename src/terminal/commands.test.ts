@@ -55,6 +55,7 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     fsMkdir: () => ({ ok: true }),
     fsMove: () => ({ ok: true }),
     fsCopy: () => ({ ok: true }),
+    fsLink: () => ({ ok: true }),
     fsCrash: () => {},
     fsFsck: () => ({ replayed: [] }),
     fsCrashed: () => false,
@@ -193,6 +194,20 @@ describe('executeCommand', () => {
       { text: 'Copied /a.txt -> /b.txt.' },
     ])
     expect(fsCopy).toHaveBeenCalledWith('/a.txt', '/b.txt')
+  })
+
+  it('ln requires both a target and a link name, and resolves both against cwd', () => {
+    expect(executeCommand('ln a.txt', makeContext())[0]).toMatchObject({ isError: true })
+    const fsLink = vi.fn(() => ({ ok: true as const }))
+    const ctx = makeContext({ fsLink })
+    executeCommand('cd /home', ctx)
+    expect(texts('ln a.txt b.txt', ctx)).toEqual(['/home/b.txt => /home/a.txt (hard link).'])
+    expect(fsLink).toHaveBeenCalledWith('/home/a.txt', '/home/b.txt')
+  })
+
+  it('ln surfaces fs errors verbatim', () => {
+    const ctx = makeContext({ fsLink: () => ({ ok: false, error: 'ln: /b.txt: already exists' }) })
+    expect(executeCommand('ln a.txt b.txt', ctx)).toEqual([{ text: 'ln: /b.txt: already exists', isError: true }])
   })
 
   it('ls with a wildcard filters entries by glob', () => {

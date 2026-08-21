@@ -107,6 +107,27 @@ export class FilesystemEngine {
     return { ok: true }
   }
 
+  /**
+   * Creates a second directory entry pointing at the same inode as
+   * `srcPath` — a real hard link (roadmap-v3.md §2.1), not a copy:
+   * `Inode.links` goes to 2, and the inode (and its blocks) only actually
+   * disappears once every linked entry has been `delete()`d — see
+   * applyDelete()'s link-count check below.
+   */
+  link(srcPath: string, destPath: string): FsResult {
+    const crashedError = this.rejectIfCrashed()
+    if (crashedError) return crashedError
+    if (this.findDirEntry(srcPath)) return { ok: false, error: `ln: ${srcPath}: hard link not allowed for directory` }
+    if (!this.findFileEntry(srcPath)) return { ok: false, error: `ln: ${srcPath}: No such file or directory` }
+    if (this.findFileEntry(destPath) || this.findDirEntry(destPath)) {
+      return { ok: false, error: `ln: ${destPath}: already exists` }
+    }
+    if (this.ancestorIsFile(destPath)) return { ok: false, error: `ln: ${destPath}: Not a directory` }
+
+    this.commitJournalEntry('link', { path: srcPath, target: destPath, touchedPath: destPath })
+    return { ok: true }
+  }
+
   copy(srcPath: string, destPath: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
@@ -250,6 +271,8 @@ export class FilesystemEngine {
         return this.applyMove(path, target!)
       case 'copy':
         return this.applyCopy(path, content)
+      case 'link':
+        return this.applyLink(path, target!)
       default: {
         // Exhaustiveness check: a future JournalOp member missing a case
         // above fails to compile here. At runtime this only fires for an
@@ -284,6 +307,19 @@ export class FilesystemEngine {
     const destName = destSegments.pop()!
     const destDir = this.resolveDir(destSegments, true)
     destDir.children!.push({ ...fileEntry, name: destName })
+  }
+
+  private applyLink(srcPath: string, destPath: string): void {
+    const srcEntry = this.findFileEntry(srcPath)
+    if (!srcEntry) return
+    const inode = this.inodes.get(srcEntry.inode!)
+    if (!inode) return
+    const segments = this.splitPath(destPath)
+    const name = segments.pop()
+    if (!name) return
+    const dir = this.resolveDir(segments, true)
+    dir.children!.push({ name, type: 'file', inode: inode.id })
+    inode.links++
   }
 
   private applyCopy(destPath: string, content: string): void {
@@ -342,11 +378,18 @@ export class FilesystemEngine {
     if (!fileEntry) return
     const inode = this.inodes.get(fileEntry.inode!)
     if (inode) {
-      for (const blockIndex of inode.blockIds) {
-        const block = this.blocks[blockIndex]
-        if (block) block.owner = null
+      // A hard-linked file (roadmap-v3.md §2.1) has more than one
+      // directory entry pointing at this inode — only the entry named by
+      // `path` is removed below; the inode (and its blocks) survives
+      // until its link count actually reaches zero.
+      inode.links--
+      if (inode.links <= 0) {
+        for (const blockIndex of inode.blockIds) {
+          const block = this.blocks[blockIndex]
+          if (block) block.owner = null
+        }
+        this.inodes.delete(inode.id)
       }
-      this.inodes.delete(inode.id)
     }
     const segments = this.splitPath(path)
     const name = segments.pop()!

@@ -229,6 +229,51 @@ describe('FilesystemEngine — cp', () => {
   })
 })
 
+describe('FilesystemEngine — ln (hard links)', () => {
+  it('a hard link shares the same inode and content as its target', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hello')
+    const inodeIdBefore = fs.getInodes()[0]!.id
+
+    expect(fs.link('/a.txt', '/b.txt')).toEqual({ ok: true })
+    expect(fs.getInodes()).toHaveLength(1) // still one inode, not two
+    expect(fs.getInodes()[0]!.id).toBe(inodeIdBefore)
+    expect(fs.getInodes()[0]!.links).toBe(2)
+    expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello' })
+
+    // writing through either path is visible through the other — they share content.
+    fs.write('/a.txt', '!')
+    expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello!' })
+  })
+
+  it('the inode and its blocks survive deleting one linked name, and only actually free once the last link is removed', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hello')
+    fs.link('/a.txt', '/b.txt')
+
+    expect(fs.delete('/a.txt')).toEqual({ ok: true })
+    expect(fs.getInodes()).toHaveLength(1) // inode survives — /b.txt still links to it
+    expect(fs.getInodes()[0]!.links).toBe(1)
+    expect(fs.read('/a.txt').ok).toBe(false)
+    expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello' })
+
+    expect(fs.delete('/b.txt')).toEqual({ ok: true })
+    expect(fs.getInodes()).toHaveLength(0) // last link gone — inode and blocks actually freed
+    expect(fs.getBlocks().every((b) => b.owner === null)).toBe(true)
+  })
+
+  it('rejects linking a directory, a missing source, or onto an existing destination', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.mkdir('/dir')
+    fs.write('/a.txt', 'x')
+    fs.write('/b.txt', 'y')
+
+    expect(fs.link('/dir', '/dir2').ok).toBe(false)
+    expect(fs.link('/nope.txt', '/x.txt').ok).toBe(false)
+    expect(fs.link('/a.txt', '/b.txt').ok).toBe(false) // destination already exists
+  })
+})
+
 describe('FilesystemEngine — export / import round-trip (persistence)', () => {
   it('reconstructs an identical, independently-usable disk from an exported snapshot', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })

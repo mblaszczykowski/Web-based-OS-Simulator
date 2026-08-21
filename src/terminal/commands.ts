@@ -55,6 +55,7 @@ export interface CommandContext {
   fsMkdir(path: string): { ok: true } | { ok: false; error: string }
   fsMove(src: string, dest: string): { ok: true } | { ok: false; error: string }
   fsCopy(src: string, dest: string): { ok: true } | { ok: false; error: string }
+  fsLink(target: string, link: string): { ok: true } | { ok: false; error: string }
   fsCrash(): void
   fsFsck(): { replayed: JournalEntry[] }
   fsCrashed(): boolean
@@ -85,6 +86,7 @@ const HELP_TEXT = [
   '  mkdir <dir>           create a directory',
   '  mv <src> <dest>       move/rename a file',
   '  cp <src> <dest>       copy a file',
+  '  ln <target> <link>    create a hard link (shares content with target)',
   '  rm <file>            delete a file, supports * wildcards',
   '  crash               simulate a power loss mid-write',
   '  fsck                replay the journal and recover the filesystem',
@@ -120,6 +122,7 @@ export const COMMAND_NAMES = [
   'mkdir',
   'mv',
   'cp',
+  'ln',
   'rm',
   'grep',
   'crash',
@@ -373,6 +376,16 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       const destPath = resolvePath(cwd, dest)
       const result = ctx.fsCopy(srcPath, destPath)
       return result.ok ? out(`Copied ${srcPath} -> ${destPath}.`) : err(result.error)
+    }
+
+    case 'ln': {
+      if (args.length < 2) return err('ln: usage: ln <target> <link>')
+      const cwd = ctx.getCwd()
+      const [target, link] = args
+      const targetPath = resolvePath(cwd, target)
+      const linkPath = resolvePath(cwd, link)
+      const result = ctx.fsLink(targetPath, linkPath)
+      return result.ok ? out(`${linkPath} => ${targetPath} (hard link).`) : err(result.error)
     }
 
     case 'grep':
