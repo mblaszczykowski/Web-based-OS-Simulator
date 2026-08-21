@@ -135,7 +135,8 @@ export function executeCommand(input: string, ctx: CommandContext): string[] {
     case 'cat': {
       if (!args[0]) return ['cat: missing file operand']
       const result = ctx.fsRead(normalizePath(args[0]))
-      return result.ok ? result.content.split('\n') : [result.error]
+      if (!result.ok) return [result.error]
+      return result.content.length === 0 ? [] : result.content.split('\n')
     }
 
     case 'write': {

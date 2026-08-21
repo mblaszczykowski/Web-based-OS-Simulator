@@ -38,6 +38,19 @@ describe('FilesystemEngine — create / write / read / delete', () => {
     expect(fs.create('/a.txt')).toEqual({ ok: true })
     expect(fs.create('/a.txt').ok).toBe(false)
   })
+
+  it('rejects write/create when the path already exists as a directory', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.write('/home/user/notes.txt', 'hi') // auto-creates /home and /home/user as directories
+
+    expect(fs.write('/home', 'oops').ok).toBe(false)
+    expect(fs.create('/home/user').ok).toBe(false)
+    expect(fs.delete('/home').ok).toBe(false)
+
+    // and the tree wasn't corrupted by the attempt — still exactly one entry named "home"
+    const root = fs.getTree()
+    expect(root.children!.filter((c) => c.name === 'home')).toHaveLength(1)
+  })
 })
 
 describe('FilesystemEngine — crash / fsck recovery', () => {

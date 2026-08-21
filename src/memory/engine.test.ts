@@ -43,6 +43,21 @@ describe('MemoryEngine — Clock (Second-Chance) replacement', () => {
   })
 })
 
+describe('MemoryEngine — kernel-reserved frames', () => {
+  it('are never evicted by the Clock sweep, even after many wraparounds', () => {
+    const engine = new MemoryEngine({ frameCount: 4, contiguousSizeMb: 100 })
+    engine.reserveKernelFrames(1) // frame 0 is permanently "OS" — nothing ever re-references it
+    engine.allocateProcess(1, 10) // far more pages than the 3 frames actually available to it
+
+    for (let i = 0; i < 40; i++) {
+      engine.access(1, i % 10) // enough faults to sweep the clock hand around several times
+    }
+
+    expect(engine.getFrames()[0]).toMatchObject({ owner: { pid: 0, page: 0 } })
+    expect(engine.getFrames().slice(1).every((f) => f.owner === null || f.owner.pid === 1)).toBe(true)
+  })
+})
+
 describe('MemoryEngine — freeProcess', () => {
   it('releases every frame the process held and drops its page table', () => {
     const engine = new MemoryEngine({ frameCount: 4, contiguousSizeMb: 100 })

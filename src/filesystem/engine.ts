@@ -112,8 +112,12 @@ export class FilesystemEngine {
   private mutate(op: JournalOp, path: string, content?: string): FsResult {
     if (this.crashed) return { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' }
 
-    if (op === 'delete' && !this.findFileEntry(path)) {
-      return { ok: false, error: `rm: ${path}: No such file or directory` }
+    if ((op === 'create' || op === 'write') && this.findDirEntry(path)) {
+      return { ok: false, error: `${op}: ${path}: Is a directory` }
+    }
+    if (op === 'delete') {
+      if (this.findDirEntry(path)) return { ok: false, error: `rm: ${path}: Is a directory` }
+      if (!this.findFileEntry(path)) return { ok: false, error: `rm: ${path}: No such file or directory` }
     }
     if (op === 'create' && this.findFileEntry(path)) {
       return { ok: false, error: `create: ${path}: already exists` }
@@ -231,6 +235,20 @@ export class FilesystemEngine {
       return undefined
     }
     return dir.children?.find((c) => c.name === name && c.type === 'file')
+  }
+
+  /** Does `path` already exist as a directory? Used to reject file ops that would collide with one. */
+  private findDirEntry(path: string): DirEntry | undefined {
+    const segments = this.splitPath(path)
+    const name = segments.pop()
+    if (!name) return undefined
+    let dir: DirEntry
+    try {
+      dir = this.resolveDir(segments, false)
+    } catch {
+      return undefined
+    }
+    return dir.children?.find((c) => c.name === name && c.type === 'dir')
   }
 
   private trimJournal(): void {

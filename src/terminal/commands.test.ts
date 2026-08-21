@@ -94,6 +94,11 @@ describe('executeCommand', () => {
     expect(executeCommand('cat /x', ctx)).toEqual(['cat: /x: No such file or directory'])
   })
 
+  it('cat on an empty file prints nothing, not one blank line', () => {
+    const ctx = makeContext({ fsRead: () => ({ ok: true, content: '' }) })
+    expect(executeCommand('cat /empty.txt', ctx)).toEqual([])
+  })
+
   it('fsck prints one REPLAY line per recovered journal entry', () => {
     const ctx = makeContext({
       fsFsck: () => ({

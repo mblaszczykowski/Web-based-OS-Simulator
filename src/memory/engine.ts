@@ -102,8 +102,17 @@ export class MemoryEngine {
     }
 
     // Clock sweep: give every frame a second chance before evicting it.
+    // Kernel-reserved frames (owner.pid === 0) are permanently exempt —
+    // nothing ever re-references them to keep their bit alive, so without
+    // this they'd eventually be swept up and evicted like any cold frame.
     let victimIndex = this.clockHand
-    while (this.frameRefBit[victimIndex]) {
+    while (true) {
+      const candidate = this.frames[victimIndex]!
+      if (candidate.owner?.pid === 0) {
+        victimIndex = (victimIndex + 1) % this.frames.length
+        continue
+      }
+      if (!this.frameRefBit[victimIndex]) break
       this.frameRefBit[victimIndex] = false
       victimIndex = (victimIndex + 1) % this.frames.length
     }
