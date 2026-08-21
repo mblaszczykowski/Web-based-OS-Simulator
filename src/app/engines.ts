@@ -6,7 +6,7 @@
 // trying to mirror deeply-mutated engine state into a separate reactive
 // snapshot.
 
-import type { Process, ProcessKind } from '../shared/types'
+import { INIT_PID, type Process, type ProcessKind } from '../shared/types'
 import { SchedulerEngine, createProcess } from '../scheduler/engine'
 import { MemoryEngine } from '../memory/engine'
 import { FilesystemEngine } from '../filesystem/engine'
@@ -121,8 +121,8 @@ export function resetFilesystem(): void {
   void clearFilesystemState()
 }
 
-export function spawnProcess(name: string, kind: ProcessKind = randomKind()): Process {
-  const process = createProcess(name, kind)
+export function spawnProcess(name: string, kind: ProcessKind = randomKind(), parentPid: number = INIT_PID): Process {
+  const process = createProcess(name, kind, undefined, parentPid)
   scheduler.spawn(process)
   memory.allocateProcess(process.pid, process.pageCount)
   simBus.emit('process:spawned', { pid: process.pid, name: process.name, kind: process.kind })

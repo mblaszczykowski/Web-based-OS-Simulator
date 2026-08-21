@@ -12,6 +12,8 @@ interface WindowFrameProps {
 }
 
 const MAXIMIZED_BOUNDS = { x: 24, y: 44, w: 'calc(100vw - 48px)', h: 'calc(100vh - 120px)' }
+const MIN_WIDTH = 320
+const MIN_HEIGHT = 200
 
 export function WindowFrame({ id, title, subtitle, accent, icon, children }: WindowFrameProps) {
   const win = useSimStore((s) => s.windows[id])
@@ -19,8 +21,10 @@ export function WindowFrame({ id, title, subtitle, accent, icon, children }: Win
   const focusWindow = useSimStore((s) => s.focusWindow)
   const closeWindow = useSimStore((s) => s.closeWindow)
   const moveWindow = useSimStore((s) => s.moveWindow)
+  const resizeWindow = useSimStore((s) => s.resizeWindow)
   const [maximized, setMaximized] = useState(false)
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null)
+  const resizeRef = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null)
 
   if (!win.open) return null
 
@@ -37,6 +41,28 @@ export function WindowFrame({ id, title, subtitle, accent, icon, children }: Win
     }
     const onUp = () => {
       dragRef.current = null
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
+  function handleResizePointerDown(e: React.PointerEvent) {
+    if (maximized) return
+    e.stopPropagation()
+    resizeRef.current = { startX: e.clientX, startY: e.clientY, origW: win.w, origH: win.h }
+    const onMove = (ev: PointerEvent) => {
+      const resize = resizeRef.current
+      if (!resize) return
+      resizeWindow(
+        id,
+        Math.max(MIN_WIDTH, resize.origW + (ev.clientX - resize.startX)),
+        Math.max(MIN_HEIGHT, resize.origH + (ev.clientY - resize.startY)),
+      )
+    }
+    const onUp = () => {
+      resizeRef.current = null
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
     }
@@ -80,6 +106,14 @@ export function WindowFrame({ id, title, subtitle, accent, icon, children }: Win
         </div>
       </div>
       {children}
+      {!maximized && (
+        <div
+          className="resize-handle"
+          onPointerDown={handleResizePointerDown}
+          role="presentation"
+          aria-hidden="true"
+        />
+      )}
     </div>
   )
 }

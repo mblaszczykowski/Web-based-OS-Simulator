@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { TerminalLine } from '../shared/types'
+import { SHELL_PID, type TerminalLine } from '../shared/types'
 import {
   scheduler,
   memory,
@@ -103,6 +103,7 @@ interface SimStore {
   closeWindow: (id: WindowId) => void
   openWindow: (id: WindowId) => void
   moveWindow: (id: WindowId, x: number, y: number) => void
+  resizeWindow: (id: WindowId, w: number, h: number) => void
   startDemo: () => Promise<void>
   stopDemo: () => void
 }
@@ -153,7 +154,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
     const ctx: CommandContext = {
       listProcesses: () => scheduler.getProcesses(),
-      spawnProcess: (name) => spawnProcess(name),
+      spawnProcess: (name) => spawnProcess(name, undefined, SHELL_PID),
       killProcess: (pid) => killProcess(pid),
       schedulerMetrics: () => scheduler.getMetrics(),
       memoryMetrics: () => {
@@ -222,6 +223,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
   moveWindow: (id, x, y) =>
     set((s) => ({ windows: { ...s.windows, [id]: { ...s.windows[id]!, x, y } } })),
+
+  resizeWindow: (id, w, h) =>
+    set((s) => ({ windows: { ...s.windows, [id]: { ...s.windows[id]!, w, h } } })),
 
   startDemo: async () => {
     if (get().demo.active) return

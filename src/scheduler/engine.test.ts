@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach } from 'vitest'
 import { SchedulerEngine, createProcess, resetPidCounter } from './engine'
 import { simBus } from '../shared/eventBus'
+import { INIT_PID, SHELL_PID } from '../shared/types'
 
 // All processes in these tests are given explicit, hand-computed burst
 // sequences (never the randomised generateBursts()) so every assertion
@@ -216,5 +217,15 @@ describe('SchedulerEngine — bounded process history', () => {
     expect(metrics.completed).toBe(20)
     expect(metrics.avgWaitingTicks).toBeCloseTo((0 + 19) / 2) // waits 0,1,2,...,19
     expect(metrics.avgTurnaroundTicks).toBeCloseTo((1 + 20) / 2) // finishes at tick 1,2,...,20
+  })
+})
+
+describe('createProcess — parentPid (roadmap.md §2.2)', () => {
+  it('defaults to INIT_PID, and accepts an explicit parent (e.g. SHELL_PID for `run`)', () => {
+    const auto = createProcess('backupd', 'cpu-bound', [5])
+    expect(auto.parentPid).toBe(INIT_PID)
+
+    const fromShell = createProcess('compiler', 'cpu-bound', [5], SHELL_PID)
+    expect(fromShell.parentPid).toBe(SHELL_PID)
   })
 })

@@ -4,6 +4,7 @@ import { useSimStore } from '../app/store'
 import { scheduler } from '../app/engines'
 import { DEFAULT_SCHEDULER_CONFIG } from './engine'
 import { colorForPid } from '../app/colors'
+import { ProcessTree } from './ProcessTree'
 
 const STATE_PILL_CLASS: Record<string, string> = {
   RUNNING: 'pill--running',
@@ -61,6 +62,8 @@ export function SchedulerWindow() {
           <div className="field">
             <span className="label">Process count &mdash; {active.length}</span>
           </div>
+
+          <ProcessTree processes={processes} />
 
           <div className="field" style={{ flexGrow: 1, minHeight: 0 }}>
             <span className="label">Process list</span>

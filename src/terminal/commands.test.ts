@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { executeCommand, type CommandContext } from './commands'
-import type { Process } from '../shared/types'
+import { SHELL_PID, type Process } from '../shared/types'
 
 function makeProcess(overrides: Partial<Process> = {}): Process {
   return {
@@ -9,6 +9,7 @@ function makeProcess(overrides: Partial<Process> = {}): Process {
     kind: 'cpu-bound',
     state: 'READY',
     queueLevel: 0,
+    parentPid: SHELL_PID,
     arrivalTick: 0,
     finishTick: null,
     bursts: [5],

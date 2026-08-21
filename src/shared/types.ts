@@ -8,12 +8,18 @@ export type ProcessKind = 'cpu-bound' | 'interactive'
 /** MLFQ priority levels. 0 is the highest priority (shortest quantum). */
 export type QueueLevel = 0 | 1 | 2
 
+/** Pseudo-pids for the two synthetic "processes" every real one is spawned under — see roadmap.md §2.2. */
+export const SHELL_PID = -1
+export const INIT_PID = -2
+
 export interface Process {
   pid: number
   name: string
   kind: ProcessKind
   state: ProcessState
   queueLevel: QueueLevel
+  /** SHELL_PID for anything spawned via the terminal's `run`, INIT_PID for the automatic workload, or another process's pid. */
+  parentPid: number
 
   /** Tick the process became READY for the first time. */
   arrivalTick: number

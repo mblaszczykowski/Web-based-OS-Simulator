@@ -1,4 +1,4 @@
-import type { GanttSample, Process, ProcessKind, QueueLevel } from '../shared/types'
+import { INIT_PID, type GanttSample, type Process, type ProcessKind, type QueueLevel } from '../shared/types'
 import { simBus } from '../shared/eventBus'
 
 export interface SchedulerConfig {
@@ -52,13 +52,19 @@ export function generateBursts(kind: ProcessKind): number[] {
   return bursts
 }
 
-export function createProcess(name: string, kind: ProcessKind, bursts = generateBursts(kind)): Process {
+export function createProcess(
+  name: string,
+  kind: ProcessKind,
+  bursts = generateBursts(kind),
+  parentPid: number = INIT_PID,
+): Process {
   return {
     pid: nextPid(),
     name,
     kind,
     state: 'NEW',
     queueLevel: 0,
+    parentPid,
     arrivalTick: 0,
     finishTick: null,
     bursts,

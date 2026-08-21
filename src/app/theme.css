@@ -325,6 +325,25 @@ button {
 .win-body.column {
   flex-direction: column;
 }
+.resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  z-index: 5;
+}
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--border-strong);
+  border-bottom: 2px solid var(--border-strong);
+}
 
 /* Shared controls ------------------------------------------------------ */
 .label {
@@ -542,6 +561,18 @@ button {
 .queue-arrow {
   color: var(--text-muted);
   font-size: 12px;
+}
+.tree-toggle {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  margin-bottom: 6px;
+}
+.tree-toggle:hover .label {
+  color: var(--text-secondary);
 }
 .metrics-grid {
   display: grid;
