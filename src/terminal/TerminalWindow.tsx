@@ -45,10 +45,20 @@ function collectPaths(node: DirEntry, prefix: string, acc: string[]): void {
   }
 }
 
-function pathCandidates(query: string): string[] {
-  const paths: string[] = []
-  collectPaths(filesystem.getTree(), '/', paths)
-  return paths.filter((p) => p.startsWith(query) || p.startsWith(`/${query}`))
+/** Rewrites an absolute path onto `cwd`, e.g. ('/home/notes.txt', '/home') -> 'notes.txt'. `null` if it isn't under cwd at all (no '../' support in completion — see roadmap-v3.md §1.1). */
+function toRelative(absPath: string, cwd: string): string | null {
+  if (cwd === '/') return absPath.slice(1)
+  if (absPath.startsWith(`${cwd}/`)) return absPath.slice(cwd.length + 1)
+  return null
+}
+
+/** Completion candidates for `query`, relative to `cwd` unless `query` is itself absolute (leading `/`) — roadmap-v3.md §1.1. */
+function pathCandidates(query: string, cwd: string): string[] {
+  const absolute: string[] = []
+  collectPaths(filesystem.getTree(), '/', absolute)
+  if (query.startsWith('/')) return absolute.filter((p) => p.startsWith(query))
+  const relative = absolute.map((p) => toRelative(p, cwd)).filter((p): p is string => p !== null)
+  return relative.filter((p) => p.startsWith(query))
 }
 
 function longestCommonPrefix(strs: string[]): string {
@@ -63,6 +73,7 @@ function longestCommonPrefix(strs: string[]): string {
 export function TerminalWindow() {
   const lines = useSimStore((s) => s.terminalLines)
   const runCommand = useSimStore((s) => s.runCommand)
+  const cwd = useSimStore((s) => s.cwd)
   const demo = useSimStore((s) => s.demo)
   const lastAnnouncement = useSimStore((s) => s.lastAnnouncement)
   const [value, setValue] = useState('')
@@ -96,7 +107,7 @@ export function TerminalWindow() {
 
     const candidates = completingCommand
       ? COMMAND_NAMES.filter((c) => c.startsWith(current))
-      : pathCandidates(current)
+      : pathCandidates(current, cwd)
     if (candidates.length === 0) return
 
     const completion = candidates.length === 1 ? candidates[0]! : longestCommonPrefix(candidates)
@@ -149,7 +160,7 @@ export function TerminalWindow() {
               {line.kind === 'prompt' ? (
                 <>
                   <span className="term-user">guest@os-sim</span>
-                  <span className="term-muted">:~$</span> <span className="term-cmd">{line.text}</span>
+                  <span className="term-muted">:{line.cwd ?? '/'}$</span> <span className="term-cmd">{line.text}</span>
                 </>
               ) : (
                 <span className={line.kind === 'error' ? 'term-error' : 'term-output'}>{line.text}</span>
@@ -167,7 +178,7 @@ export function TerminalWindow() {
         </div>
         <div className="term-input-row">
           <span className="term-user">guest@os-sim</span>
-          <span className="term-muted">:~$</span>
+          <span className="term-muted">:{cwd}$</span>
           <input
             ref={inputRef}
             id="terminal-input"

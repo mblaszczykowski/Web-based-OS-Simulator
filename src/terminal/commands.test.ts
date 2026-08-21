@@ -25,9 +25,11 @@ function makeProcess(overrides: Partial<Process> = {}): Process {
 }
 
 function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
+  let cwd = '/'
   return {
     listProcesses: () => [],
     spawnProcess: (name) => makeProcess({ name }),
+    spawnStress: (n) => Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1, kind: 'cpu-bound' })),
     killProcess: () => true,
     schedulerMetrics: () => ({
       completed: 0,
@@ -57,6 +59,10 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     fsFsck: () => ({ replayed: [] }),
     fsCrashed: () => false,
     fsReset: () => {},
+    getCwd: () => cwd,
+    setCwd: (path) => {
+      cwd = path
+    },
     syncStatus: () => ({
       capacity: 6,
       occupancy: 0,
@@ -222,5 +228,125 @@ describe('executeCommand', () => {
     expect(fsDelete).toHaveBeenCalledWith('/b.txt')
     expect(fsDelete).not.toHaveBeenCalledWith('/keep.md')
     expect(out).toEqual([{ text: 'Removed /a.txt.' }, { text: 'Removed /b.txt.' }])
+  })
+
+  describe('working directory (roadmap-v3.md §1.1)', () => {
+    it('cd with no argument goes to root', () => {
+      const ctx = makeContext()
+      executeCommand('cd /home', ctx)
+      expect(ctx.getCwd()).toBe('/home')
+      executeCommand('cd', ctx)
+      expect(ctx.getCwd()).toBe('/')
+    })
+
+    it('cd resolves .. and . relative to cwd, and rejects a target the fs says does not exist', () => {
+      const ctx = makeContext()
+      executeCommand('cd /home/guest', ctx)
+      executeCommand('cd ..', ctx)
+      expect(ctx.getCwd()).toBe('/home')
+      executeCommand('cd ./guest', ctx)
+      expect(ctx.getCwd()).toBe('/home/guest')
+
+      const failing = makeContext({ fsList: () => ({ ok: false, error: 'no such dir' }) })
+      const result = executeCommand('cd nope', failing)
+      expect(result[0]).toMatchObject({ isError: true })
+      expect(failing.getCwd()).toBe('/') // rejected — cwd unchanged
+    })
+
+    it('pwd prints the current working directory', () => {
+      const ctx = makeContext()
+      executeCommand('cd /var/log', ctx)
+      expect(texts('pwd', ctx)).toEqual(['/var/log'])
+    })
+
+    it('resolves relative file arguments against cwd, leaving absolute ones untouched', () => {
+      const fsRead = vi.fn(() => ({ ok: true as const, content: 'hi' }))
+      const ctx = makeContext({ fsRead })
+      executeCommand('cd /home', ctx)
+      executeCommand('cat notes.txt', ctx)
+      expect(fsRead).toHaveBeenCalledWith('/home/notes.txt')
+      executeCommand('cat /etc/motd', ctx)
+      expect(fsRead).toHaveBeenCalledWith('/etc/motd')
+    })
+
+    it('ls with no argument lists cwd, not always root', () => {
+      const fsList = vi.fn(() => ({ ok: true as const, entries: [] }))
+      const ctx = makeContext({ fsList })
+      executeCommand('cd /home', ctx)
+      executeCommand('ls', ctx)
+      expect(fsList).toHaveBeenCalledWith('/home')
+    })
+  })
+
+  describe('command chaining (roadmap-v3.md §1.2)', () => {
+    it('; runs every segment regardless of prior failure', () => {
+      const ctx = makeContext({ killProcess: () => false })
+      const lines = texts('kill 1 ; run a', ctx)
+      expect(lines.some((l) => l.includes('No such process'))).toBe(true)
+      expect(lines.some((l) => l.includes('Started process'))).toBe(true)
+    })
+
+    it('&& short-circuits after a failure and keeps skipping through a chain', () => {
+      const spawnProcess = vi.fn((name: string) => makeProcess({ name }))
+      const ctx = makeContext({ killProcess: () => false, spawnProcess })
+      executeCommand('kill 1 && run a && run b', ctx)
+      expect(spawnProcess).not.toHaveBeenCalled()
+    })
+
+    it('&& runs the next segment when the previous one succeeded', () => {
+      const fsMkdir = vi.fn(() => ({ ok: true as const }))
+      const fsWrite = vi.fn(() => ({ ok: true as const }))
+      const ctx = makeContext({ fsMkdir, fsWrite })
+      const lines = texts('mkdir /tmp && write /tmp/x.txt hi', ctx)
+      expect(fsMkdir).toHaveBeenCalledWith('/tmp')
+      expect(fsWrite).toHaveBeenCalledWith('/tmp/x.txt', 'hi')
+      expect(lines).toEqual(['Created directory /tmp.', 'Wrote to /tmp/x.txt.'])
+    })
+
+    it('| filters the previous stage output through grep', () => {
+      const ctx = makeContext({
+        fsList: () => ({
+          ok: true,
+          entries: [
+            { name: 'boot.log', type: 'file' },
+            { name: 'notes.txt', type: 'file' },
+          ],
+        }),
+      })
+      expect(texts('ls | grep .log', ctx)).toEqual(['boot.log'])
+    })
+
+    it('a pipe stage other than grep errors out', () => {
+      const ctx = makeContext()
+      expect(executeCommand('ps | sort', ctx)[0]).toMatchObject({ isError: true })
+    })
+
+    it('bare grep with no pipe reports there is nothing to search', () => {
+      expect(executeCommand('grep foo', makeContext())[0]).toMatchObject({ isError: true })
+    })
+  })
+
+  describe('stress (roadmap-v3.md §1.3)', () => {
+    it('spawns the default count with no argument', () => {
+      const spawnStress = vi.fn((n: number) => Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1 })))
+      const ctx = makeContext({ spawnStress })
+      executeCommand('stress', ctx)
+      expect(spawnStress).toHaveBeenCalledWith(6)
+    })
+
+    it('spawns the requested count, capped at 20', () => {
+      const spawnStress = vi.fn((n: number) => Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1 })))
+      const ctx = makeContext({ spawnStress })
+      executeCommand('stress 3', ctx)
+      expect(spawnStress).toHaveBeenCalledWith(3)
+      executeCommand('stress 999', ctx)
+      expect(spawnStress).toHaveBeenCalledWith(20)
+    })
+
+    it('rejects a non-positive-integer argument', () => {
+      expect(executeCommand('stress 0', makeContext())[0]).toMatchObject({ isError: true })
+      expect(executeCommand('stress -1', makeContext())[0]).toMatchObject({ isError: true })
+      expect(executeCommand('stress abc', makeContext())[0]).toMatchObject({ isError: true })
+    })
   })
 })

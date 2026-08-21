@@ -7,12 +7,13 @@ import {
   sync,
   network,
   spawnProcess,
+  spawnStressLoad,
   killProcess,
   stepSimulation,
   resetSync,
   resetFilesystem,
 } from './engines'
-import { executeCommand, type CommandContext } from '../terminal/commands'
+import { runCommandLine, type CommandContext } from '../terminal/commands'
 import { syscallTraceFor } from '../terminal/syscallTrace'
 import { SYNC_BUFFER_CAPACITY } from '../sync/engine'
 
@@ -39,8 +40,8 @@ export interface DemoState {
 }
 
 let lineId = 1
-function makeLine(kind: TerminalLine['kind'], text: string): TerminalLine {
-  return { id: lineId++, kind, text }
+function makeLine(kind: TerminalLine['kind'], text: string, cwd?: string): TerminalLine {
+  return { id: lineId++, kind, text, cwd }
 }
 
 let syscallLineId = 1
@@ -90,6 +91,8 @@ interface SimStore {
   version: number
   running: boolean
   ganttLog: (number | null)[]
+  /** Terminal working directory — roadmap-v3.md §1.1. Mutated only via `cd` (through CommandContext.setCwd). */
+  cwd: string
   terminalLines: TerminalLine[]
   syscallLines: SyscallLine[]
   /** Full text of the most recently run command's output, for the terminal's aria-live region — see runCommand(). */
@@ -126,6 +129,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   version: 0,
   running: true,
   ganttLog: [],
+  cwd: '/',
   syscallLines: [],
   lastAnnouncement: '',
   terminalLines: [
@@ -157,9 +161,11 @@ export const useSimStore = create<SimStore>((set, get) => ({
       return
     }
 
+    const cwdAtPrompt = get().cwd
     const ctx: CommandContext = {
       listProcesses: () => scheduler.getProcesses(),
       spawnProcess: (name) => spawnProcess(name, undefined, SHELL_PID),
+      spawnStress: (n) => spawnStressLoad(n),
       killProcess: (pid) => killProcess(pid),
       schedulerMetrics: () => scheduler.getMetrics(),
       memoryMetrics: () => {
@@ -179,6 +185,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
       fsFsck: () => filesystem.fsck(),
       fsCrashed: () => filesystem.isCrashed(),
       fsReset: () => resetFilesystem(),
+      getCwd: () => get().cwd,
+      setCwd: (path) => set({ cwd: path }),
       syncStatus: () => {
         const m = sync.getMetrics()
         return {
@@ -196,13 +204,14 @@ export const useSimStore = create<SimStore>((set, get) => ({
       networkCurl: (host) => network.curl(host),
     }
 
-    const output = executeCommand(trimmed, ctx)
-    const ok = output.every((line) => !line.isError)
-    const trace = syscallTraceFor(trimmed, ok).map((text) => ({ id: syscallLineId++, text }))
+    const { lines: output, ran } = runCommandLine(trimmed, ctx)
+    const trace = ran
+      .flatMap(({ text, ok, cwd }) => syscallTraceFor(text, ok, cwd))
+      .map((text) => ({ id: syscallLineId++, text }))
     set((s) => ({
       terminalLines: [
         ...s.terminalLines,
-        makeLine('prompt', trimmed),
+        makeLine('prompt', trimmed, cwdAtPrompt),
         ...output.map((line) => makeLine(line.isError ? 'error' : 'output', line.text)),
       ],
       syscallLines: [...s.syscallLines, ...trace].slice(-SYSCALL_LOG_LIMIT),

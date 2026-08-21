@@ -161,4 +161,6 @@ export interface TerminalLine {
   id: number
   kind: 'prompt' | 'output' | 'error'
   text: string
+  /** Working directory the command was typed in, kind:'prompt' only — see roadmap-v3.md §1.1. Historical lines keep the cwd they were actually run in, not the terminal's current one. */
+  cwd?: string
 }

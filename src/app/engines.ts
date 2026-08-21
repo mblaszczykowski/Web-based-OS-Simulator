@@ -6,7 +6,7 @@
 // trying to mirror deeply-mutated engine state into a separate reactive
 // snapshot.
 
-import { INIT_PID, type Process, type ProcessKind } from '../shared/types'
+import { INIT_PID, SHELL_PID, type Process, type ProcessKind } from '../shared/types'
 import { SchedulerEngine, createProcess } from '../scheduler/engine'
 import { MemoryEngine } from '../memory/engine'
 import { FilesystemEngine } from '../filesystem/engine'
@@ -183,6 +183,16 @@ export function spawnProcess(name: string, kind: ProcessKind = randomKind(), par
 
 export function killProcess(pid: number): boolean {
   return scheduler.kill(pid) !== undefined
+}
+
+/**
+ * Immediately spawns `count` CPU-bound processes — the terminal's `stress`
+ * command (roadmap-v3.md §1.3). Unlike the slow, throttled auto-spawner
+ * below, this exists specifically so MLFQ demotion and Clock eviction
+ * become visible within a handful of ticks instead of dozens.
+ */
+export function spawnStressLoad(count: number): Process[] {
+  return Array.from({ length: count }, () => spawnProcess(randomName(), 'cpu-bound', SHELL_PID))
 }
 
 const AUTO_SPAWN_INTERVAL = 23

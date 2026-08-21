@@ -2,7 +2,7 @@
 // (fictional) syscalls — roadmap.md §1.6. No new domain logic: this just
 // re-describes what a command already did in libc/kernel-call vocabulary.
 
-import { normalizePath as normalize } from './commands'
+import { resolvePath } from './commands'
 
 let fdCounter = 3
 function nextFd(): number {
@@ -11,10 +11,15 @@ function nextFd(): number {
   return fd
 }
 
-/** Returns the fictional syscall lines a command "made" — called after the command already ran, given whether it succeeded. */
-export function syscallTraceFor(input: string, ok: boolean): string[] {
+/**
+ * Returns the fictional syscall lines a command "made" — called after the
+ * command already ran, given whether it succeeded and the cwd it ran in
+ * (roadmap-v3.md §1.1 made paths cwd-relative, so the trace has to resolve
+ * them the same way to show the real absolute path).
+ */
+export function syscallTraceFor(input: string, ok: boolean, cwd: string): string[] {
   const [cmd, ...args] = input.trim().split(/\s+/).filter(Boolean)
-  const path = normalize(args[0])
+  const path = resolvePath(cwd, args[0])
 
   switch (cmd) {
     case 'ps':
@@ -33,6 +38,12 @@ export function syscallTraceFor(input: string, ok: boolean): string[] {
 
     case 'free':
       return ['mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, -1, 0) = 0x7f...', 'sysinfo(&info) = 0']
+
+    case 'cd':
+      return [`chdir("${path}") = ${ok ? '0' : '-1 ENOENT'}`]
+
+    case 'pwd':
+      return [`getcwd(buf, 4096) = "${cwd}"`]
 
     case 'ls': {
       const fd = nextFd()
@@ -67,7 +78,7 @@ export function syscallTraceFor(input: string, ok: boolean): string[] {
       return [`mkdir("${path}", 0755) = ${ok ? '0' : '-1'}`]
 
     case 'mv':
-      return [`rename("${path}", "${normalize(args[1])}") = ${ok ? '0' : '-1'}`]
+      return [`rename("${path}", "${resolvePath(cwd, args[1])}") = ${ok ? '0' : '-1'}`]
 
     case 'cp': {
       const fdIn = nextFd()
@@ -75,7 +86,7 @@ export function syscallTraceFor(input: string, ok: boolean): string[] {
       return ok
         ? [
             `open("${path}", O_RDONLY) = ${fdIn}`,
-            `open("${normalize(args[1])}", O_CREAT|O_WRONLY, 0644) = ${fdOut}`,
+            `open("${resolvePath(cwd, args[1])}", O_CREAT|O_WRONLY, 0644) = ${fdOut}`,
             `sendfile(${fdOut}, ${fdIn}, NULL, N) = N`,
             `close(${fdIn}) = 0`,
             `close(${fdOut}) = 0`,
