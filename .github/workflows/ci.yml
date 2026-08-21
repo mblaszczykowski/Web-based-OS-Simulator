@@ -23,6 +23,33 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Lighthouse audit (roadmap-v4.md §2.5)
+        run: |
+          npx vite preview --port 4173 &
+          npx wait-on http://localhost:4173
+          npx lighthouse http://localhost:4173 \
+            --output=json --output-path=./lighthouse-report.json \
+            --chrome-flags="--headless --no-sandbox" \
+            --only-categories=performance,accessibility,best-practices,seo
+          cat <<'SCRIPT' > /tmp/lh-summary.cjs
+          const r = require('./lighthouse-report.json')
+          const c = r.categories
+          const pct = (x) => Math.round(x.score * 100)
+          const lines = [
+            '| Category | Score |',
+            '|---|---|',
+            `| Performance | ${pct(c.performance)} |`,
+            `| Accessibility | ${pct(c.accessibility)} |`,
+            `| Best practices | ${pct(c['best-practices'])} |`,
+            `| SEO | ${pct(c.seo)} |`,
+          ]
+          require('fs').appendFileSync(process.env.GITHUB_STEP_SUMMARY, '## Lighthouse\n' + lines.join('\n') + '\n')
+          SCRIPT
+          node /tmp/lh-summary.cjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-report
+          path: lighthouse-report.json
       - uses: actions/upload-pages-artifact@v3
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         with:

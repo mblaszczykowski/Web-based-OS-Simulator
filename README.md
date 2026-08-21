@@ -4,6 +4,9 @@ An interactive, in-browser simulation of an operating system's core subsystems �
 
 **[Live demo →](#)** _(link goes live once this repo is pushed and Pages is enabled — see [Deployment](#deployment--ci))_
 
+![bundle size (gzip)](https://img.shields.io/badge/bundle_size_(gzip)-~85_kB-blue) ![lighthouse](https://img.shields.io/badge/lighthouse-runs_in_CI-4c1)
+_Bundle size is measured straight from the latest `npm run build` (JS + CSS, gzipped) — see [Tech stack](#tech-stack). A Lighthouse audit (performance/accessibility/best-practices/SEO) runs against the production build in `.github/workflows/ci.yml` on every push and is written to the job summary — not a hardcoded badge number, since this repo isn't deployed yet and a stale score would be worse than none._
+
 ![screenshot placeholder](docs/screenshot.png)
 _(add a screenshot or a ~30s GIF of the desktop here for the README — see plan.md §7)_
 
@@ -89,6 +92,8 @@ Tab-completes commands and filesystem paths (relative to the current directory),
 
 React + TypeScript, Zustand, Vite, Vitest (+ React Testing Library/jsdom for component tests) — no D3/Recharts, no backend. All visualisations (Gantt chart, RAM/disk grids, allocation strip) are hand-built CSS/flex/grid. The filesystem's "disk" persists across reloads via IndexedDB — scheduler and memory still reset on refresh, deliberately (see `plan.md` §2.5).
 
+`npm run build`'s current output is the whole app in one JS chunk + one CSS file: **261.58 kB JS / 80.28 kB gzipped**, **20.48 kB CSS / 4.35 kB gzipped** — no charting library, no UI framework, no icon font is why that number stays small as the simulator grows (roadmap-v4.md §2.5). Re-run `npm run build` yourself to see the current number for the actual code in this tree.
+
 ## State & robustness
 
 - **Window layout** (position/size/open/z-order) persists to `localStorage`, debounced on every drag/resize/focus — the same medium as terminal history, since it's UI chrome, not simulated system state.
@@ -113,7 +118,7 @@ npm run build        # production build to dist/
 
 ## Deployment & CI
 
-`.github/workflows/ci.yml` runs lint, typecheck, tests and a production build on every push/PR, and deploys `dist/` to GitHub Pages on every push to `main`. To enable it on your fork: push this repo to GitHub, then turn on **Settings → Pages → Source: GitHub Actions**.
+`.github/workflows/ci.yml` runs lint, typecheck, tests, a production build, and a Lighthouse audit (performance/accessibility/best-practices/SEO against the built `dist/`, served locally in the CI job — written to the run's job summary, and the raw JSON report uploaded as a build artifact) on every push/PR, and deploys `dist/` to GitHub Pages on every push to `main`. To enable it on your fork: push this repo to GitHub, then turn on **Settings → Pages → Source: GitHub Actions**.
 
 ## License
 
