@@ -15,6 +15,10 @@ export interface AccessResult {
   fault: boolean
   /** Frame that had to be evicted to service the fault, or null on a free-frame fill / a hit. */
   victimFrame: number | null
+  /** Whose page got evicted this access, if any — the coordinator in app/engines.ts uses this to swap it to disk. */
+  victim: { pid: number; page: number } | null
+  /** Whether the page just installed had previously been swapped out — the coordinator uses this to know to swap it back in. */
+  wasSwapped: boolean
 }
 
 let blockIdCounter = 1
@@ -26,6 +30,14 @@ let blockIdCounter = 1
  * cheaply provide. Runs a separate, independent First-Fit contiguous
  * allocator alongside it purely as a historical reference visualisation
  * (see plan.md §2.2) — it does not back the paging path at all.
+ *
+ * This engine only tracks *that* an evicted page is "swapped" (roadmap.md
+ * §2.1) via `PageTableEntry.swapped` and reports victim/wasSwapped info
+ * back from access() — it deliberately does NOT import FilesystemEngine
+ * to actually write/read the page file. That coordination lives one level
+ * up, in app/engines.ts, so memory and filesystem stay decoupled and pure
+ * (see the ADR-0004 "engines as singletons" reasoning: neither engine
+ * should know the other exists).
  */
 export class MemoryEngine {
   private frames: Frame[]
@@ -36,6 +48,7 @@ export class MemoryEngine {
 
   private pageFaultCount = 0
   private accessCount = 0
+  private swappedCount = 0
 
   constructor(config: MemoryConfig = DEFAULT_MEMORY_CONFIG) {
     this.frames = Array.from({ length: config.frameCount }, (_, index) => ({ index, owner: null }))
@@ -62,6 +75,7 @@ export class MemoryEngine {
       valid: false,
       referenced: false,
       modified: false,
+      swapped: false,
     }))
     this.pageTables.set(pid, table)
 
@@ -78,6 +92,12 @@ export class MemoryEngine {
         this.frameRefBit[frame.index] = false
       }
     }
+    // Any pages still swapped out never come back through installPage()'s
+    // decrement, so reconcile the counter here before the table (and with
+    // it, the only record of which pages were swapped) disappears. The
+    // coordinator in app/engines.ts reads getSwappedPages(pid) *before*
+    // calling this, so it can still clean up their page files on disk.
+    this.swappedCount -= this.getSwappedPages(pid).length
     this.pageTables.delete(pid)
     this.freeContiguous(pid)
     return freed
@@ -86,7 +106,9 @@ export class MemoryEngine {
   /** Simulate one memory reference by `pid` to a page in its own address space. */
   access(pid: number, page: number, isWrite = false): AccessResult {
     const table = this.pageTables.get(pid)
-    if (!table || page < 0 || page >= table.length) return { fault: false, victimFrame: null }
+    if (!table || page < 0 || page >= table.length) {
+      return { fault: false, victimFrame: null, victim: null, wasSwapped: false }
+    }
 
     this.accessCount++
     const entry = table[page]!
@@ -95,14 +117,17 @@ export class MemoryEngine {
       entry.referenced = true
       this.frameRefBit[entry.frame] = true
       if (isWrite) entry.modified = true
-      return { fault: false, victimFrame: null }
+      return { fault: false, victimFrame: null, victim: null, wasSwapped: false }
     }
 
     this.pageFaultCount++
+    const wasSwapped = entry.swapped
+    if (wasSwapped) this.swappedCount--
+
     const freeFrame = this.frames.find((f) => f.owner === null)
     if (freeFrame) {
       this.installPage(freeFrame.index, pid, entry, isWrite)
-      return { fault: true, victimFrame: null }
+      return { fault: true, victimFrame: null, victim: null, wasSwapped }
     }
 
     // Clock sweep: give every frame a second chance before evicting it.
@@ -129,16 +154,23 @@ export class MemoryEngine {
         victimEntry.valid = false
         victimEntry.frame = null
         victimEntry.referenced = false
-        // Eviction implies writing the dirty page back to its backing
-        // store — the copy that comes back in from there later starts
-        // clean again, exactly like a fresh page would.
+        // Eviction pushes the page out to disk (see the class doc — the
+        // actual write happens one level up) rather than just discarding
+        // it; the copy that comes back in later is read back from there.
         victimEntry.modified = false
+        victimEntry.swapped = true
+        this.swappedCount++
       }
     }
 
     this.installPage(victimIndex, pid, entry, isWrite)
     this.clockHand = (victimIndex + 1) % this.frames.length
-    return { fault: true, victimFrame: victimIndex }
+    return {
+      fault: true,
+      victimFrame: victimIndex,
+      victim: victimOwner && victimOwner.pid !== 0 ? { pid: victimOwner.pid, page: victimOwner.page } : null,
+      wasSwapped,
+    }
   }
 
   private installPage(frameIndex: number, pid: number, entry: PageTableEntry, isWrite: boolean): void {
@@ -148,6 +180,14 @@ export class MemoryEngine {
     entry.frame = frameIndex
     entry.referenced = true
     entry.modified = isWrite
+    entry.swapped = false
+  }
+
+  /** Pages of `pid` currently swapped out — used to clean up their page files when the process exits. */
+  getSwappedPages(pid: number): number[] {
+    const table = this.pageTables.get(pid)
+    if (!table) return []
+    return table.filter((e) => e.swapped).map((e) => e.page)
   }
 
   private firstFitAllocate(pid: number, size: number): void {
@@ -211,6 +251,7 @@ export class MemoryEngine {
       accesses: this.accessCount,
       hitRatio: this.accessCount > 0 ? 1 - this.pageFaultCount / this.accessCount : 0,
       externalFragmentation,
+      swappedPages: this.swappedCount,
     }
   }
 }

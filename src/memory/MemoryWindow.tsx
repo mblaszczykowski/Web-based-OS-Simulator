@@ -59,6 +59,12 @@ export function MemoryWindow() {
               <span className="stat-value">{Math.round(metrics.hitRatio * 100)}%</span>
             </div>
           </div>
+          <div className="field">
+            <span className="label">Swapped to /swap</span>
+            <span className="stat-value" style={{ fontSize: 15 }}>
+              {metrics.swappedPages} page(s)
+            </span>
+          </div>
         </div>
 
         <div className="mem-main">
@@ -100,6 +106,7 @@ export function MemoryWindow() {
                   <span>Valid</span>
                   <span>Ref</span>
                   <span>M</span>
+                  <span>Sw</span>
                 </div>
                 {!pageTable || pageTable.length === 0 ? (
                   <div className="ptable-row">
@@ -113,6 +120,7 @@ export function MemoryWindow() {
                       <span className={entry.valid ? 'valid-ok' : 'valid-no'}>{entry.valid ? '✓' : '✗'}</span>
                       <span>{entry.referenced ? 1 : 0}</span>
                       <span>{entry.modified ? 1 : 0}</span>
+                      <span className={entry.swapped ? 'swap-yes' : 'valid-no'}>{entry.swapped ? 'S' : '—'}</span>
                     </div>
                   ))
                 )}

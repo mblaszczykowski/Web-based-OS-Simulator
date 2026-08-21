@@ -705,6 +705,10 @@ button {
 .valid-no {
   color: var(--text-muted);
 }
+.swap-yes {
+  color: var(--warning);
+  font-weight: 700;
+}
 .alloc-panel {
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);

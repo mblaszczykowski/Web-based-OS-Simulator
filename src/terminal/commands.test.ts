@@ -42,6 +42,7 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
       externalFragmentation: 0,
       frameCount: 24,
       usedFrames: 0,
+      swappedPages: 0,
     }),
     fsList: () => ({ ok: true, entries: [] }),
     fsRead: () => ({ ok: false, error: 'not found' }),

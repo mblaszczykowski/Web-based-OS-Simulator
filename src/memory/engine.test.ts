@@ -11,14 +11,16 @@ describe('MemoryEngine — Clock (Second-Chance) replacement', () => {
     const engine = new MemoryEngine({ frameCount: 3, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 5) // pages 0..4, all invalid to start
 
-    expect(engine.access(1, 0)).toEqual({ fault: true, victimFrame: null })
-    expect(engine.access(1, 1)).toEqual({ fault: true, victimFrame: null })
-    expect(engine.access(1, 2)).toEqual({ fault: true, victimFrame: null })
-    expect(engine.access(1, 0)).toEqual({ fault: false, victimFrame: null }) // hit, refreshes its ref bit
+    expect(engine.access(1, 0)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false })
+    expect(engine.access(1, 1)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false })
+    expect(engine.access(1, 2)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false })
+    expect(engine.access(1, 0)).toEqual({ fault: false, victimFrame: null, victim: null, wasSwapped: false }) // hit, refreshes its ref bit
 
     const result = engine.access(1, 3)
     expect(result.fault).toBe(true)
     expect(result.victimFrame).toBe(0) // page 0 evicted, not 1 or 2
+    expect(result.victim).toEqual({ pid: 1, page: 0 })
+    expect(result.wasSwapped).toBe(false)
 
     const table = engine.getPageTable(1)!
     expect(table[0]).toMatchObject({ valid: false, frame: null })
@@ -72,6 +74,50 @@ describe('MemoryEngine — dirty (modified) bit', () => {
     engine.access(1, 1, false) // only 1 frame -> this evicts page 0
     expect(engine.getPageTable(1)![0]).toMatchObject({ valid: false, modified: false }) // written back, now clean
     expect(engine.getPageTable(1)![1]).toMatchObject({ valid: true, modified: false }) // fresh read-fault, clean
+  })
+})
+
+describe('MemoryEngine — swap bookkeeping (roadmap.md §2.1)', () => {
+  it('marks an evicted page swapped, then reports wasSwapped when it faults back in', () => {
+    const engine = new MemoryEngine({ frameCount: 1, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 2)
+
+    engine.access(1, 0) // installs page 0
+    expect(engine.getMetrics().swappedPages).toBe(0)
+
+    const evicting = engine.access(1, 1) // only 1 frame -> evicts page 0
+    expect(evicting.victim).toEqual({ pid: 1, page: 0 })
+    expect(engine.getPageTable(1)![0]!.swapped).toBe(true)
+    expect(engine.getMetrics().swappedPages).toBe(1)
+    expect(engine.getSwappedPages(1)).toEqual([0])
+
+    const faultingBackIn = engine.access(1, 0) // evicts page 1 this time, brings page 0 back
+    expect(faultingBackIn.wasSwapped).toBe(true)
+    expect(engine.getPageTable(1)![0]!.swapped).toBe(false) // resident again, no longer swapped
+    expect(engine.getMetrics().swappedPages).toBe(1) // page 1 is now the one swapped out
+    expect(engine.getSwappedPages(1)).toEqual([1])
+  })
+
+  it('never counts a kernel-reserved frame as a swappable victim', () => {
+    const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
+    engine.reserveKernelFrames(1)
+    engine.allocateProcess(1, 5)
+
+    for (let i = 0; i < 5; i++) {
+      const result = engine.access(1, i)
+      expect(result.victim?.pid).not.toBe(0)
+    }
+  })
+
+  it('reconciles the swapped counter when a process with swapped-out pages is freed', () => {
+    const engine = new MemoryEngine({ frameCount: 1, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 2)
+    engine.access(1, 0)
+    engine.access(1, 1) // evicts+swaps page 0
+    expect(engine.getMetrics().swappedPages).toBe(1)
+
+    engine.freeProcess(1)
+    expect(engine.getMetrics().swappedPages).toBe(0) // no leaked count now that the table is gone
   })
 })
 

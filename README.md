@@ -12,7 +12,7 @@ _(add a screenshot or a ~30s GIF of the desktop here for the README — see plan
 OS.SIM is not a playground for comparing scheduling algorithms against each other. It's a demonstration of **one well-justified system**, running continuously, that you observe and poke at the way you would a real machine — through a terminal, not a settings panel.
 
 - **Scheduler**: Multi-Level Feedback Queue (MLFQ) — the algorithm real general-purpose kernels approximate, chosen specifically because it adapts to interactive vs. batch workloads without manual tuning.
-- **Memory**: Clock (Second-Chance) page replacement — the cheap, hardware-realistic approximation of LRU that production kernels actually run — plus a First-Fit contiguous allocator shown alongside it purely as a historical reference point.
+- **Memory**: Clock (Second-Chance) page replacement — the cheap, hardware-realistic approximation of LRU that production kernels actually run — plus a First-Fit contiguous allocator shown alongside it purely as a historical reference point. Evicted pages are actually swapped to a `/swap` file on the simulated disk (and read back on the next fault) — the one place two subsystems are wired together directly, coordinated from `app/engines.ts` rather than either engine depending on the other.
 - **Filesystem**: a small inode-based filesystem with a write-ahead log, so a simulated crash mid-write can be replayed back to a consistent state on the next `fsck`.
 - **Process sync**: a classic bounded-buffer producer/consumer, guarded by a counting semaphore pair and a mutex — the one correct, synchronized mechanism by default. A "show race condition" mode exists purely to demonstrate the bug the mutex prevents, the same before/after narrative as crash → `fsck`.
 

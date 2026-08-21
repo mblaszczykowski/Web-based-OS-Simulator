@@ -15,6 +15,7 @@ export interface MemoryMetricsView {
   externalFragmentation: number
   frameCount: number
   usedFrames: number
+  swappedPages: number
 }
 
 export interface SyncStatusView {
@@ -195,7 +196,7 @@ export function executeCommand(input: string, ctx: CommandContext): CommandOutpu
     case 'free': {
       const m = ctx.memoryMetrics()
       return out(
-        `Frames: ${m.usedFrames}/${m.frameCount} used`,
+        `Frames: ${m.usedFrames}/${m.frameCount} used  Swapped: ${m.swappedPages} page(s) (see /swap)`,
         `Page faults: ${m.pageFaults}  Accesses: ${m.accesses}  Hit ratio: ${pct(m.hitRatio)}`,
         `External fragmentation (contiguous arena): ${pct(m.externalFragmentation)}`,
       )

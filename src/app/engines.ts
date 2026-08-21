@@ -55,6 +55,28 @@ function randomKind(): ProcessKind {
   return Math.random() < 0.55 ? 'interactive' : 'cpu-bound'
 }
 
+// Swap-to-disk coordinator (roadmap.md §2.1) — the first real integration
+// between memory and filesystem. Deliberately lives here, one level above
+// both engines, rather than as a dependency either engine takes on the
+// other: MemoryEngine only tracks *that* a page is swapped
+// (PageTableEntry.swapped) and reports victim/wasSwapped info back from
+// access(); this module is what actually turns that into a real file on
+// the simulated disk. Same ADR-0004 reasoning as everywhere else in this
+// file — engines stay pure singletons that don't know about each other.
+const SWAP_PAGE_CONTENT = 'x'.repeat(60) // ~1 block at the default 64-byte block size — one swapped page, one disk block
+
+function swapPath(pid: number, page: number): string {
+  return `/swap/${pid}-${page}.swp`
+}
+
+function swapOut(pid: number, page: number): void {
+  filesystem.write(swapPath(pid, page), SWAP_PAGE_CONTENT)
+}
+
+function swapIn(pid: number, page: number): void {
+  filesystem.delete(swapPath(pid, page))
+}
+
 // SchedulerEngine emits `process:terminated` exactly once per process,
 // from the single choke point where its state actually flips to
 // TERMINATED (kill() or the natural-completion branch of tick()) — so
@@ -64,6 +86,9 @@ function randomKind(): ProcessKind {
 // scheduler and memory stay decoupled through it, not through this
 // module knowing both engines' internals.
 simBus.on('process:terminated', ({ pid }) => {
+  // Read the swapped pages *before* freeProcess() drops the page table —
+  // it's the only record of which pages still have a page file to clean up.
+  for (const page of memory.getSwappedPages(pid)) swapIn(pid, page)
   memory.freeProcess(pid)
 })
 
@@ -126,6 +151,8 @@ export function stepSimulation() {
     const access = memory.access(running.pid, page, isWrite)
     if (access.fault) {
       simBus.emit('memory:page-fault', { pid: running.pid, page, victimFrame: access.victimFrame })
+      if (access.victim) swapOut(access.victim.pid, access.victim.page)
+      if (access.wasSwapped) swapIn(running.pid, page)
     }
   }
 

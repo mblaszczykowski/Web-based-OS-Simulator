@@ -58,6 +58,8 @@ export interface PageTableEntry {
   valid: boolean
   referenced: boolean
   modified: boolean
+  /** Evicted and currently backed by a page file on disk (roadmap.md §2.1) rather than just discarded. */
+  swapped: boolean
 }
 
 export interface Frame {
