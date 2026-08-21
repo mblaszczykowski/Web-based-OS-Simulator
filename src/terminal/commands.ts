@@ -1,4 +1,5 @@
 import type { JournalEntry, Process } from '../shared/types'
+import { rwxTriplet } from '../filesystem/engine'
 
 export interface SchedulerMetricsView {
   completed: number
@@ -50,7 +51,9 @@ export interface CommandContext {
   contProcess(pid: number): boolean
   schedulerMetrics(): SchedulerMetricsView
   memoryMetrics(): MemoryMetricsView
-  fsList(path: string): { ok: true; entries: { name: string; type: string }[] } | { ok: false; error: string }
+  fsList(
+    path: string,
+  ): { ok: true; entries: { name: string; type: string; mode?: number; size?: number }[] } | { ok: false; error: string }
   fsRead(path: string): { ok: true; content: string } | { ok: false; error: string }
   fsCreate(path: string): { ok: true } | { ok: false; error: string }
   fsWrite(path: string, text: string): { ok: true } | { ok: false; error: string }
@@ -59,6 +62,7 @@ export interface CommandContext {
   fsMove(src: string, dest: string): { ok: true } | { ok: false; error: string }
   fsCopy(src: string, dest: string): { ok: true } | { ok: false; error: string }
   fsLink(target: string, link: string): { ok: true } | { ok: false; error: string }
+  fsChmod(path: string, mode: number): { ok: true } | { ok: false; error: string }
   fsCrash(): void
   fsFsck(): { replayed: JournalEntry[] }
   fsCrashed(): boolean
@@ -84,7 +88,9 @@ const HELP_TEXT = [
   '  free                memory usage summary',
   '  cd [dir]             change working directory (no arg -> /)',
   '  pwd                  print working directory',
-  '  ls [path]           list a directory (default: cwd), supports * wildcards',
+  '  ls [-l] [path]        list a directory (default: cwd), supports * wildcards',
+  '                        -l shows permissions (rwx) and size',
+  '  chmod <mode> <file>   set permissions (1-3 octal digits, e.g. 644 or 6)',
   '  cat <file>           print a file',
   '  write <file> <text>  append text to a file (creates it if missing)',
   '  touch <file>          create an empty file (no-op if it already exists)',
@@ -128,6 +134,7 @@ export const COMMAND_NAMES = [
   'mv',
   'cp',
   'ln',
+  'chmod',
   'rm',
   'grep',
   'crash',
@@ -172,8 +179,29 @@ export function resolvePath(cwd: string, pathArg: string | undefined): string {
   return collapseDots(base)
 }
 
+/**
+ * Parses a chmod mode argument. Accepts 1-3 octal digits, matching the
+ * familiar Unix `chmod 644` shape — but since this simulator has exactly
+ * one user, only the OWNER (leftmost) digit is meaningful; `chmod 644` and
+ * `chmod 6` do exactly the same thing here. Returns null for anything that
+ * isn't 1-3 digits in 0-7.
+ */
+function parseMode(input: string | undefined): number | null {
+  if (!input || !/^[0-7]{1,3}$/.test(input)) return null
+  return Number(input[0])
+}
+
 function pct(ratio: number): string {
   return `${Math.round(ratio * 100)}%`
+}
+
+/** One `ls -l` row. Directories don't carry a real Inode (only files do), so they're shown as always-traversable `drwx` — this simulator never restricts directory access, only file content (roadmap-v3.md §2.3). */
+function formatLongEntry(entry: { name: string; type: string; mode?: number; size?: number }): string {
+  const isDir = entry.type === 'dir'
+  const kind = isDir ? 'd' : '-'
+  const rwx = rwxTriplet(isDir ? 0b111 : entry.mode ?? 0)
+  const size = String(entry.size ?? 0).padStart(6)
+  return `${kind}${rwx}  ${size}  ${isDir ? `${entry.name}/` : entry.name}`
 }
 
 /** Splits on whitespace but keeps the tail (e.g. `write`'s text) as one chunk. */
@@ -194,6 +222,15 @@ function splitPattern(cwd: string, pathArg: string): { dir: string; pattern: str
   const dir = idx <= 0 ? '/' : normalized.slice(0, idx)
   const pattern = normalized.slice(idx + 1)
   return { dir, pattern }
+}
+
+function parentDir(absolutePath: string): string {
+  const idx = absolutePath.lastIndexOf('/')
+  return idx <= 0 ? '/' : absolutePath.slice(0, idx)
+}
+
+function baseName(absolutePath: string): string {
+  return absolutePath.slice(absolutePath.lastIndexOf('/') + 1)
 }
 
 function out(...lines: string[]): CommandOutputLine[] {
@@ -301,20 +338,23 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
 
     case 'ls': {
       const cwd = ctx.getCwd()
-      const render = (entries: { name: string; type: string }[]): CommandOutputLine[] => {
+      const longFormat = args.includes('-l')
+      const pathArg = args.find((a) => a !== '-l')
+      const render = (entries: { name: string; type: string; mode?: number; size?: number }[]): CommandOutputLine[] => {
+        if (longFormat) return out(...entries.map((e) => formatLongEntry(e)))
         const names = entries.map((e) => (e.type === 'dir' ? `${e.name}/` : e.name))
         return piped ? out(...names) : out(names.join('  '))
       }
-      if (args[0]?.includes('*')) {
-        const { dir, pattern } = splitPattern(cwd, args[0])
+      if (pathArg?.includes('*')) {
+        const { dir, pattern } = splitPattern(cwd, pathArg)
         const result = ctx.fsList(dir)
         if (!result.ok) return err(result.error)
         const re = globToRegExp(pattern)
         const matched = result.entries.filter((e) => re.test(e.name))
-        if (matched.length === 0) return err(`ls: cannot access '${args[0]}': No such file or directory`)
+        if (matched.length === 0) return err(`ls: cannot access '${pathArg}': No such file or directory`)
         return render(matched)
       }
-      const result = ctx.fsList(resolvePath(cwd, args[0]))
+      const result = ctx.fsList(resolvePath(cwd, pathArg))
       if (!result.ok) return err(result.error)
       if (result.entries.length === 0) return []
       return render(result.entries)
@@ -359,7 +399,15 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
     case 'touch': {
       if (!args[0]) return err('touch: missing file operand')
       const path = resolvePath(ctx.getCwd(), args[0])
-      if (ctx.fsRead(path).ok) return out(`Touched ${path}.`) // already exists — real touch just bumps mtime, so this is a no-op
+      // Existence is checked via the parent directory listing, not
+      // fsRead(path).ok — fsRead now enforces the read permission bit
+      // (roadmap-v3.md §2.3), and a write-only existing file (real `touch`
+      // needs no read access, just to bump mtime) must still no-op here
+      // rather than being mistaken for "missing" and hitting fsCreate's
+      // "already exists" error instead.
+      const siblings = ctx.fsList(parentDir(path))
+      const alreadyExists = siblings.ok && siblings.entries.some((e) => e.name === baseName(path) && e.type === 'file')
+      if (alreadyExists) return out(`Touched ${path}.`) // already exists — real touch just bumps mtime, so this is a no-op
       const result = ctx.fsCreate(path)
       return result.ok ? out(`Touched ${path}.`) : err(result.error)
     }
@@ -369,6 +417,15 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       const path = resolvePath(ctx.getCwd(), args[0])
       const result = ctx.fsMkdir(path)
       return result.ok ? out(`Created directory ${path}.`) : err(result.error)
+    }
+
+    case 'chmod': {
+      if (args.length < 2) return err('chmod: usage: chmod <mode> <file>  (mode: 1-3 octal digits, e.g. 644 or 6)')
+      const mode = parseMode(args[0])
+      if (mode === null) return err('chmod: invalid mode — expected 1-3 octal digits (0-7)')
+      const path = resolvePath(ctx.getCwd(), args[1])
+      const result = ctx.fsChmod(path, mode)
+      return result.ok ? out(`Changed mode of ${path} to ${rwxTriplet(mode)} (${mode}).`) : err(result.error)
     }
 
     case 'mv': {

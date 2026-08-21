@@ -3,6 +3,7 @@ import { WindowFrame } from '../app/WindowFrame'
 import { FilesystemIcon, FolderIcon, FileIcon, WarningIcon } from '../app/icons'
 import { useSimStore } from '../app/store'
 import { filesystem } from '../app/engines'
+import { rwxTriplet } from './engine'
 import { colorForPid, labelColorForPid } from '../app/colors'
 
 function TreeNode({ entry, depth }: { entry: DirEntry; depth: number }) {
@@ -63,18 +64,20 @@ export function FilesystemWindow() {
           <div className="field">
             <span className="label">Inodes &mdash; {inodes.length}</span>
             <div className="ptable-wrap" style={{ maxHeight: 120 }}>
-              <div className="ptable-row head" style={{ gridTemplateColumns: '40px 56px 46px 40px' }}>
+              <div className="ptable-row head" style={{ gridTemplateColumns: '40px 56px 46px 40px 50px' }}>
                 <span>ID</span>
                 <span>Size</span>
                 <span>Blk</span>
                 <span>Lnk</span>
+                <span>Mode</span>
               </div>
               {inodes.map((inode) => (
-                <div className="ptable-row" style={{ gridTemplateColumns: '40px 56px 46px 40px' }} key={inode.id}>
+                <div className="ptable-row" style={{ gridTemplateColumns: '40px 56px 46px 40px 50px' }} key={inode.id}>
                   <span>{inode.id}</span>
                   <span>{inode.size}B</span>
                   <span>{inode.blockIds.length}</span>
                   <span>{inode.links}</span>
+                  <span>{rwxTriplet(inode.mode)}</span>
                 </div>
               ))}
             </div>

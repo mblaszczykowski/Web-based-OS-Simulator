@@ -246,6 +246,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       fsMove: (src, dest) => filesystem.move(src, dest),
       fsCopy: (src, dest) => filesystem.copy(src, dest),
       fsLink: (target, link) => filesystem.link(target, link),
+      fsChmod: (path, mode) => filesystem.chmod(path, mode),
       fsCrash: () => filesystem.crash(),
       fsFsck: () => filesystem.fsck(),
       fsCrashed: () => filesystem.isCrashed(),

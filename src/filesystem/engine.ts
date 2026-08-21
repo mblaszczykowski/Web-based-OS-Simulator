@@ -20,8 +20,24 @@ interface InternalInode extends Inode {
   content: string
 }
 
+// File permissions (roadmap-v3.md §2.3) — a single rwx triplet per inode,
+// since this simulator has exactly one user (`guest`); there's no
+// owner/group/other distinction to model. MODE_EXEC is tracked and shown
+// (ls -l, chmod) for a realistic-looking mode string, but nothing in this
+// filesystem ever "executes" a file from disk — `run <name>` spawns a
+// scheduler process unrelated to any inode — so it's honestly inert,
+// exactly like a regular file's +x bit on a real system that never runs it.
+export const MODE_READ = 0b100
+export const MODE_WRITE = 0b010
+export const MODE_EXEC = 0b001
+export const DEFAULT_FILE_MODE = MODE_READ | MODE_WRITE // rw- : matches a typical default umask's owner bits
+
+export function rwxTriplet(mode: number): string {
+  return `${mode & MODE_READ ? 'r' : '-'}${mode & MODE_WRITE ? 'w' : '-'}${mode & MODE_EXEC ? 'x' : '-'}`
+}
+
 /** Bumped whenever the shape of FilesystemState changes, so a persisted disk from an older build gets discarded instead of misread. */
-export const FS_SCHEMA_VERSION = 1
+export const FS_SCHEMA_VERSION = 2
 
 export interface FilesystemState {
   schemaVersion: number
@@ -128,18 +144,31 @@ export class FilesystemEngine {
     return { ok: true }
   }
 
+  /** Sets the rwx mode on `path`'s inode — roadmap-v3.md §2.3. `mode` must already be a validated 0-7 bitmask (see commands.ts's parseMode). */
+  chmod(path: string, mode: number): FsResult {
+    const crashedError = this.rejectIfCrashed()
+    if (crashedError) return crashedError
+    if (this.findDirEntry(path)) return { ok: false, error: `chmod: ${path}: Is a directory` }
+    if (!this.findFileEntry(path)) return { ok: false, error: `chmod: ${path}: No such file or directory` }
+
+    this.commitJournalEntry('chmod', { path, content: String(mode), touchedPath: path })
+    return { ok: true }
+  }
+
   copy(srcPath: string, destPath: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
     if (this.findDirEntry(srcPath)) return { ok: false, error: `cp: ${srcPath}: Is a directory` }
     const srcEntry = this.findFileEntry(srcPath)
     if (!srcEntry) return { ok: false, error: `cp: ${srcPath}: No such file or directory` }
+    const srcInode = this.inodes.get(srcEntry.inode!)!
+    if (!(srcInode.mode & MODE_READ)) return { ok: false, error: `cp: ${srcPath}: Permission denied` }
     if (this.findFileEntry(destPath) || this.findDirEntry(destPath)) {
       return { ok: false, error: `cp: ${destPath}: already exists` }
     }
     if (this.ancestorIsFile(destPath)) return { ok: false, error: `cp: ${destPath}: Not a directory` }
 
-    const content = this.inodes.get(srcEntry.inode!)!.content
+    const content = srcInode.content
     const neededBlocks = content.length === 0 ? 0 : Math.ceil(content.length / this.config.blockSizeBytes)
     const freeBlocks = this.blocks.filter((b) => b.owner === null).length
     if (neededBlocks > freeBlocks) return { ok: false, error: `cp: ${destPath}: No space left on device` }
@@ -148,7 +177,9 @@ export class FilesystemEngine {
     return { ok: true }
   }
 
-  list(path = '/'): { ok: true; entries: { name: string; type: DirEntry['type'] }[] } | { ok: false; error: string } {
+  list(
+    path = '/',
+  ): { ok: true; entries: { name: string; type: DirEntry['type']; mode?: number; size?: number }[] } | { ok: false; error: string } {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
     let dir: DirEntry
@@ -157,7 +188,13 @@ export class FilesystemEngine {
     } catch {
       return { ok: false, error: `ls: ${path}: No such file or directory` }
     }
-    const entries = (dir.children ?? []).map((c) => ({ name: c.name, type: c.type }))
+    const entries = (dir.children ?? []).map((c) => {
+      if (c.type === 'file') {
+        const inode = this.inodes.get(c.inode!)
+        return { name: c.name, type: c.type, mode: inode?.mode, size: inode?.size }
+      }
+      return { name: c.name, type: c.type }
+    })
     return { ok: true, entries }
   }
 
@@ -167,6 +204,7 @@ export class FilesystemEngine {
     const entry = this.findFileEntry(path)
     if (!entry) return { ok: false, error: `cat: ${path}: No such file or directory` }
     const inode = this.inodes.get(entry.inode!)!
+    if (!(inode.mode & MODE_READ)) return { ok: false, error: `cat: ${path}: Permission denied` }
     return { ok: true, content: inode.content }
   }
 
@@ -215,6 +253,17 @@ export class FilesystemEngine {
     }
     if (op === 'create' && this.findFileEntry(path)) {
       return { ok: false, error: `create: ${path}: already exists` }
+    }
+    // Permission check (roadmap-v3.md §2.3) — only meaningful against an
+    // EXISTING file: writing a brand-new one has nothing to deny yet (it
+    // gets DEFAULT_FILE_MODE once applyCreate() actually makes it), and
+    // rm's existence check above guarantees the file is there by this point.
+    if (op === 'write' || op === 'delete') {
+      const existing = this.findFileEntry(path)
+      if (existing) {
+        const inode = this.inodes.get(existing.inode!)!
+        if (!(inode.mode & MODE_WRITE)) return { ok: false, error: `${op === 'write' ? 'write' : 'rm'}: ${path}: Permission denied` }
+      }
     }
     if (op === 'write' && this.growthExceedsFreeSpace(path, content ?? '')) {
       return { ok: false, error: `write: ${path}: No space left on device` }
@@ -273,6 +322,8 @@ export class FilesystemEngine {
         return this.applyCopy(path, content)
       case 'link':
         return this.applyLink(path, target!)
+      case 'chmod':
+        return this.applyChmod(path, content)
       default: {
         // Exhaustiveness check: a future JournalOp member missing a case
         // above fails to compile here. At runtime this only fires for an
@@ -322,6 +373,16 @@ export class FilesystemEngine {
     inode.links++
   }
 
+  private applyChmod(path: string, modeStr: string): void {
+    const fileEntry = this.findFileEntry(path)
+    if (!fileEntry) return
+    const inode = this.inodes.get(fileEntry.inode!)
+    if (!inode) return
+    const mode = Number(modeStr)
+    if (Number.isNaN(mode)) return
+    inode.mode = mode
+  }
+
   private applyCopy(destPath: string, content: string): void {
     this.applyCreate(destPath)
     const fileEntry = this.findFileEntry(destPath)
@@ -349,7 +410,14 @@ export class FilesystemEngine {
     const name = segments.pop()
     if (!name) return
     const dir = this.resolveDir(segments, true)
-    const inode: InternalInode = { id: this.nextInodeId++, size: 0, blockIds: [], links: 1, content: '' }
+    const inode: InternalInode = {
+      id: this.nextInodeId++,
+      size: 0,
+      blockIds: [],
+      links: 1,
+      content: '',
+      mode: DEFAULT_FILE_MODE,
+    }
     this.inodes.set(inode.id, inode)
     dir.children!.push({ name, type: 'file', inode: inode.id })
   }
@@ -502,7 +570,7 @@ export class FilesystemEngine {
   }
 
   getInodes(): Inode[] {
-    return [...this.inodes.values()].map(({ id, size, blockIds, links }) => ({ id, size, blockIds, links }))
+    return [...this.inodes.values()].map(({ id, size, blockIds, links, mode }) => ({ id, size, blockIds, links, mode }))
   }
 
   getJournal(): JournalEntry[] {

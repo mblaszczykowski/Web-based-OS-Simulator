@@ -52,8 +52,12 @@ export function syscallTraceFor(input: string, ok: boolean, cwd: string): string
 
     case 'ls': {
       const fd = nextFd()
+      // args[0] can be `-l` — the generic `path` above (built from args[0]
+      // unconditionally) would resolve that flag as if it were a
+      // filename, so this recomputes it from the first non-flag argument.
+      const lsPath = resolvePath(cwd, args.find((a) => a !== '-l'))
       return [
-        `openat(AT_FDCWD, "${path}", O_DIRECTORY) = ${ok ? fd : -1}`,
+        `openat(AT_FDCWD, "${lsPath}", O_DIRECTORY) = ${ok ? fd : -1}`,
         ...(ok ? [`getdents64(${fd}, ...) = N`, `close(${fd}) = 0`] : []),
       ]
     }
@@ -101,6 +105,10 @@ export function syscallTraceFor(input: string, ok: boolean, cwd: string): string
 
     case 'ln':
       return [`link("${path}", "${resolvePath(cwd, args[1])}") = ${ok ? '0' : '-1'}`]
+
+    case 'chmod':
+      // args[0] here is the MODE, not a path — the generic `path` above is meaningless for this command.
+      return [`chmod("${resolvePath(cwd, args[1])}", 0${args[0] ?? '?'}) = ${ok ? '0' : '-1'}`]
 
     case 'rm':
       return [`unlink("${path}") = ${ok ? '0' : '-1'}`]

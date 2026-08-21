@@ -58,6 +58,7 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     fsMove: () => ({ ok: true }),
     fsCopy: () => ({ ok: true }),
     fsLink: () => ({ ok: true }),
+    fsChmod: () => ({ ok: true }),
     fsCrash: () => {},
     fsFsck: () => ({ replayed: [] }),
     fsCrashed: () => false,
@@ -187,12 +188,26 @@ describe('executeCommand', () => {
 
   it('touch creates a missing file but no-ops (not an error) if it already exists', () => {
     const fsCreate = vi.fn(() => ({ ok: true as const }))
-    const ctx = makeContext({ fsRead: () => ({ ok: false, error: 'nope' }), fsCreate })
+    const ctx = makeContext({ fsList: () => ({ ok: true, entries: [] }), fsCreate })
     expect(executeCommand('touch new.txt', ctx)).toEqual([{ text: 'Touched /new.txt.' }])
     expect(fsCreate).toHaveBeenCalledWith('/new.txt')
 
-    const ctxExisting = makeContext({ fsRead: () => ({ ok: true, content: 'x' }), fsCreate })
+    const ctxExisting = makeContext({
+      fsList: () => ({ ok: true, entries: [{ name: 'existing.txt', type: 'file' }] }),
+      fsCreate,
+    })
     expect(executeCommand('touch existing.txt', ctxExisting)).toEqual([{ text: 'Touched /existing.txt.' }])
+  })
+
+  it('touch no-ops on an existing file even if it is unreadable (permission gates read, not existence)', () => {
+    const fsCreate = vi.fn(() => ({ ok: true as const }))
+    const ctx = makeContext({
+      fsList: () => ({ ok: true, entries: [{ name: 'secret.txt', type: 'file', mode: 0b010 }] }),
+      fsRead: () => ({ ok: false, error: 'cat: /secret.txt: Permission denied' }),
+      fsCreate,
+    })
+    expect(executeCommand('touch secret.txt', ctx)).toEqual([{ text: 'Touched /secret.txt.' }])
+    expect(fsCreate).not.toHaveBeenCalled()
   })
 
   it('mkdir normalizes the path and surfaces fs errors', () => {
@@ -232,6 +247,47 @@ describe('executeCommand', () => {
   it('ln surfaces fs errors verbatim', () => {
     const ctx = makeContext({ fsLink: () => ({ ok: false, error: 'ln: /b.txt: already exists' }) })
     expect(executeCommand('ln a.txt b.txt', ctx)).toEqual([{ text: 'ln: /b.txt: already exists', isError: true }])
+  })
+
+  describe('chmod / ls -l (roadmap-v3.md §2.3)', () => {
+    it('accepts 1 or 3 octal digits, using only the leftmost as the effective mode', () => {
+      const fsChmod = vi.fn(() => ({ ok: true as const }))
+      const ctx = makeContext({ fsChmod })
+      executeCommand('chmod 4 a.txt', ctx)
+      expect(fsChmod).toHaveBeenCalledWith('/a.txt', 4)
+      executeCommand('chmod 644 b.txt', ctx)
+      expect(fsChmod).toHaveBeenCalledWith('/b.txt', 6)
+    })
+
+    it('rejects a malformed mode or a missing argument', () => {
+      expect(executeCommand('chmod 8 a.txt', makeContext())[0]).toMatchObject({ isError: true })
+      expect(executeCommand('chmod rw a.txt', makeContext())[0]).toMatchObject({ isError: true })
+      expect(executeCommand('chmod 6', makeContext())[0]).toMatchObject({ isError: true })
+    })
+
+    it('surfaces fs errors verbatim', () => {
+      const ctx = makeContext({ fsChmod: () => ({ ok: false, error: 'chmod: /a.txt: Is a directory' }) })
+      expect(executeCommand('chmod 6 a.txt', ctx)).toEqual([{ text: 'chmod: /a.txt: Is a directory', isError: true }])
+    })
+
+    it('ls -l shows one row per entry with a real rwx string and size, directories always rwx', () => {
+      const ctx = makeContext({
+        fsList: () => ({
+          ok: true,
+          entries: [
+            { name: 'secret.txt', type: 'file', mode: 0b100, size: 12 },
+            { name: 'notes.txt', type: 'file', mode: 0b110, size: 5 },
+            { name: 'sub', type: 'dir' },
+          ],
+        }),
+      })
+      const lines = texts('ls -l', ctx)
+      expect(lines).toEqual([
+        '-r--      12  secret.txt',
+        '-rw-       5  notes.txt',
+        'drwx       0  sub/',
+      ])
+    })
   })
 
   it('ls with a wildcard filters entries by glob', () => {

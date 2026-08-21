@@ -103,6 +103,8 @@ export interface Inode {
   size: number
   blockIds: number[]
   links: number
+  /** rwx permission bits for this single-user simulator's one "owner" — roadmap-v3.md §2.3. See filesystem/engine.ts's MODE_* constants. */
+  mode: number
 }
 
 export interface DiskBlock {
@@ -111,7 +113,7 @@ export interface DiskBlock {
   owner: number | null
 }
 
-export type JournalOp = 'create' | 'write' | 'delete' | 'mkdir' | 'move' | 'copy' | 'link'
+export type JournalOp = 'create' | 'write' | 'delete' | 'mkdir' | 'move' | 'copy' | 'link' | 'chmod'
 
 export interface JournalEntry {
   id: number

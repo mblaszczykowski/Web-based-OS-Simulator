@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { FilesystemEngine, type FilesystemState } from './engine'
+import { FilesystemEngine, rwxTriplet, type FilesystemState } from './engine'
 import type { JournalOp } from '../shared/types'
 
 describe('FilesystemEngine — create / write / read / delete', () => {
@@ -271,6 +271,50 @@ describe('FilesystemEngine — ln (hard links)', () => {
     expect(fs.link('/dir', '/dir2').ok).toBe(false)
     expect(fs.link('/nope.txt', '/x.txt').ok).toBe(false)
     expect(fs.link('/a.txt', '/b.txt').ok).toBe(false) // destination already exists
+  })
+})
+
+describe('FilesystemEngine — chmod / permissions (roadmap-v3.md §2.3)', () => {
+  it('a new file defaults to rw- and is actually readable/writable/deletable', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hi')
+    expect(fs.getInodes()[0]!.mode).toBe(0b110)
+    expect(rwxTriplet(fs.getInodes()[0]!.mode)).toBe('rw-')
+  })
+
+  it('removing the write bit actually rejects write and rm, not just cosmetically', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hi')
+    expect(fs.chmod('/a.txt', 0b100)).toEqual({ ok: true }) // r-- : read-only
+
+    expect(fs.write('/a.txt', ' more')).toEqual({ ok: false, error: 'write: /a.txt: Permission denied' })
+    expect(fs.delete('/a.txt')).toEqual({ ok: false, error: 'rm: /a.txt: Permission denied' })
+    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hi' }) // read still works — only w was removed
+
+    // and it's a real, reversible mode change, not a one-way lock
+    expect(fs.chmod('/a.txt', 0b110)).toEqual({ ok: true })
+    expect(fs.write('/a.txt', ' more')).toEqual({ ok: true })
+    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hi more' })
+  })
+
+  it('removing the read bit rejects cat and cp (as the source), independent of the write bit', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'secret')
+    fs.chmod('/a.txt', 0b010) // -w- : write-only, unreadable
+
+    expect(fs.read('/a.txt')).toEqual({ ok: false, error: 'cat: /a.txt: Permission denied' })
+    expect(fs.copy('/a.txt', '/b.txt')).toEqual({ ok: false, error: 'cp: /a.txt: Permission denied' })
+    expect(fs.write('/a.txt', '!')).toEqual({ ok: true }) // write bit is independent and still present
+  })
+
+  it('rejects chmod on a directory or a missing path, and a malformed mode string', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.mkdir('/dir')
+    fs.write('/a.txt', 'x')
+
+    expect(fs.chmod('/dir', 0o7).ok).toBe(false)
+    expect(fs.chmod('/nope.txt', 0o6).ok).toBe(false)
+    expect(fs.chmod('/a.txt', 6)).toEqual({ ok: true }) // sanity: a valid call still works
   })
 })
 
