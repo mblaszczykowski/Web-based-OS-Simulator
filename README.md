@@ -11,10 +11,10 @@ _(add a screenshot or a ~30s GIF of the desktop here for the README — see plan
 
 OS.SIM is not a playground for comparing scheduling algorithms against each other. It's a demonstration of **one well-justified system**, running continuously, that you observe and poke at the way you would a real machine — through a terminal, not a settings panel.
 
-- **Scheduler**: Multi-Level Feedback Queue (MLFQ) — the algorithm real general-purpose kernels approximate, chosen specifically because it adapts to interactive vs. batch workloads without manual tuning.
+- **Scheduler**: Multi-Level Feedback Queue (MLFQ) — the algorithm real general-purpose kernels approximate, chosen specifically because it adapts to interactive vs. batch workloads without manual tuning. Its window can export the current run's full Gantt history and metrics as a CSV.
 - **Memory**: Clock (Second-Chance) page replacement — the cheap, hardware-realistic approximation of LRU that production kernels actually run — plus a First-Fit contiguous allocator shown alongside it purely as a historical reference point. Evicted pages are actually swapped to a `/swap` file on the simulated disk (and read back on the next fault) — the one place two subsystems are wired together directly, coordinated from `app/engines.ts` rather than either engine depending on the other.
 - **Filesystem**: a small inode-based filesystem with a write-ahead log, so a simulated crash mid-write can be replayed back to a consistent state on the next `fsck`.
-- **Process sync**: a classic bounded-buffer producer/consumer, guarded by a counting semaphore pair and a mutex — the one correct, synchronized mechanism by default. A "show race condition" mode exists purely to demonstrate the bug the mutex prevents, the same before/after narrative as crash → `fsck`. A second tab in the same window extends this into **deadlock detection**: a scripted circular-wait scenario (two processes, two resources) drives a real wait-for-graph DFS cycle detector, with a resource-allocation graph and a "break the deadlock" resolution step.
+- **Process sync**: a classic bounded-buffer producer/consumer, guarded by a counting semaphore pair and a mutex — the one correct, synchronized mechanism by default. A "show race condition" mode exists purely to demonstrate the bug the mutex prevents, the same before/after narrative as crash → `fsck`. A second tab extends this into **deadlock detection**: a scripted circular-wait scenario (two processes, two resources) drives a real wait-for-graph DFS cycle detector, with a resource-allocation graph and a "break the deadlock" resolution step. A third tab adds **deadlock avoidance** — Banker's Algorithm over Silberschatz's own 5-process/3-resource worked example, running the safety algorithm before granting any request instead of detecting trouble after the fact.
 - **Network**: two simulated hosts and a pure packet-flow visualisation — `ping`/`curl` in the terminal launch packets that animate across a fixed link over a few ticks. No real TCP/IP stack or sockets, by design (plan.md §3).
 
 No algorithm picker, no "add process" button. Workload is generated automatically and through the terminal (`run <name>`), the same way you'd interact with a real shell.
@@ -34,7 +34,7 @@ src/
   scheduler/    MLFQ engine + Gantt chart window        (pure logic + React)
   memory/       Clock paging + First-Fit engine + window
   filesystem/   inode fs + journal/WAL engine + window
-  sync/         bounded-buffer producer/consumer + deadlock detection, engine + window
+  sync/         bounded-buffer producer/consumer + deadlock detection/avoidance, engine + window
   network/      packet-flow visualisation engine + window
   terminal/     command parser, terminal window, syscall trace window
   shared/       cross-module types + a small typed event bus
@@ -51,15 +51,22 @@ State management is deliberately thin: the Zustand store (`src/app/store.ts`) ho
 ps                    list processes
 top                   live scheduler summary
 run <name>            spawn a new process
+stress [n]            spawn n (default 6) CPU-bound processes at once
 kill <pid>            terminate a process
+kill -STOP <pid>      pause a process (SIGSTOP) without terminating it
+kill -CONT <pid>      resume a stopped process (SIGCONT)
 free                  memory usage summary
-ls [path]             list a directory (default /), supports * wildcards
+cd [dir]              change working directory (no arg -> /)
+pwd                   print working directory
+ls [-l] [path]        list a directory (default: cwd), supports * wildcards
 cat <file>            print a file
 write <file> <text>   append text to a file (creates it if missing)
 touch <file>          create an empty file (no-op if it already exists)
 mkdir <dir>           create a directory
 mv <src> <dest>       move/rename a file
 cp <src> <dest>       copy a file
+ln <target> <link>    create a hard link (shares content with target)
+chmod <mode> <file>   set permissions (1-3 octal digits, e.g. 644 or 6)
 rm <file>             delete a file, supports * wildcards
 crash                 simulate a power loss mid-write
 fsck                  replay the journal and recover the filesystem
@@ -72,13 +79,22 @@ clear                 clear the screen
 help                  show this message
 ```
 
+Paths are relative to the current directory unless they start with `/`. Commands chain with `;` (always run the next), `&&` (only on success), and pipe through `|` (only `grep <pattern>` is a supported filter) — e.g. `ls | grep .log` or `mkdir /tmp && write /tmp/x.txt hi`. This is composition of existing commands, not a real shell scripting language (no variables, loops, or conditionals).
+
 Every command also appends a line to the **syscall trace** window — a fictional but realistic `open()`/`read()`/`execve()`-style log, purely for flavour (no new domain logic — it's just a relabeling of what the command already did).
 
-Tab-completes commands and filesystem paths, and persists command history to `localStorage` across reloads — the one piece of state that's *not* wiped on refresh (see [Model trwałości](plan.md#25-model-trwałości-i-restart)).
+Tab-completes commands and filesystem paths (relative to the current directory), and persists command history to `localStorage` across reloads — one of a small set of pieces of state that are *not* wiped on refresh (see [Model trwałości](plan.md#25-model-trwałości-i-restart) and "State & robustness" below).
 
 ## Tech stack
 
-React + TypeScript, Zustand, Vite, Vitest — no D3/Recharts, no backend. All visualisations (Gantt chart, RAM/disk grids, allocation strip) are hand-built CSS/flex/grid. The filesystem's "disk" persists across reloads via IndexedDB — scheduler and memory still reset on refresh, deliberately (see `plan.md` §2.5).
+React + TypeScript, Zustand, Vite, Vitest (+ React Testing Library/jsdom for component tests) — no D3/Recharts, no backend. All visualisations (Gantt chart, RAM/disk grids, allocation strip) are hand-built CSS/flex/grid. The filesystem's "disk" persists across reloads via IndexedDB — scheduler and memory still reset on refresh, deliberately (see `plan.md` §2.5).
+
+## State & robustness
+
+- **Window layout** (position/size/open/z-order) persists to `localStorage`, debounced on every drag/resize/focus — the same medium as terminal history, since it's UI chrome, not simulated system state.
+- **Cross-tab consistency**: opening the app in two tabs no longer means one silently overwrites the other's disk on the next save. Tabs announce a successful filesystem save over a `BroadcastChannel`; on hearing another tab's announcement, a tab cancels its own pending save and re-hydrates from the newer persisted state, logging it to the terminal so the reconciliation is visible. Best-effort, not full multi-tab consistency — memory/scheduler state stays tab-local by design.
+- **Small screens**: the desktop metaphor (overlapping draggable windows) has nowhere sensible to degrade to on a phone. Below ~860px wide, a small feature-detected notice replaces the boot sequence and desktop entirely, rather than a horizontally-clipped layout.
+- **Hard links, permissions**: `Inode.links` and a real rwx mode bit are actually enforced — `rm` only frees a file's blocks once every hard-linked name pointing at it is gone, and `write`/`rm`/`cat`/`cp` reject a file missing the relevant permission bit, not just cosmetically.
 
 ## Accessibility
 
@@ -89,7 +105,7 @@ A skip link, a screen-reader-announced terminal (`aria-live`), a per-window Tab 
 ```bash
 npm install
 npm run dev        # start the dev server
-npm test           # run the engine unit tests
+npm test           # engine unit/property tests + React component tests
 npm run lint        # eslint
 npm run typecheck   # tsc --noEmit
 npm run build        # production build to dist/
