@@ -1,5 +1,6 @@
 import type { DirEntry, DiskBlock, Inode, JournalEntry, JournalOp } from '../shared/types'
 import { simBus } from '../shared/eventBus'
+import { IoScheduler, type IoSchedulerMetrics, type IoSchedulerState } from './ioScheduler'
 
 export interface FilesystemConfig {
   blockCount: number
@@ -71,13 +72,16 @@ export class FilesystemEngine {
   private tick = 0
   private crashed = false
   private lastTouchedPath: string | null = null
+  private ioScheduler: IoScheduler
 
   constructor(private config: FilesystemConfig = DEFAULT_FS_CONFIG) {
     this.blocks = Array.from({ length: config.blockCount }, (_, index) => ({ index, owner: null }))
+    this.ioScheduler = new IoScheduler(config.blockCount)
   }
 
   advanceTick(): void {
     this.tick++
+    this.ioScheduler.step(this.tick)
   }
 
   isCrashed(): boolean {
@@ -223,6 +227,12 @@ export class FilesystemEngine {
     if (!entry) return { ok: false, error: `cat: ${path}: No such file or directory` }
     const inode = this.inodes.get(entry.inode!)!
     if (!(inode.mode & MODE_READ)) return { ok: false, error: `cat: ${path}: Permission denied` }
+    // Simplification: content lives directly on the inode (not read block by
+    // block — see the class comment), so a real per-block read trace isn't
+    // possible here. Enqueuing one 'read' against the file's first block is
+    // enough to make `cat` show up as disk activity in the I/O scheduler
+    // without pretending this models byte-accurate block I/O.
+    if (inode.blockIds.length > 0) this.ioScheduler.enqueue(inode.blockIds[0]!, 'read', this.tick)
     return { ok: true, content: inode.content }
   }
 
@@ -495,6 +505,10 @@ export class FilesystemEngine {
         for (const blockIndex of inode.blockIds) {
           const block = this.blocks[blockIndex]
           if (block) block.owner = null
+          // Freeing a block is still a physical touch of it (clearing its
+          // owner) — modeled as a 'write' for scheduling purposes, same as
+          // allocation; there's no separate "erase" kind worth adding.
+          this.ioScheduler.enqueue(blockIndex, 'write', this.tick)
         }
         this.inodes.delete(inode.id)
       }
@@ -514,6 +528,7 @@ export class FilesystemEngine {
         allocated.push(block.index)
       }
     }
+    for (const blockIndex of allocated) this.ioScheduler.enqueue(blockIndex, 'write', this.tick)
     return allocated
   }
 
@@ -617,6 +632,15 @@ export class FilesystemEngine {
     return this.journal
   }
 
+  /** SCAN disk-head state (pending queue, position, direction) — roadmap-v4.md §1.1. */
+  getIoState(): IoSchedulerState {
+    return this.ioScheduler.getState()
+  }
+
+  getIoMetrics(): IoSchedulerMetrics {
+    return this.ioScheduler.getMetrics()
+  }
+
   getMetrics() {
     const used = this.blocks.filter((b) => b.owner !== null).length
     return {
@@ -683,6 +707,12 @@ export class FilesystemEngine {
       this.tick = state.tick
       this.crashed = state.crashed
       this.lastTouchedPath = state.lastTouchedPath
+      // Pending I/O requests reference block indices under the disk that
+      // just got replaced — transient scheduling state, deliberately not
+      // part of FilesystemState/exportState() (same category as the live
+      // process/frame state the scheduler and memory engines never
+      // persist either), so it's reset rather than carried over stale.
+      this.ioScheduler.reset()
       return true
     } catch {
       return false
@@ -700,5 +730,6 @@ export class FilesystemEngine {
     this.tick = 0
     this.crashed = false
     this.lastTouchedPath = null
+    this.ioScheduler.reset()
   }
 }

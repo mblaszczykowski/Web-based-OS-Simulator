@@ -435,4 +435,61 @@ describe('FilesystemEngine — resetToEmpty', () => {
     expect(fs.getTree()).toEqual({ name: '/', type: 'dir', children: [] })
     expect(fs.write('/fresh.txt', 'x')).toEqual({ ok: true }) // fully usable afterwards
   })
+
+  it('also resets the I/O scheduler (roadmap-v4.md §1.1) so no stale requests survive a wipe', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'data')
+    expect(fs.getIoState().pending.length).toBeGreaterThan(0)
+
+    fs.resetToEmpty()
+
+    expect(fs.getIoState()).toEqual({ pending: [], headPosition: 0, direction: 1, recentlyCompleted: [] })
+    expect(fs.getIoMetrics().completedCount).toBe(0)
+  })
+})
+
+describe('FilesystemEngine — I/O scheduling (roadmap-v4.md §1.1)', () => {
+  // A request at a cylinder the head starts on/already passed this sweep
+  // isn't serviced until the head sweeps to the far end and back — see
+  // ioScheduler.test.ts's "catches a request enqueued behind the head" case
+  // — so draining fully needs a worst-case double sweep (2 * (blockCount-1)
+  // ticks), not just one tick per block.
+  const FULL_DRAIN_TICKS = 20
+
+  it('write() enqueues an I/O request per allocated block, and advanceTick() drains the queue via SCAN', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hello') // 5 bytes -> 2 blocks -> 2 pending requests
+
+    expect(fs.getIoState().pending).toHaveLength(2)
+
+    for (let i = 0; i < FULL_DRAIN_TICKS; i++) fs.advanceTick()
+
+    expect(fs.getIoState().pending).toHaveLength(0)
+    expect(fs.getIoMetrics().completedCount).toBe(2)
+  })
+
+  it('read() enqueues one request against the file, and delete() enqueues one per freed block', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hello')
+    for (let i = 0; i < FULL_DRAIN_TICKS; i++) fs.advanceTick() // drain the write's requests first
+    expect(fs.getIoState().pending).toHaveLength(0)
+
+    fs.read('/a.txt')
+    expect(fs.getIoState().pending).toHaveLength(1)
+    for (let i = 0; i < FULL_DRAIN_TICKS; i++) fs.advanceTick()
+
+    fs.delete('/a.txt')
+    expect(fs.getIoState().pending).toHaveLength(2) // both blocks freed
+  })
+
+  it('importState() resets the I/O scheduler rather than carrying stale requests over the swapped disk', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hello')
+    const snapshot = fs.exportState()
+    expect(fs.getIoState().pending.length).toBeGreaterThan(0)
+
+    fs.importState(snapshot)
+
+    expect(fs.getIoState()).toEqual({ pending: [], headPosition: 0, direction: 1, recentlyCompleted: [] })
+  })
 })
