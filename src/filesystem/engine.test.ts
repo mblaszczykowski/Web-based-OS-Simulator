@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { FilesystemEngine } from './engine'
+import { FilesystemEngine, type FilesystemState } from './engine'
+import type { JournalOp } from '../shared/types'
 
 describe('FilesystemEngine — create / write / read / delete', () => {
   it('auto-creates parent directories and grows blocks as content is appended', () => {
@@ -113,6 +114,24 @@ describe('FilesystemEngine — crash / fsck recovery', () => {
     const journalLengthAfterFirst = fs.getJournal().length
     fs.crash()
     expect(fs.getJournal().length).toBe(journalLengthAfterFirst)
+  })
+
+  it('fsck() tolerates an unrecognized journal op instead of throwing (defends against a corrupted persisted journal)', () => {
+    // A pending journal entry can only normally exist via crash()'s own
+    // fabricated 'write' entry, so an unrecognized op can't arise from
+    // normal use — but a persisted (IndexedDB) journal is untrusted input,
+    // reachable via importState(), and TypeScript's JournalOp type isn't
+    // enforced at runtime for data coming from outside the program.
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    const snapshot = fs.exportState()
+    const corrupted = {
+      ...snapshot,
+      journal: [{ id: 1, op: 'bogus' as unknown as JournalOp, path: '/x.txt', status: 'pending' as const, tick: 0 }],
+    }
+    expect(fs.importState(corrupted)).toBe(true)
+
+    expect(() => fs.fsck()).not.toThrow()
+    expect(fs.isCrashed()).toBe(false)
   })
 })
 
@@ -237,6 +256,26 @@ describe('FilesystemEngine — export / import round-trip (persistence)', () => 
     expect(fs.importState({ ...snapshot, schemaVersion: 999 })).toBe(false)
     expect(fs.importState({ ...snapshot, blockCount: 4 })).toBe(false)
     expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'keep-me' }) // unchanged
+  })
+
+  it('rejects a snapshot that is malformed in some other way (not just version/count) without throwing or partially mutating', () => {
+    // A persisted IndexedDB record can pass the schemaVersion/blockCount
+    // checks and still be corrupted some other way (hand-edited, a
+    // browser crash mid-write, a bug in an older build). importState()
+    // must reject cleanly rather than throw an uncaught exception that
+    // would strand app startup (see app/App.tsx's boot sequence, which
+    // has no recovery path for a promise that never resolves).
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/keep.txt', 'safe')
+    const snapshot = fs.exportState()
+    const malformed: FilesystemState = { ...snapshot, inodes: null as unknown as FilesystemState['inodes'] }
+
+    let result: boolean | undefined
+    expect(() => {
+      result = fs.importState(malformed)
+    }).not.toThrow()
+    expect(result).toBe(false)
+    expect(fs.read('/keep.txt')).toEqual({ ok: true, content: 'safe' }) // untouched, not half-imported
   })
 })
 

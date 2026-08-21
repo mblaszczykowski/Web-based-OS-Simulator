@@ -245,12 +245,30 @@ export class FilesystemEngine {
   }
 
   private apply(op: JournalOp, path: string, content: string, target?: string): void {
-    if (op === 'create') this.applyCreate(path)
-    else if (op === 'write') this.applyWrite(path, content)
-    else if (op === 'delete') this.applyDelete(path)
-    else if (op === 'mkdir') this.applyMkdir(path)
-    else if (op === 'move') this.applyMove(path, target!)
-    else if (op === 'copy') this.applyCopy(path, content)
+    switch (op) {
+      case 'create':
+        return this.applyCreate(path)
+      case 'write':
+        return this.applyWrite(path, content)
+      case 'delete':
+        return this.applyDelete(path)
+      case 'mkdir':
+        return this.applyMkdir(path)
+      case 'move':
+        return this.applyMove(path, target!)
+      case 'copy':
+        return this.applyCopy(path, content)
+      default: {
+        // Exhaustiveness check: a future JournalOp member missing a case
+        // above fails to compile here. At runtime this only fires for an
+        // `op` that isn't one of the known literals at all — possible only
+        // via a corrupted persisted journal entry (fsck() replay reads
+        // straight from imported state) — and skipping it is the correct
+        // "reject, don't corrupt" behavior, consistent with importState().
+        const exhaustive: never = op
+        void exhaustive
+      }
+    }
   }
 
   private applyMkdir(path: string): void {
@@ -490,16 +508,34 @@ export class FilesystemEngine {
     if (state.schemaVersion !== FS_SCHEMA_VERSION) return false
     if (state.blockCount !== this.config.blockCount) return false
 
-    this.blocks = state.blocks.map((b) => ({ ...b }))
-    this.inodes = new Map(state.inodes.map((i) => [i.id, { ...i }]))
-    this.root = structuredClone(state.root) // independent copy — see the note in exportState()
-    this.journal = state.journal.map((j) => ({ ...j }))
-    this.nextInodeId = state.nextInodeId
-    this.nextJournalId = state.nextJournalId
-    this.tick = state.tick
-    this.crashed = state.crashed
-    this.lastTouchedPath = state.lastTouchedPath
-    return true
+    // A persisted record can pass the two checks above (right schema
+    // version, right block count) and still be malformed in some other
+    // way — e.g. hand-edited, corrupted by a browser crash mid-write, or
+    // written by a build with a bug. Build the replacement state in local
+    // variables first and only assign it to `this` once every step has
+    // succeeded, so a mid-import throw can never leave the engine
+    // half-imported (blocks replaced, inodes not) and never escapes to
+    // the caller — "rejects, changes nothing" holds even for malformed
+    // input, not just a version/count mismatch.
+    try {
+      const blocks = state.blocks.map((b) => ({ ...b }))
+      const inodes = new Map(state.inodes.map((i) => [i.id, { ...i }]))
+      const root = structuredClone(state.root) // independent copy — see the note in exportState()
+      const journal = state.journal.map((j) => ({ ...j }))
+
+      this.blocks = blocks
+      this.inodes = inodes
+      this.root = root
+      this.journal = journal
+      this.nextInodeId = state.nextInodeId
+      this.nextJournalId = state.nextJournalId
+      this.tick = state.tick
+      this.crashed = state.crashed
+      this.lastTouchedPath = state.lastTouchedPath
+      return true
+    } catch {
+      return false
+    }
   }
 
   /** Wipes the disk back to a fresh, empty state in place — used by the `reset-fs` escape hatch. */

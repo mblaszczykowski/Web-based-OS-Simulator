@@ -20,12 +20,22 @@ export function App() {
     // concurrently. We wait for both so the desktop never mounts with a
     // half-loaded disk.
     const cosmetic = new Promise<void>((resolve) => window.setTimeout(resolve, BOOT_DURATION_MS))
-    Promise.all([hydrateAndBootstrap(), cosmetic]).then(() => {
-      // Without this, the desktop would render empty for one full tick
-      // interval before the bootstrapped processes/files ever show up.
-      stepOnce()
-      setReady(true)
-    })
+    Promise.all([hydrateAndBootstrap(), cosmetic])
+      .catch((error: unknown) => {
+        // Should be unreachable — hydrateAndBootstrap()'s persistence step
+        // is designed to never reject (a malformed disk falls back to a
+        // fresh one; see FilesystemEngine.importState()). This is
+        // defense-in-depth so a boot-time exception can never strand the
+        // user on the boot screen forever, matching the same best-effort
+        // philosophy applied one layer down.
+        console.error('Boot sequence failed unexpectedly; continuing with default state.', error)
+      })
+      .then(() => {
+        // Without this, the desktop would render empty for one full tick
+        // interval before the bootstrapped processes/files ever show up.
+        stepOnce()
+        setReady(true)
+      })
   }, [stepOnce])
 
   useEffect(() => {
