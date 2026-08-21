@@ -52,6 +52,15 @@ const SYSCALL_LOG_LIMIT = 300
 
 const GANTT_WINDOW = 48
 
+// Full-run Gantt history for the "export this run" feature (roadmap-v3.md
+// §3.2) — kept separate from the display-only, 48-wide `ganttLog` above so
+// exporting shows the whole run, not just whatever's currently visible in
+// the live chart. Capped (not literally unbounded) so an accidentally
+// forgotten, days-long open tab can't grow this without limit; at one
+// tick per TICK_INTERVAL_MS (450ms), this cap is ~2.5 hours of continuous
+// runtime — far beyond any realistic demo session.
+const GANTT_HISTORY_CAP = 20000
+
 // Scripted auto-demo — roadmap.md §1.1. Solves the "recruiter opens the
 // live demo and doesn't know what to type" problem by typing and running a
 // fixed tour through every subsystem. `command` can be a thunk because the
@@ -94,6 +103,8 @@ interface SimStore {
   version: number
   running: boolean
   ganttLog: (number | null)[]
+  /** Every tick since boot, for "export this run" — see GANTT_HISTORY_CAP. */
+  ganttHistory: (number | null)[]
   /** Terminal working directory — roadmap-v3.md §1.1. Mutated only via `cd` (through CommandContext.setCwd). */
   cwd: string
   terminalLines: TerminalLine[]
@@ -191,6 +202,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   version: 0,
   running: true,
   ganttLog: [],
+  ganttHistory: [],
   cwd: '/',
   syscallLines: [],
   lastAnnouncement: '',
@@ -211,6 +223,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       tick: s.tick + 1,
       version: s.version + 1,
       ganttLog: [...s.ganttLog.slice(-(GANTT_WINDOW - 1)), result.sample.pid],
+      ganttHistory: [...s.ganttHistory.slice(-(GANTT_HISTORY_CAP - 1)), result.sample.pid],
     }))
   },
 

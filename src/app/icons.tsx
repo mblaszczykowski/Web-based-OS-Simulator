@@ -98,6 +98,16 @@ export function PauseIcon({ size = 13 }: IconProps) {
   )
 }
 
+export function DownloadIcon({ size = 13 }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="10" y1="2.5" x2="10" y2="12" />
+      <path d="M6 8.5l4 4 4-4" />
+      <line x1="4" y1="16.5" x2="16" y2="16.5" />
+    </svg>
+  )
+}
+
 export function LogoIcon({ size = 16 }: IconProps) {
   return (
     <svg viewBox="0 0 20 20" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.6">

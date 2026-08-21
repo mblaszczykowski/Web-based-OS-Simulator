@@ -1,10 +1,12 @@
 import { WindowFrame } from '../app/WindowFrame'
-import { SchedulerIcon, PlayIcon, PauseIcon } from '../app/icons'
+import { SchedulerIcon, PlayIcon, PauseIcon, DownloadIcon } from '../app/icons'
 import { useSimStore } from '../app/store'
 import { scheduler } from '../app/engines'
 import { DEFAULT_SCHEDULER_CONFIG } from './engine'
 import { colorForPid, labelColorForPid } from '../app/colors'
 import { ProcessTree } from './ProcessTree'
+import { buildRunCsv, runExportFilename } from './exportRun'
+import { downloadTextFile } from '../app/download'
 
 const STATE_PILL_CLASS: Record<string, string> = {
   RUNNING: 'pill--running',
@@ -18,6 +20,8 @@ const STATE_PILL_CLASS: Record<string, string> = {
 export function SchedulerWindow() {
   useSimStore((s) => s.version) // subscribed purely so this window re-renders on every tick/command
   const ganttLog = useSimStore((s) => s.ganttLog)
+  const ganttHistory = useSimStore((s) => s.ganttHistory)
+  const tick = useSimStore((s) => s.tick)
   const runCommand = useSimStore((s) => s.runCommand)
 
   const processes = scheduler.getProcesses()
@@ -26,6 +30,11 @@ export function SchedulerWindow() {
   const readyByLevel = [...q0, ...q1, ...q2].slice(0, 6)
   const metrics = scheduler.getMetrics()
   const [quantum0, quantum1] = DEFAULT_SCHEDULER_CONFIG.quanta
+
+  function exportRun() {
+    const csv = buildRunCsv({ tick, metrics, ganttHistory })
+    downloadTextFile(runExportFilename(tick), csv)
+  }
 
   return (
     <WindowFrame id="scheduler" title="Scheduler" subtitle="MLFQ" accent="var(--accent-scheduler)" icon={<SchedulerIcon />}>
@@ -98,13 +107,24 @@ export function SchedulerWindow() {
         <div className="sched-main">
           <div className="row-between">
             <span className="label">Live Gantt chart</span>
-            <div className="legend">
-              {active.slice(0, 5).map((p) => (
-                <span className="legend-item" key={p.pid}>
-                  <span className="dot" style={{ background: colorForPid(p.pid) }} />
-                  P{p.pid}
-                </span>
-              ))}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div className="legend">
+                {active.slice(0, 5).map((p) => (
+                  <span className="legend-item" key={p.pid}>
+                    <span className="dot" style={{ background: colorForPid(p.pid) }} />
+                    P{p.pid}
+                  </span>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="btn-outline"
+                style={{ padding: '3px 8px', fontSize: 11 }}
+                onClick={exportRun}
+                title="Download this run's Gantt history and metrics as a CSV file"
+              >
+                <DownloadIcon size={11} /> Export run
+              </button>
             </div>
           </div>
           <div className="gantt">
