@@ -1,7 +1,8 @@
 // Core domain types shared across every module. This is the contract the
 // scheduler, memory, filesystem and terminal engines are all written against.
 
-export type ProcessState = 'NEW' | 'READY' | 'RUNNING' | 'WAITING' | 'TERMINATED'
+/** STOPPED is a SIGSTOP pause (roadmap-v3.md §2.2) — distinct from TERMINATED. tick() skips a stopped process entirely (no burst consumed, no waiting accrued) until a SIGCONT returns it to READY. */
+export type ProcessState = 'NEW' | 'READY' | 'RUNNING' | 'WAITING' | 'STOPPED' | 'TERMINATED'
 
 export type ProcessKind = 'cpu-bound' | 'interactive'
 

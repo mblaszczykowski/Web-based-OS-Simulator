@@ -6,6 +6,7 @@ const STATE_PILL_CLASS: Record<string, string> = {
   RUNNING: 'pill--running',
   READY: 'pill--ready',
   WAITING: 'pill--waiting',
+  STOPPED: 'pill--stopped',
   TERMINATED: 'pill--terminated',
   NEW: 'pill--ready',
 }

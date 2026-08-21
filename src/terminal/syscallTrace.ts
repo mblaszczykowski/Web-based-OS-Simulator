@@ -33,8 +33,13 @@ export function syscallTraceFor(input: string, ok: boolean, cwd: string): string
       return ['fork() = <pid>', `execve("/bin/${name}", [...], [...]) = 0`]
     }
 
-    case 'kill':
+    case 'kill': {
+      if (args[0] === '-STOP' || args[0] === '-CONT') {
+        const signal = args[0] === '-STOP' ? 'SIGSTOP' : 'SIGCONT'
+        return [`kill(${args[1] ?? '?'}, ${signal}) = ${ok ? '0' : '-1 ESRCH'}`]
+      }
       return [`kill(${args[0] ?? '?'}, SIGKILL) = ${ok ? '0' : '-1 ESRCH'}`]
+    }
 
     case 'free':
       return ['mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, -1, 0) = 0x7f...', 'sysinfo(&info) = 0']

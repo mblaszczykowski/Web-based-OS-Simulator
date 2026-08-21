@@ -1,5 +1,5 @@
 import { WindowFrame } from '../app/WindowFrame'
-import { SchedulerIcon } from '../app/icons'
+import { SchedulerIcon, PlayIcon, PauseIcon } from '../app/icons'
 import { useSimStore } from '../app/store'
 import { scheduler } from '../app/engines'
 import { DEFAULT_SCHEDULER_CONFIG } from './engine'
@@ -10,6 +10,7 @@ const STATE_PILL_CLASS: Record<string, string> = {
   RUNNING: 'pill--running',
   READY: 'pill--ready',
   WAITING: 'pill--waiting',
+  STOPPED: 'pill--stopped',
   TERMINATED: 'pill--terminated',
   NEW: 'pill--ready',
 }
@@ -17,6 +18,7 @@ const STATE_PILL_CLASS: Record<string, string> = {
 export function SchedulerWindow() {
   useSimStore((s) => s.version) // subscribed purely so this window re-renders on every tick/command
   const ganttLog = useSimStore((s) => s.ganttLog)
+  const runCommand = useSimStore((s) => s.runCommand)
 
   const processes = scheduler.getProcesses()
   const active = processes.filter((p) => p.state !== 'TERMINATED')
@@ -74,8 +76,19 @@ export function SchedulerWindow() {
                   <span className="dot" style={{ background: colorForPid(p.pid) }} />
                   <span className="pid">P{p.pid}</span>
                   <span className="proc-name">{p.name}</span>
-                  <span className="qtag">{p.state === 'WAITING' ? '-' : `Q${p.queueLevel}`}</span>
+                  <span className="qtag">{p.state === 'WAITING' || p.state === 'STOPPED' ? '-' : `Q${p.queueLevel}`}</span>
                   <span className={`pill ${STATE_PILL_CLASS[p.state]}`}>{p.state}</span>
+                  {p.state !== 'TERMINATED' && (
+                    <button
+                      type="button"
+                      className="proc-signal-btn"
+                      aria-label={p.state === 'STOPPED' ? `Resume process ${p.pid} (SIGCONT)` : `Pause process ${p.pid} (SIGSTOP)`}
+                      title={p.state === 'STOPPED' ? 'Resume (SIGCONT)' : 'Pause (SIGSTOP)'}
+                      onClick={() => runCommand(p.state === 'STOPPED' ? `kill -CONT ${p.pid}` : `kill -STOP ${p.pid}`)}
+                    >
+                      {p.state === 'STOPPED' ? <PlayIcon size={11} /> : <PauseIcon size={11} />}
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

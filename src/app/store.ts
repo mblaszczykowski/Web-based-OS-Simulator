@@ -9,6 +9,8 @@ import {
   spawnProcess,
   spawnStressLoad,
   killProcess,
+  stopProcess,
+  continueProcess,
   stepSimulation,
   resetSync,
   resetFilesystem,
@@ -227,6 +229,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
       spawnProcess: (name) => spawnProcess(name, undefined, SHELL_PID),
       spawnStress: (n) => spawnStressLoad(n),
       killProcess: (pid) => killProcess(pid),
+      stopProcess: (pid) => stopProcess(pid),
+      contProcess: (pid) => continueProcess(pid),
       schedulerMetrics: () => scheduler.getMetrics(),
       memoryMetrics: () => {
         const m = memory.getMetrics()

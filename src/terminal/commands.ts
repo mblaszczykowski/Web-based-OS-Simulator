@@ -45,6 +45,9 @@ export interface CommandContext {
   /** Immediately spawns `n` CPU-bound processes — roadmap-v3.md §1.3's `stress`. */
   spawnStress(n: number): Process[]
   killProcess(pid: number): boolean
+  /** SIGSTOP / SIGCONT — roadmap-v3.md §2.2. */
+  stopProcess(pid: number): boolean
+  contProcess(pid: number): boolean
   schedulerMetrics(): SchedulerMetricsView
   memoryMetrics(): MemoryMetricsView
   fsList(path: string): { ok: true; entries: { name: string; type: string }[] } | { ok: false; error: string }
@@ -76,6 +79,8 @@ const HELP_TEXT = [
   '  run <name>          spawn a new process',
   '  stress [n]           spawn n (default 6) CPU-bound processes at once',
   '  kill <pid>          terminate a process',
+  '  kill -STOP <pid>      pause a process (SIGSTOP) without terminating it',
+  '  kill -CONT <pid>      resume a stopped process (SIGCONT)',
   '  free                memory usage summary',
   '  cd [dir]             change working directory (no arg -> /)',
   '  pwd                  print working directory',
@@ -217,7 +222,7 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
         [
           String(p.pid).padEnd(6),
           p.state.padEnd(12),
-          (p.state === 'WAITING' ? '-' : `Q${p.queueLevel}`).padEnd(7),
+          (p.state === 'WAITING' || p.state === 'STOPPED' ? '-' : `Q${p.queueLevel}`).padEnd(7),
           p.name,
         ].join(''),
       )
@@ -257,8 +262,16 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
     }
 
     case 'kill': {
+      if (args[0] === '-STOP' || args[0] === '-CONT') {
+        const signal = args[0]
+        const pid = Number(args[1])
+        if (!args[1] || Number.isNaN(pid)) return err(`kill: usage: kill ${signal} <pid>`)
+        const ok = signal === '-STOP' ? ctx.stopProcess(pid) : ctx.contProcess(pid)
+        if (!ok) return err(`kill: (${pid}) - No such process`)
+        return out(signal === '-STOP' ? `Process ${pid} stopped (SIGSTOP).` : `Process ${pid} continued (SIGCONT).`)
+      }
       const pid = Number(args[0])
-      if (!args[0] || Number.isNaN(pid)) return err('kill: usage: kill <pid>')
+      if (!args[0] || Number.isNaN(pid)) return err('kill: usage: kill <pid> | kill -STOP <pid> | kill -CONT <pid>')
       const ok = ctx.killProcess(pid)
       return ok ? out(`Process ${pid} terminated.`) : err(`kill: (${pid}) - No such process`)
     }

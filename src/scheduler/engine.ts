@@ -161,6 +161,47 @@ export class SchedulerEngine {
     return process
   }
 
+  /**
+   * SIGSTOP (roadmap-v3.md §2.2) — pauses a process without killing it.
+   * Pulls it out of whichever bookkeeping structure currently tracks it
+   * (ready queue, the I/O-waiting set, or pendingArrivals for a process
+   * stopped in the single tick before it would have first been admitted)
+   * so `tick()` simply never looks at it again until cont() re-admits it —
+   * no burst consumed, no waiting time accrued, exactly like the process
+   * doesn't exist for scheduling purposes while stopped.
+   */
+  stop(pid: number): Process | undefined {
+    const process = this.processes.get(pid)
+    if (!process || process.state === 'TERMINATED') return undefined
+    if (process.state === 'STOPPED') return process // idempotent — signalling an already-stopped process is harmless
+
+    this.queues[process.queueLevel] = this.queues[process.queueLevel].filter((p) => p !== pid)
+    this.waiting.delete(pid)
+    this.pendingArrivals = this.pendingArrivals.filter((p) => p !== pid)
+    process.state = 'STOPPED'
+    return process
+  }
+
+  /**
+   * SIGCONT — always resumes into READY at the process's last queue level,
+   * the same "no demotion" treatment rule 3 gives a process returning from
+   * I/O (see the class docs). This is a deliberate simplification for a
+   * process that was WAITING (mid I/O-burst) when stopped: rather than
+   * resuming the remainder of that burst, it re-enters the ready queue
+   * directly — treating stopped time as skipped entirely, consistent with
+   * stop()'s own "tick() doesn't consume the burst" behavior.
+   */
+  cont(pid: number): Process | undefined {
+    const process = this.processes.get(pid)
+    if (!process || process.state === 'TERMINATED') return undefined
+    if (process.state !== 'STOPPED') return process // idempotent — signalling a process that isn't stopped is harmless
+
+    process.state = 'READY'
+    process.sliceRemaining = this.config.quanta[process.queueLevel]
+    this.queues[process.queueLevel].push(pid)
+    return process
+  }
+
   getProcess(pid: number): Process | undefined {
     return this.processes.get(pid)
   }

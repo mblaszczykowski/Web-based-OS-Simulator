@@ -31,6 +31,8 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     spawnProcess: (name) => makeProcess({ name }),
     spawnStress: (n) => Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1, kind: 'cpu-bound' })),
     killProcess: () => true,
+    stopProcess: () => true,
+    contProcess: () => true,
     schedulerMetrics: () => ({
       completed: 0,
       avgWaitingTicks: 0,
@@ -113,6 +115,28 @@ describe('executeCommand', () => {
     expect(executeCommand('kill 9', ctx)[0]!.text).toContain('No such process')
     expect(executeCommand('kill', ctx)[0]).toMatchObject({ isError: true })
     expect(executeCommand('kill', ctx)[0]!.text).toContain('usage')
+  })
+
+  it('kill -STOP / -CONT dispatch to stopProcess/contProcess, distinct from a plain terminate', () => {
+    const stopProcess = vi.fn(() => true)
+    const contProcess = vi.fn(() => true)
+    const killProcess = vi.fn(() => true)
+    const ctx = makeContext({ stopProcess, contProcess, killProcess })
+
+    expect(executeCommand('kill -STOP 7', ctx)).toEqual([{ text: 'Process 7 stopped (SIGSTOP).' }])
+    expect(stopProcess).toHaveBeenCalledWith(7)
+
+    expect(executeCommand('kill -CONT 7', ctx)).toEqual([{ text: 'Process 7 continued (SIGCONT).' }])
+    expect(contProcess).toHaveBeenCalledWith(7)
+
+    expect(executeCommand('kill 7', ctx)).toEqual([{ text: 'Process 7 terminated.' }])
+    expect(killProcess).toHaveBeenCalledWith(7)
+  })
+
+  it('kill -STOP/-CONT report failure the same way a plain kill does', () => {
+    const ctx = makeContext({ stopProcess: () => false })
+    expect(executeCommand('kill -STOP 9', ctx)[0]).toMatchObject({ isError: true, text: expect.stringContaining('No such process') })
+    expect(executeCommand('kill -STOP', ctx)[0]).toMatchObject({ isError: true })
   })
 
   it('write normalizes a relative path to absolute before calling the fs', () => {

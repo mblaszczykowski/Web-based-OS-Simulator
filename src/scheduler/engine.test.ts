@@ -156,6 +156,76 @@ describe('SchedulerEngine — kill()', () => {
   })
 })
 
+describe('SchedulerEngine — stop() / cont() (roadmap-v3.md §2.2, SIGSTOP/SIGCONT)', () => {
+  it('freezes a RUNNING process — no burst consumed while stopped, resumes into READY on cont()', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    const p1 = createProcess('victim', 'cpu-bound', [10])
+    engine.spawn(p1)
+    engine.tick() // p1 running, burstRemaining now 9
+
+    const stopped = engine.stop(p1.pid)
+    expect(stopped?.state).toBe('STOPPED')
+    expect(engine.getRunning()).toBeUndefined() // CPU is free — nobody else to run
+
+    engine.tick()
+    engine.tick()
+    expect(p1.state).toBe('STOPPED')
+    expect(p1.burstRemaining).toBe(9) // unchanged — tick() never touched it while stopped
+
+    const resumed = engine.cont(p1.pid)
+    expect(resumed?.state).toBe('READY')
+    expect(p1.queueLevel).toBe(0) // no demotion, same level as before
+
+    engine.tick() // re-admitted from the ready queue
+    expect(engine.getRunning()?.pid).toBe(p1.pid)
+    expect(p1.burstRemaining).toBe(8) // resumes counting down from where it was frozen
+  })
+
+  it('pulls a READY (queued) process out of its queue while stopped, so it cannot be dispatched', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    const p1 = createProcess('running', 'cpu-bound', [20])
+    const p2 = createProcess('queued', 'cpu-bound', [5])
+    engine.spawn(p1)
+    engine.spawn(p2)
+    engine.tick() // p1 runs, p2 sits READY in Q0
+
+    expect(p2.state).toBe('READY')
+    engine.stop(p2.pid)
+    expect(p2.state).toBe('STOPPED')
+
+    engine.kill(p1.pid) // free the CPU
+    engine.tick()
+    expect(engine.getRunning()).toBeUndefined() // p2 would have run next, but it's stopped, not queued
+
+    engine.cont(p2.pid)
+    engine.tick()
+    expect(engine.getRunning()?.pid).toBe(p2.pid)
+  })
+
+  it('is idempotent: stopping an already-stopped process, or continuing one that is not stopped, is a harmless no-op', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    const p1 = createProcess('p', 'cpu-bound', [10])
+    engine.spawn(p1)
+    engine.tick()
+
+    expect(engine.cont(p1.pid)?.state).toBe('RUNNING') // wasn't stopped — no-op, still returns the process
+    engine.stop(p1.pid)
+    expect(engine.stop(p1.pid)?.state).toBe('STOPPED') // already stopped — no-op, still returns the process
+  })
+
+  it('refuses to stop or continue an unknown or already-terminated pid', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    const p1 = createProcess('p', 'cpu-bound', [1])
+    engine.spawn(p1)
+    engine.kill(p1.pid)
+
+    expect(engine.stop(999)).toBeUndefined()
+    expect(engine.cont(999)).toBeUndefined()
+    expect(engine.stop(p1.pid)).toBeUndefined()
+    expect(engine.cont(p1.pid)).toBeUndefined()
+  })
+})
+
 describe('SchedulerEngine — process:terminated event', () => {
   it('is emitted exactly once for a killed process and once for a naturally-finished one', () => {
     const engine = new SchedulerEngine({ quanta: [100, 100, Infinity], boostInterval: 0 })

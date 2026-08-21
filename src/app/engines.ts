@@ -215,6 +215,15 @@ export function killProcess(pid: number): boolean {
   return scheduler.kill(pid) !== undefined
 }
 
+/** SIGSTOP / SIGCONT (roadmap-v3.md §2.2) — pause/resume without terminating. */
+export function stopProcess(pid: number): boolean {
+  return scheduler.stop(pid) !== undefined
+}
+
+export function continueProcess(pid: number): boolean {
+  return scheduler.cont(pid) !== undefined
+}
+
 /**
  * Immediately spawns `count` CPU-bound processes — the terminal's `stress`
  * command (roadmap-v3.md §1.3). Unlike the slow, throttled auto-spawner
