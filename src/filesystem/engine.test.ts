@@ -51,6 +51,28 @@ describe('FilesystemEngine — create / write / read / delete', () => {
     const root = fs.getTree()
     expect(root.children!.filter((c) => c.name === 'home')).toHaveLength(1)
   })
+
+  it('rejects writing through a path where an ANCESTOR segment is a file, not a directory', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.write('/var', 'i am a file') // /var is a file at root, not a directory
+
+    expect(fs.write('/var/log/x.txt', 'data').ok).toBe(false)
+    expect(fs.create('/var/log').ok).toBe(false)
+
+    // still exactly one entry named "var" — the attempt didn't create a shadow directory
+    const root = fs.getTree()
+    expect(root.children!.filter((c) => c.name === 'var')).toHaveLength(1)
+    expect(root.children!.find((c) => c.name === 'var')!.type).toBe('file')
+  })
+
+  it('rejects a write that would need more blocks than the disk has free', () => {
+    const fs = new FilesystemEngine({ blockCount: 2, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    expect(fs.write('/a.txt', 'a'.repeat(8)).ok).toBe(true) // exactly fills both 4-byte blocks
+
+    const result = fs.write('/b.txt', 'x') // needs a 3rd block; none free
+    expect(result).toEqual({ ok: false, error: 'write: /b.txt: No space left on device' })
+    expect(fs.read('/b.txt')).toEqual({ ok: false, error: 'cat: /b.txt: No such file or directory' })
+  })
 })
 
 describe('FilesystemEngine — crash / fsck recovery', () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach } from 'vitest'
 import { SchedulerEngine, createProcess, resetPidCounter } from './engine'
+import { simBus } from '../shared/eventBus'
 
 // All processes in these tests are given explicit, hand-computed burst
 // sequences (never the randomised generateBursts()) so every assertion
@@ -151,5 +152,69 @@ describe('SchedulerEngine — kill()', () => {
 
     expect(engine.kill(999)).toBeUndefined() // unknown pid is a no-op
     expect(engine.kill(p1.pid)).toBeUndefined() // already-terminated pid is a no-op
+  })
+})
+
+describe('SchedulerEngine — process:terminated event', () => {
+  it('is emitted exactly once for a killed process and once for a naturally-finished one', () => {
+    const engine = new SchedulerEngine({ quanta: [100, 100, Infinity], boostInterval: 0 })
+    const events: { pid: number; reason: string }[] = []
+    const unsubscribe = simBus.on('process:terminated', (e) => events.push({ pid: e.pid, reason: e.reason }))
+
+    const p1 = createProcess('victim', 'cpu-bound', [10])
+    const p2 = createProcess('natural', 'cpu-bound', [1])
+    engine.spawn(p1)
+    engine.spawn(p2)
+    engine.tick() // p1 dispatched (arrived first)
+    engine.kill(p1.pid)
+    engine.tick() // p2 dispatched and finishes its 1-tick burst immediately
+
+    unsubscribe()
+    expect(events).toEqual([
+      { pid: p1.pid, reason: 'killed' },
+      { pid: p2.pid, reason: 'natural' },
+    ])
+  })
+})
+
+describe('SchedulerEngine — priority boost reaches I/O-blocked processes too', () => {
+  it('resets queueLevel even for a process currently WAITING on I/O', () => {
+    const engine = new SchedulerEngine({ quanta: [2, 4, Infinity], boostInterval: 6 })
+    const p1 = createProcess('interactive', 'interactive', [5, 10, 3]) // CPU 5, IO 10, CPU 3
+    engine.spawn(p1)
+
+    engine.tick() // 1: Q0
+    engine.tick() // 2: slice exhausted -> demoted to Q1
+    expect(p1.queueLevel).toBe(1)
+    engine.tick() // 3
+    engine.tick() // 4
+    engine.tick() // 5: burst completes mid-slice -> WAITING, still at Q1
+    expect(p1.state).toBe('WAITING')
+    expect(p1.queueLevel).toBe(1)
+
+    const result = engine.tick() // 6: boostInterval reached while p1 is WAITING
+    expect(result.boosted).toBe(true)
+    expect(p1.state).toBe('WAITING') // still mid-IO, unaffected by the boost otherwise
+    expect(p1.queueLevel).toBe(0) // but its level was reset regardless
+  })
+})
+
+describe('SchedulerEngine — bounded process history', () => {
+  it('prunes old terminated processes but keeps lifetime metrics exact', () => {
+    const engine = new SchedulerEngine({ quanta: [100, 100, Infinity], boostInterval: 0 })
+    const total = 20 // > MAX_TERMINATED_HISTORY (15)
+    for (let i = 0; i < total; i++) {
+      engine.spawn(createProcess(`p${i}`, 'cpu-bound', [1]))
+    }
+    for (let i = 0; i < total; i++) engine.tick() // one process finishes per tick, FCFS-style
+
+    // getProcesses() is what backs the UI's process list — it must not grow forever.
+    expect(engine.getProcesses().length).toBeLessThanOrEqual(15)
+
+    // but the lifetime averages must still reflect all 20, not just the retained ones
+    const metrics = engine.getMetrics()
+    expect(metrics.completed).toBe(20)
+    expect(metrics.avgWaitingTicks).toBeCloseTo((0 + 19) / 2) // waits 0,1,2,...,19
+    expect(metrics.avgTurnaroundTicks).toBeCloseTo((1 + 20) / 2) // finishes at tick 1,2,...,20
   })
 })

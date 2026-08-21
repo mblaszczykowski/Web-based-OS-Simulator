@@ -53,6 +53,9 @@ export class MemoryEngine {
   }
 
   allocateProcess(pid: number, pageCount: number): void {
+    if (this.pageTables.has(pid)) {
+      throw new Error(`MemoryEngine.allocateProcess: pid ${pid} is already allocated`)
+    }
     const table: PageTableEntry[] = Array.from({ length: pageCount }, (_, page) => ({
       page,
       frame: null,
@@ -81,7 +84,7 @@ export class MemoryEngine {
   }
 
   /** Simulate one memory reference by `pid` to a page in its own address space. */
-  access(pid: number, page: number): AccessResult {
+  access(pid: number, page: number, isWrite = false): AccessResult {
     const table = this.pageTables.get(pid)
     if (!table || page < 0 || page >= table.length) return { fault: false, victimFrame: null }
 
@@ -91,13 +94,14 @@ export class MemoryEngine {
     if (entry.valid && entry.frame !== null) {
       entry.referenced = true
       this.frameRefBit[entry.frame] = true
+      if (isWrite) entry.modified = true
       return { fault: false, victimFrame: null }
     }
 
     this.pageFaultCount++
     const freeFrame = this.frames.find((f) => f.owner === null)
     if (freeFrame) {
-      this.installPage(freeFrame.index, pid, entry)
+      this.installPage(freeFrame.index, pid, entry, isWrite)
       return { fault: true, victimFrame: null }
     }
 
@@ -125,20 +129,25 @@ export class MemoryEngine {
         victimEntry.valid = false
         victimEntry.frame = null
         victimEntry.referenced = false
+        // Eviction implies writing the dirty page back to its backing
+        // store — the copy that comes back in from there later starts
+        // clean again, exactly like a fresh page would.
+        victimEntry.modified = false
       }
     }
 
-    this.installPage(victimIndex, pid, entry)
+    this.installPage(victimIndex, pid, entry, isWrite)
     this.clockHand = (victimIndex + 1) % this.frames.length
     return { fault: true, victimFrame: victimIndex }
   }
 
-  private installPage(frameIndex: number, pid: number, entry: PageTableEntry): void {
+  private installPage(frameIndex: number, pid: number, entry: PageTableEntry, isWrite: boolean): void {
     this.frames[frameIndex]!.owner = { pid, page: entry.page }
     this.frameRefBit[frameIndex] = true
     entry.valid = true
     entry.frame = frameIndex
     entry.referenced = true
+    entry.modified = isWrite
   }
 
   private firstFitAllocate(pid: number, size: number): void {

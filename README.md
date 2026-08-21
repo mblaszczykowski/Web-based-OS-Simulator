@@ -35,7 +35,7 @@ src/
   app/          desktop shell: store, window manager, menu bar, dock
 ```
 
-Modules only ever talk through the narrow `CommandContext` interface (terminal → engines) and the `EventBus` (engines → anything listening) — the scheduler engine has no idea the terminal exists. Cross-module effects that matter for the demo (`run` allocates memory as well as scheduling a process; `kill` frees both) are coordinated one level up, in `src/app/engines.ts`.
+Modules only ever talk through the narrow `CommandContext` interface (terminal → engines) and the `EventBus` (engines → anything listening) — the scheduler engine has no idea the terminal exists, and it doesn't know memory exists either. `SchedulerEngine` emits `process:terminated` from the one place a process's state actually flips to `TERMINATED` (`kill()` or a burst running out); `src/app/engines.ts` is just a subscriber that reacts by freeing that process's memory. Spawning (`run` allocates memory as well as scheduling a process) is coordinated the more direct way, one level up in `engines.ts`, since it isn't a state transition an engine owns on its own.
 
 State management is deliberately thin: the Zustand store (`src/app/store.ts`) holds only UI-relevant state (window positions, terminal history, a `version` counter). The simulation engines are plain singleton class instances; components read from them directly on render and re-render whenever `version` changes. This sidesteps the classic "mutated nested state doesn't trigger a re-render" class of bugs that comes from trying to mirror deeply-mutated engine state into a separate reactive snapshot.
 

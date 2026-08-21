@@ -1,4 +1,5 @@
 import type { GanttSample, Process, ProcessKind, QueueLevel } from '../shared/types'
+import { simBus } from '../shared/eventBus'
 
 export interface SchedulerConfig {
   /** Time slice per queue level, in ticks. Q2 is Infinity → plain FCFS. */
@@ -71,6 +72,9 @@ export function createProcess(name: string, kind: ProcessKind, bursts = generate
   }
 }
 
+/** How many TERMINATED processes to keep around (for the process list / getProcesses()) before pruning the oldest. */
+const MAX_TERMINATED_HISTORY = 15
+
 /**
  * Pure, dependency-free Multi-Level Feedback Queue scheduler.
  *
@@ -95,7 +99,35 @@ export class SchedulerEngine {
   private globalContextSwitches = 0
   private busyTicks = 0
 
+  // Lifetime aggregates survive pruning even after the Process object
+  // itself is dropped from `processes` — see recordTermination().
+  private terminatedHistory: number[] = []
+  private terminatedCount = 0
+  private terminatedWaitingTicks = 0
+  private terminatedTurnaroundTicks = 0
+
   constructor(private config: SchedulerConfig = DEFAULT_SCHEDULER_CONFIG) {}
+
+  /**
+   * Single choke point for every state transition into TERMINATED — both
+   * kill() and tick()'s natural-completion branch call this exactly once
+   * per process, which is what lets `process:terminated` be emitted here
+   * (rather than inferred by polling for it afterwards) and keeps
+   * `processes` bounded (old dead processes are pruned; their stats live
+   * on in the running totals below so getMetrics() stays accurate).
+   */
+  private recordTermination(process: Process, reason: 'natural' | 'killed'): void {
+    this.terminatedCount++
+    this.terminatedWaitingTicks += process.totalWaitingTicks
+    this.terminatedTurnaroundTicks += process.finishTick! - process.arrivalTick
+
+    this.terminatedHistory.push(process.pid)
+    if (this.terminatedHistory.length > MAX_TERMINATED_HISTORY) {
+      this.processes.delete(this.terminatedHistory.shift()!)
+    }
+
+    simBus.emit('process:terminated', { pid: process.pid, name: process.name, reason })
+  }
 
   get currentTick(): number {
     return this.tickCount
@@ -118,6 +150,7 @@ export class SchedulerEngine {
 
     process.state = 'TERMINATED'
     process.finishTick = this.tickCount
+    this.recordTermination(process, 'killed')
     return process
   }
 
@@ -142,16 +175,11 @@ export class SchedulerEngine {
   }
 
   getMetrics() {
-    const terminated = this.getProcesses().filter((p) => p.state === 'TERMINATED')
-    const n = terminated.length
-    const avgWaitingTicks = n ? terminated.reduce((sum, p) => sum + p.totalWaitingTicks, 0) / n : 0
-    const avgTurnaroundTicks = n
-      ? terminated.reduce((sum, p) => sum + (p.finishTick! - p.arrivalTick), 0) / n
-      : 0
+    const n = this.terminatedCount
     return {
       completed: n,
-      avgWaitingTicks,
-      avgTurnaroundTicks,
+      avgWaitingTicks: n ? this.terminatedWaitingTicks / n : 0,
+      avgTurnaroundTicks: n ? this.terminatedTurnaroundTicks / n : 0,
       contextSwitches: this.globalContextSwitches,
       cpuUtilization: this.tickCount ? this.busyTicks / this.tickCount : 0,
     }
@@ -211,6 +239,15 @@ export class SchedulerEngine {
         running.queueLevel = 0
         running.sliceRemaining = this.config.quanta[0]
       }
+      // Processes blocked on I/O also get amnesty — otherwise a process
+      // demoted right before it blocks can miss every boost that happens
+      // while it's away and come back to serve out its old, low level.
+      // Its sliceRemaining is left alone; the I/O-return step above always
+      // resets it to `quanta[queueLevel]`, which will now read level 0.
+      for (const pid of this.waiting) {
+        const process = this.processes.get(pid)
+        if (process) process.queueLevel = 0
+      }
     }
 
     // 4. Preempt the running process if a strictly higher queue is non-empty.
@@ -264,6 +301,7 @@ export class SchedulerEngine {
       if (isLastBurst) {
         winner.state = 'TERMINATED'
         winner.finishTick = this.tickCount
+        this.recordTermination(winner, 'natural')
       } else {
         winner.burstIndex++
         winner.burstRemaining = winner.bursts[winner.burstIndex] ?? 0

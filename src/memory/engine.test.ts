@@ -58,6 +58,31 @@ describe('MemoryEngine — kernel-reserved frames', () => {
   })
 })
 
+describe('MemoryEngine — dirty (modified) bit', () => {
+  it('is set by a write access, cleared on eviction, and unaffected by a plain read', () => {
+    const engine = new MemoryEngine({ frameCount: 1, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 2)
+
+    engine.access(1, 0, true) // write-fault installs page 0, dirty
+    expect(engine.getPageTable(1)![0]).toMatchObject({ valid: true, modified: true })
+
+    engine.access(1, 0, false) // a plain read hit must not clear an existing dirty bit
+    expect(engine.getPageTable(1)![0]!.modified).toBe(true)
+
+    engine.access(1, 1, false) // only 1 frame -> this evicts page 0
+    expect(engine.getPageTable(1)![0]).toMatchObject({ valid: false, modified: false }) // written back, now clean
+    expect(engine.getPageTable(1)![1]).toMatchObject({ valid: true, modified: false }) // fresh read-fault, clean
+  })
+})
+
+describe('MemoryEngine — allocateProcess double-call guard', () => {
+  it('throws instead of silently leaking a second contiguous block for the same pid', () => {
+    const engine = new MemoryEngine({ frameCount: 4, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 2)
+    expect(() => engine.allocateProcess(1, 2)).toThrow(/already allocated/)
+  })
+})
+
 describe('MemoryEngine — freeProcess', () => {
   it('releases every frame the process held and drops its page table', () => {
     const engine = new MemoryEngine({ frameCount: 4, contiguousSizeMb: 100 })

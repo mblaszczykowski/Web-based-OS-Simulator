@@ -25,8 +25,10 @@ export function WindowFrame({ id, title, subtitle, accent, icon, children }: Win
   if (!win.open) return null
 
   function handlePointerDown(e: React.PointerEvent) {
+    // Focusing happens once, via the outer window's own onPointerDown
+    // below (which this bubbles up to) — calling focusWindow(id) here too
+    // would double-fire it on every titlebar click.
     if (maximized) return
-    focusWindow(id)
     dragRef.current = { startX: e.clientX, startY: e.clientY, origX: win.x, origY: win.y }
     const onMove = (ev: PointerEvent) => {
       const drag = dragRef.current

@@ -115,12 +115,18 @@ export class FilesystemEngine {
     if ((op === 'create' || op === 'write') && this.findDirEntry(path)) {
       return { ok: false, error: `${op}: ${path}: Is a directory` }
     }
+    if ((op === 'create' || op === 'write') && this.ancestorIsFile(path)) {
+      return { ok: false, error: `${op}: ${path}: Not a directory` }
+    }
     if (op === 'delete') {
       if (this.findDirEntry(path)) return { ok: false, error: `rm: ${path}: Is a directory` }
       if (!this.findFileEntry(path)) return { ok: false, error: `rm: ${path}: No such file or directory` }
     }
     if (op === 'create' && this.findFileEntry(path)) {
       return { ok: false, error: `create: ${path}: already exists` }
+    }
+    if (op === 'write' && this.growthExceedsFreeSpace(path, content ?? '')) {
+      return { ok: false, error: `write: ${path}: No space left on device` }
     }
 
     const entry: JournalEntry = {
@@ -235,6 +241,38 @@ export class FilesystemEngine {
       return undefined
     }
     return dir.children?.find((c) => c.name === name && c.type === 'file')
+  }
+
+  /**
+   * Does any segment BEFORE the final component already exist as a file?
+   * resolveDir(..., true) only checks for an existing type:'dir' match by
+   * name — if that segment exists but is a file, it would otherwise just
+   * create a second, same-named directory entry alongside it rather than
+   * erroring, corrupting the tree (two siblings named the same).
+   */
+  private ancestorIsFile(path: string): boolean {
+    const segments = this.splitPath(path)
+    segments.pop() // the final component is the file/dir being created — not an ancestor
+    let node = this.root
+    for (const seg of segments) {
+      const child = node.children?.find((c) => c.name === seg)
+      if (!child) return false // doesn't exist yet — resolveDir(..., true) will create it
+      if (child.type === 'file') return true
+      node = child
+    }
+    return false
+  }
+
+  /** Would growing this file by `text` need more blocks than the disk has free? */
+  private growthExceedsFreeSpace(path: string, text: string): boolean {
+    const existing = this.findFileEntry(path)
+    const currentContent = existing ? this.inodes.get(existing.inode!)!.content : ''
+    const currentBlocks = existing ? this.inodes.get(existing.inode!)!.blockIds.length : 0
+    const newLength = currentContent.length + text.length
+    const neededBlocks = newLength === 0 ? 0 : Math.ceil(newLength / this.config.blockSizeBytes)
+    const grow = Math.max(0, neededBlocks - currentBlocks)
+    const freeBlocks = this.blocks.filter((b) => b.owner === null).length
+    return grow > freeBlocks
   }
 
   /** Does `path` already exist as a directory? Used to reject file ops that would collide with one. */

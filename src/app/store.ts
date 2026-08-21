@@ -122,7 +122,11 @@ export const useSimStore = create<SimStore>((set, get) => ({
       }
     }),
 
-  closeWindow: (id) => set((s) => ({ windows: { ...s.windows, [id]: { ...s.windows[id]!, open: false } } })),
+  closeWindow: (id) =>
+    set((s) => ({
+      windows: { ...s.windows, [id]: { ...s.windows[id]!, open: false } },
+      focusedWindow: s.focusedWindow === id ? null : s.focusedWindow,
+    })),
 
   openWindow: (id) => get().focusWindow(id),
 

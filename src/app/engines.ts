@@ -41,7 +41,17 @@ function randomKind(): ProcessKind {
   return Math.random() < 0.55 ? 'interactive' : 'cpu-bound'
 }
 
-const memoryFreed = new Set<number>()
+// SchedulerEngine emits `process:terminated` exactly once per process,
+// from the single choke point where its state actually flips to
+// TERMINATED (kill() or the natural-completion branch of tick()) — so
+// freeing its memory can just be a subscriber here instead of every
+// termination call site having to remember to do it (and de-dupe against
+// doing it twice). This is the event bus plan.md §5 actually describes —
+// scheduler and memory stay decoupled through it, not through this
+// module knowing both engines' internals.
+simBus.on('process:terminated', ({ pid }) => {
+  memory.freeProcess(pid)
+})
 
 export function spawnProcess(name: string, kind: ProcessKind = randomKind()): Process {
   const process = createProcess(name, kind)
@@ -52,12 +62,7 @@ export function spawnProcess(name: string, kind: ProcessKind = randomKind()): Pr
 }
 
 export function killProcess(pid: number): boolean {
-  const process = scheduler.kill(pid)
-  if (!process) return false
-  memory.freeProcess(pid)
-  memoryFreed.add(pid)
-  simBus.emit('process:terminated', { pid, name: process.name, reason: 'killed' })
-  return true
+  return scheduler.kill(pid) !== undefined
 }
 
 const AUTO_SPAWN_INTERVAL = 23
@@ -68,22 +73,13 @@ export function stepSimulation() {
   const result = scheduler.tick()
   filesystem.advanceTick()
 
-  // A process can finish on its own (burst exhausted) without ever going
-  // through kill() — still needs its memory released exactly once.
-  for (const process of scheduler.getProcesses()) {
-    if (process.state === 'TERMINATED' && !memoryFreed.has(process.pid)) {
-      memory.freeProcess(process.pid)
-      memoryFreed.add(process.pid)
-      simBus.emit('process:terminated', { pid: process.pid, name: process.name, reason: 'natural' })
-    }
-  }
-
   // Whoever is running this tick touches one page of its own address space —
   // this is what actually drives page faults / Clock evictions over time.
   const running = scheduler.getRunning()
   if (running) {
     const page = Math.floor(Math.random() * running.pageCount)
-    const access = memory.access(running.pid, page)
+    const isWrite = Math.random() < 0.3 // most memory references are reads
+    const access = memory.access(running.pid, page, isWrite)
     if (access.fault) {
       simBus.emit('memory:page-fault', { pid: running.pid, page, victimFrame: access.victimFrame })
     }
