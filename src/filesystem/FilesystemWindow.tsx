@@ -38,6 +38,8 @@ export function FilesystemWindow() {
   const journal = filesystem.getJournal()
   const crashed = filesystem.isCrashed()
   const metrics = filesystem.getMetrics()
+  const ioState = filesystem.getIoState()
+  const ioMetrics = filesystem.getIoMetrics()
 
   return (
     <WindowFrame
@@ -110,6 +112,44 @@ export function FilesystemWindow() {
                   {b.owner === null ? '·' : `I${b.owner}`}
                 </div>
               ))}
+            </div>
+          </div>
+
+          <div>
+            <div className="row-between">
+              <span className="label">
+                I/O scheduler (SCAN) &mdash; head @ cylinder {ioState.headPosition}/{blocks.length - 1}, queue{' '}
+                {ioMetrics.pendingCount}
+              </span>
+              <div className="legend">
+                <span className="legend-item">
+                  <span className="swatch cell io-head" />
+                  head
+                </span>
+                <span className="legend-item">
+                  <span className="swatch cell io-pending" />
+                  pending
+                </span>
+              </div>
+            </div>
+            <div className="disk-grid" style={{ marginTop: 8 }}>
+              {blocks.map((b) => {
+                const isHead = b.index === ioState.headPosition
+                const isPending = ioState.pending.some((r) => r.blockIndex === b.index)
+                return (
+                  <div
+                    key={b.index}
+                    className={`cell${isHead ? ' io-head' : isPending ? ' io-pending' : ' free'}`}
+                    title={isHead ? 'disk head' : isPending ? 'pending I/O request' : 'idle'}
+                  >
+                    {isHead ? 'H' : isPending ? '•' : '·'}
+                  </div>
+                )
+              })}
+            </div>
+            <div className="algo-desc" style={{ marginTop: 6 }}>
+              Avg seek: {ioMetrics.avgSeekDistance.toFixed(1)} cylinders &middot; Avg wait: {ioMetrics.avgWaitTicks.toFixed(1)}{' '}
+              ticks &middot; Completed: {ioMetrics.completedCount}
             </div>
           </div>
 

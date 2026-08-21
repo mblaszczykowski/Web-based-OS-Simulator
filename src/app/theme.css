@@ -785,6 +785,17 @@ button {
   outline: 2px solid #fff;
   outline-offset: -2px;
 }
+.cell.io-head {
+  outline: 2px solid #fff;
+  outline-offset: -2px;
+  background: var(--accent-fs);
+  color: #05070a;
+}
+.cell.io-pending {
+  background: color-mix(in srgb, var(--warning) 35%, var(--bg-panel));
+  border: 1px solid var(--warning);
+  color: var(--text-primary);
+}
 .split-row {
   display: flex;
   gap: 12px;
