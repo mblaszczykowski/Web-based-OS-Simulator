@@ -55,6 +55,7 @@ export interface CommandContext {
   fsCrash(): void
   fsFsck(): { replayed: JournalEntry[] }
   fsCrashed(): boolean
+  fsReset(): void
   syncStatus(): SyncStatusView
   syncSetUnsafe(unsafe: boolean): void
 }
@@ -76,6 +77,7 @@ const HELP_TEXT = [
   '  rm <file>            delete a file, supports * wildcards',
   '  crash               simulate a power loss mid-write',
   '  fsck                replay the journal and recover the filesystem',
+  '  reset-fs             wipe the disk (in memory and the persisted copy)',
   '  sync                bounded-buffer producer/consumer status',
   '  race on|off          toggle the unsynchronized (racy) demo mode',
   '  clear                clear the screen',
@@ -99,6 +101,7 @@ export const COMMAND_NAMES = [
   'rm',
   'crash',
   'fsck',
+  'reset-fs',
   'sync',
   'race',
   'clear',
@@ -290,6 +293,11 @@ export function executeCommand(input: string, ctx: CommandContext): CommandOutpu
       }
       lines.push('[OK] filesystem consistent')
       return out(...lines)
+    }
+
+    case 'reset-fs': {
+      ctx.fsReset()
+      return out('[RESET] disk wiped — a fresh, empty filesystem is now mounted.')
     }
 
     case 'sync': {

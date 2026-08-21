@@ -10,6 +10,7 @@ import type { Process, ProcessKind } from '../shared/types'
 import { SchedulerEngine, createProcess } from '../scheduler/engine'
 import { MemoryEngine } from '../memory/engine'
 import { FilesystemEngine } from '../filesystem/engine'
+import { loadFilesystemState, saveFilesystemState, clearFilesystemState } from '../filesystem/persistence'
 import { SyncEngine } from '../sync/engine'
 import { simBus } from '../shared/eventBus'
 
@@ -66,6 +67,35 @@ simBus.on('process:terminated', ({ pid }) => {
   memory.freeProcess(pid)
 })
 
+// Real filesystem persistence (roadmap.md §1.5) — the disk is the one
+// engine that survives a reload. Debounced so a burst of mutations (e.g.
+// the scripted demo mode typing several commands in quick succession)
+// writes to IndexedDB once, not once per keystroke's worth of state.
+const FS_SAVE_DEBOUNCE_MS = 400
+let fsSaveTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleFilesystemSave(): void {
+  if (fsSaveTimer !== null) clearTimeout(fsSaveTimer)
+  fsSaveTimer = setTimeout(() => {
+    fsSaveTimer = null
+    void saveFilesystemState(filesystem.exportState())
+  }, FS_SAVE_DEBOUNCE_MS)
+}
+
+simBus.on('fs:mutated', scheduleFilesystemSave)
+simBus.on('fs:crashed', scheduleFilesystemSave)
+simBus.on('fs:recovered', scheduleFilesystemSave)
+
+/** The `reset-fs` escape hatch — wipes the in-memory disk and its persisted copy. */
+export function resetFilesystem(): void {
+  filesystem.resetToEmpty()
+  if (fsSaveTimer !== null) {
+    clearTimeout(fsSaveTimer)
+    fsSaveTimer = null
+  }
+  void clearFilesystemState()
+}
+
 export function spawnProcess(name: string, kind: ProcessKind = randomKind()): Process {
   const process = createProcess(name, kind)
   scheduler.spawn(process)
@@ -109,21 +139,31 @@ export function stepSimulation() {
   return result
 }
 
-/** Spawn a handful of processes so the desktop has something running from the first frame. */
-export function bootstrapWorkload(): void {
+/**
+ * Spawn a handful of processes so the desktop has something running from
+ * the first frame. `fromDisk` distinguishes a genuinely fresh disk (write
+ * the original boot log line) from one just hydrated from IndexedDB
+ * (append a reboot line instead of re-seeding it every reload).
+ */
+export function bootstrapWorkload(fromDisk = false): void {
   spawnProcess(randomName(), 'interactive')
   spawnProcess(randomName(), 'cpu-bound')
   spawnProcess(randomName(), 'interactive')
-  filesystem.write('/var/log/boot.log', 'system initialised\n')
+  filesystem.write(
+    '/var/log/boot.log',
+    fromDisk ? 'system rebooted — disk restored from previous session\n' : 'system initialised\n',
+  )
 }
 
 /**
  * Called once, on app start. Scheduler/memory always reset on reload (see
  * plan.md §2.5) so bootstrapWorkload() always spawns a fresh initial
- * workload; the filesystem is the one engine that will eventually persist
- * across reloads (roadmap.md §1.5), which is why this is async and lives
- * separately from the synchronous bootstrapWorkload() above.
+ * workload; the filesystem is the one engine that persists across reloads
+ * (roadmap.md §1.5) via IndexedDB, which is why this is async and hydrates
+ * it before bootstrapWorkload() runs.
  */
 export async function hydrateAndBootstrap(): Promise<void> {
-  bootstrapWorkload()
+  const state = await loadFilesystemState()
+  const fromDisk = state !== null && filesystem.importState(state)
+  bootstrapWorkload(fromDisk)
 }

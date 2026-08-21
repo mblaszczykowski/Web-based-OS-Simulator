@@ -20,6 +20,23 @@ interface InternalInode extends Inode {
   content: string
 }
 
+/** Bumped whenever the shape of FilesystemState changes, so a persisted disk from an older build gets discarded instead of misread. */
+export const FS_SCHEMA_VERSION = 1
+
+export interface FilesystemState {
+  schemaVersion: number
+  blockCount: number
+  blocks: DiskBlock[]
+  inodes: InternalInode[]
+  root: DirEntry
+  journal: JournalEntry[]
+  nextInodeId: number
+  nextJournalId: number
+  tick: number
+  crashed: boolean
+  lastTouchedPath: string | null
+}
+
 /**
  * A small inode-based filesystem over a simulated block device, with a
  * write-ahead log so a "crash" mid-write can be replayed back to a
@@ -439,5 +456,62 @@ export class FilesystemEngine {
       totalBlocks: this.blocks.length,
       pendingJournalEntries: this.journal.filter((e) => e.status === 'pending').length,
     }
+  }
+
+  /** Serializes everything needed to reconstruct this disk exactly — see roadmap.md §1.5. */
+  exportState(): FilesystemState {
+    return {
+      schemaVersion: FS_SCHEMA_VERSION,
+      blockCount: this.config.blockCount,
+      blocks: this.blocks.map((b) => ({ ...b })),
+      inodes: [...this.inodes.values()].map((i) => ({ ...i })),
+      // Deep-cloned: root is a nested tree, and this must be an independent
+      // point-in-time snapshot — a shared reference would let later
+      // mutations on this engine (or on another engine imported from the
+      // same snapshot) silently leak into whatever holds the exported object.
+      root: structuredClone(this.root),
+      journal: this.journal.map((j) => ({ ...j })),
+      nextInodeId: this.nextInodeId,
+      nextJournalId: this.nextJournalId,
+      tick: this.tick,
+      crashed: this.crashed,
+      lastTouchedPath: this.lastTouchedPath,
+    }
+  }
+
+  /**
+   * Restores a previously-exported disk. Rejects (returns false, changes
+   * nothing) if the schema version or block count don't match this
+   * engine's config — a persisted disk from a stale build is discarded
+   * rather than misread, matching the "fallback: fresh empty disk" call in
+   * roadmap.md §1.5.
+   */
+  importState(state: FilesystemState): boolean {
+    if (state.schemaVersion !== FS_SCHEMA_VERSION) return false
+    if (state.blockCount !== this.config.blockCount) return false
+
+    this.blocks = state.blocks.map((b) => ({ ...b }))
+    this.inodes = new Map(state.inodes.map((i) => [i.id, { ...i }]))
+    this.root = structuredClone(state.root) // independent copy — see the note in exportState()
+    this.journal = state.journal.map((j) => ({ ...j }))
+    this.nextInodeId = state.nextInodeId
+    this.nextJournalId = state.nextJournalId
+    this.tick = state.tick
+    this.crashed = state.crashed
+    this.lastTouchedPath = state.lastTouchedPath
+    return true
+  }
+
+  /** Wipes the disk back to a fresh, empty state in place — used by the `reset-fs` escape hatch. */
+  resetToEmpty(): void {
+    this.blocks = Array.from({ length: this.config.blockCount }, (_, index) => ({ index, owner: null }))
+    this.inodes = new Map()
+    this.root = { name: '/', type: 'dir', children: [] }
+    this.journal = []
+    this.nextInodeId = 1
+    this.nextJournalId = 1
+    this.tick = 0
+    this.crashed = false
+    this.lastTouchedPath = null
   }
 }

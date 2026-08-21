@@ -1,6 +1,16 @@
 import { create } from 'zustand'
 import type { TerminalLine } from '../shared/types'
-import { scheduler, memory, filesystem, sync, spawnProcess, killProcess, stepSimulation, resetSync } from './engines'
+import {
+  scheduler,
+  memory,
+  filesystem,
+  sync,
+  spawnProcess,
+  killProcess,
+  stepSimulation,
+  resetSync,
+  resetFilesystem,
+} from './engines'
 import { executeCommand, type CommandContext } from '../terminal/commands'
 import { syscallTraceFor } from '../terminal/syscallTrace'
 import { SYNC_BUFFER_CAPACITY } from '../sync/engine'
@@ -21,6 +31,12 @@ export interface SyscallLine {
   text: string
 }
 
+export interface DemoState {
+  active: boolean
+  /** What the typewriter effect has "typed" into the terminal input so far, for the current step. */
+  typedText: string
+}
+
 let lineId = 1
 function makeLine(kind: TerminalLine['kind'], text: string): TerminalLine {
   return { id: lineId++, kind, text }
@@ -30,6 +46,41 @@ let syscallLineId = 1
 const SYSCALL_LOG_LIMIT = 300
 
 const GANTT_WINDOW = 48
+
+// Scripted auto-demo — roadmap.md §1.1. Solves the "recruiter opens the
+// live demo and doesn't know what to type" problem by typing and running a
+// fixed tour through every subsystem. `command` can be a thunk because the
+// `kill` step needs a real pid that only exists once `run compiler` (an
+// earlier step) has actually executed.
+interface DemoStep {
+  command: string | (() => string | null)
+  pauseAfterMs: number
+}
+
+const DEMO_TYPE_CHAR_MS = 45
+const DEMO_STEPS: DemoStep[] = [
+  { command: 'ps', pauseAfterMs: 1100 },
+  { command: 'run compiler', pauseAfterMs: 1300 },
+  { command: 'top', pauseAfterMs: 1100 },
+  { command: 'write /notes.txt hello', pauseAfterMs: 900 },
+  { command: 'cat /notes.txt', pauseAfterMs: 1300 },
+  { command: 'crash', pauseAfterMs: 1700 },
+  { command: 'fsck', pauseAfterMs: 1700 },
+  {
+    command: () => {
+      const compiler = scheduler
+        .getProcesses()
+        .filter((p) => p.name === 'compiler' && p.state !== 'TERMINATED')
+        .pop()
+      return compiler ? `kill ${compiler.pid}` : null
+    },
+    pauseAfterMs: 1200,
+  },
+]
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+/** Bumped by stopDemo()/a fresh startDemo() so an in-flight demo loop can tell it's been superseded and bail out. */
+let demoToken = 0
 
 interface SimStore {
   /** Simulation clock — only advances one per stepOnce(). Drives the Gantt x-axis. */
@@ -43,6 +94,7 @@ interface SimStore {
   windows: Record<WindowId, WindowState>
   focusedWindow: WindowId | null
   topZ: number
+  demo: DemoState
 
   toggleRunning: () => void
   stepOnce: () => void
@@ -51,6 +103,8 @@ interface SimStore {
   closeWindow: (id: WindowId) => void
   openWindow: (id: WindowId) => void
   moveWindow: (id: WindowId, x: number, y: number) => void
+  startDemo: () => Promise<void>
+  stopDemo: () => void
 }
 
 const initialWindows: Record<WindowId, WindowState> = {
@@ -75,6 +129,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   windows: initialWindows,
   focusedWindow: 'scheduler',
   topZ: 3,
+  demo: { active: false, typedText: '' },
 
   toggleRunning: () => set((s) => ({ running: !s.running })),
 
@@ -117,6 +172,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       fsCrash: () => filesystem.crash(),
       fsFsck: () => filesystem.fsck(),
       fsCrashed: () => filesystem.isCrashed(),
+      fsReset: () => resetFilesystem(),
       syncStatus: () => {
         const m = sync.getMetrics()
         return {
@@ -166,4 +222,38 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
   moveWindow: (id, x, y) =>
     set((s) => ({ windows: { ...s.windows, [id]: { ...s.windows[id]!, x, y } } })),
+
+  startDemo: async () => {
+    if (get().demo.active) return
+    const token = ++demoToken
+    const cancelled = () => demoToken !== token
+
+    set({ demo: { active: true, typedText: '' } })
+    get().focusWindow('terminal')
+
+    for (const step of DEMO_STEPS) {
+      if (cancelled()) return
+      const command = typeof step.command === 'function' ? step.command() : step.command
+      if (!command) continue
+
+      for (let i = 0; i <= command.length; i++) {
+        if (cancelled()) return
+        set({ demo: { active: true, typedText: command.slice(0, i) } })
+        await sleep(DEMO_TYPE_CHAR_MS)
+      }
+      await sleep(280)
+      if (cancelled()) return
+
+      get().runCommand(command)
+      set({ demo: { active: true, typedText: '' } })
+      await sleep(step.pauseAfterMs)
+    }
+
+    if (!cancelled()) set({ demo: { active: false, typedText: '' } })
+  },
+
+  stopDemo: () => {
+    demoToken++
+    set({ demo: { active: false, typedText: '' } })
+  },
 }))

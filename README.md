@@ -18,6 +18,8 @@ OS.SIM is not a playground for comparing scheduling algorithms against each othe
 
 No algorithm picker, no "add process" button. Workload is generated automatically and through the terminal (`run <name>`), the same way you'd interact with a real shell.
 
+Don't know what to type? Click **▶ Watch demo** in the menu bar — it types and runs a scripted tour (`ps` → `run compiler` → `top` → file write/read → a simulated crash + recovery → `kill`) across every subsystem, with a typewriter effect and no manual interaction required.
+
 ## Real algorithm, simulated environment
 
 The **environment** is simulated — there is no real hardware, no ring 0/ring 3 isolation, no physical multi-core scheduling or interrupts, and the filesystem lives entirely inside IndexedDB rather than being a mountable POSIX filesystem. See [`plan.md` §3](plan.md#3-czego-projekt-świadomie-nie-symuluje) for the full, explicit list of what's out of scope by design.
@@ -71,7 +73,7 @@ Tab-completes commands and filesystem paths, and persists command history to `lo
 
 ## Tech stack
 
-React + TypeScript, Zustand, Vite, Vitest — no D3/Recharts, no backend. All visualisations (Gantt chart, RAM/disk grids, allocation strip) are hand-built CSS/flex/grid, and the filesystem's "disk" lives in-memory for the session (persistence is a documented non-goal for this pass — see `plan.md` §2.5).
+React + TypeScript, Zustand, Vite, Vitest — no D3/Recharts, no backend. All visualisations (Gantt chart, RAM/disk grids, allocation strip) are hand-built CSS/flex/grid. The filesystem's "disk" persists across reloads via IndexedDB — scheduler and memory still reset on refresh, deliberately (see `plan.md` §2.5).
 
 ## Getting started
 

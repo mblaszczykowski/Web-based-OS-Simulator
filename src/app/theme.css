@@ -161,6 +161,28 @@ button {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-primary);
 }
+.menubar-demo-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+.menubar-demo-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+.menubar-demo-btn.active {
+  border-color: var(--critical);
+  color: var(--critical);
+}
 
 /* Dock ------------------------------------------------------------- */
 .dock {

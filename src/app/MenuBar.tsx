@@ -6,6 +6,9 @@ export function MenuBar() {
   const running = useSimStore((s) => s.running)
   const toggleRunning = useSimStore((s) => s.toggleRunning)
   const tick = useSimStore((s) => s.tick)
+  const demo = useSimStore((s) => s.demo)
+  const startDemo = useSimStore((s) => s.startDemo)
+  const stopDemo = useSimStore((s) => s.stopDemo)
   useSimStore((s) => s.version) // subscribed purely so this bar re-renders on every tick/command
 
   const cpu = Math.round(scheduler.getMetrics().cpuUtilization * 100)
@@ -27,6 +30,15 @@ export function MenuBar() {
         </div>
       </div>
       <div className="menubar-right">
+        <button
+          type="button"
+          className={`menubar-demo-btn${demo.active ? ' active' : ''}`}
+          onClick={demo.active ? stopDemo : startDemo}
+          aria-label={demo.active ? 'Stop watch demo' : 'Watch a scripted demo of every subsystem'}
+          title={demo.active ? 'Stop the running demo' : 'Watch a scripted tour of every subsystem'}
+        >
+          {demo.active ? '■ Stop demo' : '▶ Watch demo'}
+        </button>
         <span>CPU {cpu}%</span>
         <span>MEM {mem}%</span>
         <button

@@ -191,3 +191,68 @@ describe('FilesystemEngine — cp', () => {
     expect(fs.copy('/a.txt', '/c.txt')).toEqual({ ok: false, error: 'cp: /c.txt: No space left on device' })
   })
 })
+
+describe('FilesystemEngine — export / import round-trip (persistence)', () => {
+  it('reconstructs an identical, independently-usable disk from an exported snapshot', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/home/user/notes.txt', 'hello')
+    fs.mkdir('/etc')
+
+    const snapshot = fs.exportState()
+
+    const fs2 = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    expect(fs2.importState(snapshot)).toBe(true)
+    expect(fs2.read('/home/user/notes.txt')).toEqual({ ok: true, content: 'hello' })
+    expect(fs2.list('/etc')).toEqual({ ok: true, entries: [] })
+    expect(fs2.getInodes()).toEqual(fs.getInodes())
+
+    // The two engines are independent after import — mutating one doesn't touch the other.
+    fs2.write('/home/user/notes.txt', '!')
+    expect(fs.read('/home/user/notes.txt')).toEqual({ ok: true, content: 'hello' })
+    expect(fs2.read('/home/user/notes.txt')).toEqual({ ok: true, content: 'hello!' })
+  })
+
+  it('does not alias the directory tree between the source engine and an engine imported from its snapshot', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.mkdir('/shared')
+    const snapshot = fs.exportState()
+    const fs2 = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs2.importState(snapshot)
+
+    // Structural mutations (new dir/file entries) on either engine, or on
+    // a stale reference to the already-exported snapshot, must never leak
+    // into the other engine's tree.
+    fs.mkdir('/shared/only-in-fs')
+    fs2.mkdir('/shared/only-in-fs2')
+
+    expect(fs.list('/shared')).toEqual({ ok: true, entries: [{ name: 'only-in-fs', type: 'dir' }] })
+    expect(fs2.list('/shared')).toEqual({ ok: true, entries: [{ name: 'only-in-fs2', type: 'dir' }] })
+  })
+
+  it('rejects a snapshot with a mismatched schema version or block count, leaving the engine untouched', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'keep-me')
+    const snapshot = fs.exportState()
+
+    expect(fs.importState({ ...snapshot, schemaVersion: 999 })).toBe(false)
+    expect(fs.importState({ ...snapshot, blockCount: 4 })).toBe(false)
+    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'keep-me' }) // unchanged
+  })
+})
+
+describe('FilesystemEngine — resetToEmpty', () => {
+  it('wipes the disk back to a fresh state in place', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'data')
+    fs.crash()
+
+    fs.resetToEmpty()
+
+    expect(fs.isCrashed()).toBe(false)
+    expect(fs.getInodes()).toHaveLength(0)
+    expect(fs.getJournal()).toHaveLength(0)
+    expect(fs.getBlocks().every((b) => b.owner === null)).toBe(true)
+    expect(fs.getTree()).toEqual({ name: '/', type: 'dir', children: [] })
+    expect(fs.write('/fresh.txt', 'x')).toEqual({ ok: true }) // fully usable afterwards
+  })
+})

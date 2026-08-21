@@ -63,6 +63,7 @@ function longestCommonPrefix(strs: string[]): string {
 export function TerminalWindow() {
   const lines = useSimStore((s) => s.terminalLines)
   const runCommand = useSimStore((s) => s.runCommand)
+  const demo = useSimStore((s) => s.demo)
   const [value, setValue] = useState('')
   const [history, setHistory] = useState<string[]>(() => loadHistory())
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
@@ -106,6 +107,7 @@ export function TerminalWindow() {
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (demo.active) return // input is read-only during the scripted demo — ignore stray keystrokes/Enter
     if (e.key === 'Enter') {
       submit()
     } else if (e.key === 'Tab') {
@@ -132,7 +134,13 @@ export function TerminalWindow() {
   }
 
   return (
-    <WindowFrame id="terminal" title="Terminal" accent="var(--accent-terminal)" icon={<TerminalIcon />}>
+    <WindowFrame
+      id="terminal"
+      title="Terminal"
+      subtitle={demo.active ? 'auto-demo running…' : undefined}
+      accent="var(--accent-terminal)"
+      icon={<TerminalIcon />}
+    >
       <div className="term-body" onClick={() => inputRef.current?.focus()}>
         <div className="term-scroll" ref={scrollRef}>
           {lines.map((line) => (
@@ -154,9 +162,10 @@ export function TerminalWindow() {
           <input
             ref={inputRef}
             className="term-input"
-            value={value}
+            value={demo.active ? demo.typedText : value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={handleKeyDown}
+            readOnly={demo.active}
             spellCheck={false}
             autoFocus
             aria-label="Terminal input"

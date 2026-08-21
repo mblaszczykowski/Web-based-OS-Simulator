@@ -144,6 +144,9 @@ export function FilesystemWindow() {
                 <button type="button" className="btn-outline" disabled={!crashed} onClick={() => runCommand('fsck')}>
                   Recover (fsck)
                 </button>
+                <button type="button" className="btn-outline" onClick={() => runCommand('reset-fs')}>
+                  Reset disk
+                </button>
                 <div className="journal-log">
                   {journal
                     .slice()
