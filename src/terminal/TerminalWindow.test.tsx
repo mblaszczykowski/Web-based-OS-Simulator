@@ -1,0 +1,77 @@
+// @vitest-environment jsdom
+//
+// Component test — roadmap-v3.md §2.4. Covers the terminal's actual React
+// wiring (typing, submit, history, tab-completion) rather than just the
+// pure command parser (commands.test.ts already covers that in isolation)
+// — the seam roadmap-v3.md calls out as having zero coverage today.
+
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { TerminalWindow } from './TerminalWindow'
+import { useSimStore } from '../app/store'
+
+let snapshot: ReturnType<typeof useSimStore.getState>
+
+beforeEach(() => {
+  snapshot = useSimStore.getState()
+  window.localStorage.clear() // command history is seeded from here on mount (roadmap-v3.md §1.4's sibling feature)
+})
+
+afterEach(() => {
+  // Unmount BEFORE restoring state — see the identical note in WindowFrame.test.tsx.
+  cleanup()
+  useSimStore.setState(snapshot, true)
+})
+
+function getInput() {
+  return screen.getByLabelText('Terminal input') as HTMLInputElement
+}
+
+describe('TerminalWindow', () => {
+  it('typing a command and pressing Enter renders it as a prompt line and shows its output', async () => {
+    const user = userEvent.setup()
+    render(<TerminalWindow />)
+
+    await user.type(getInput(), 'help')
+    await user.keyboard('{Enter}')
+
+    expect(screen.getByText('help')).toBeInTheDocument() // the echoed prompt
+    expect(screen.getByText('Available commands:')).toBeInTheDocument() // its output
+    expect(getInput()).toHaveValue('') // input cleared after submit
+  })
+
+  it('ArrowUp/ArrowDown cycle through submitted command history', async () => {
+    const user = userEvent.setup()
+    render(<TerminalWindow />)
+    const input = getInput()
+
+    await user.type(input, 'pwd')
+    await user.keyboard('{Enter}')
+    await user.type(input, 'help')
+    await user.keyboard('{Enter}')
+
+    fireEvent.keyDown(input, { key: 'ArrowUp' })
+    expect(input).toHaveValue('help') // most recent command first
+
+    fireEvent.keyDown(input, { key: 'ArrowUp' })
+    expect(input).toHaveValue('pwd') // then the one before it
+
+    fireEvent.keyDown(input, { key: 'ArrowDown' })
+    expect(input).toHaveValue('help')
+
+    fireEvent.keyDown(input, { key: 'ArrowDown' })
+    expect(input).toHaveValue('') // past the end of history — back to a blank line
+  })
+
+  it('Tab completes a unique command-name prefix, with a trailing space', async () => {
+    const user = userEvent.setup()
+    render(<TerminalWindow />)
+    const input = getInput()
+
+    await user.type(input, 'he')
+    fireEvent.keyDown(input, { key: 'Tab' })
+
+    expect(input).toHaveValue('help ')
+  })
+})

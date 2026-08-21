@@ -10,6 +10,12 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    // Component tests (roadmap-v3.md §2.4) opt into jsdom per-file via a
+    // `// @vitest-environment jsdom` pragma at the top of the file, so the
+    // much larger pure-logic engine test suite keeps running in the
+    // faster default `node` environment instead of paying a DOM-setup
+    // cost it never needs.
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    setupFiles: ['./src/test-setup.ts'],
   },
 })
