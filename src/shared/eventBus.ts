@@ -14,6 +14,8 @@ export type SimEventMap = {
   'fs:mutated': { op: string; path: string }
   'fs:crashed': Record<string, never>
   'fs:recovered': { replayed: number }
+  /** The live filesystem singleton was just re-hydrated from a change another browser tab persisted — see roadmap-v3.md §2.5. */
+  'fs:external-change': Record<string, never>
 }
 
 type Listener<T> = (payload: T) => void

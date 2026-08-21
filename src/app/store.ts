@@ -15,6 +15,7 @@ import {
 } from './engines'
 import { runCommandLine, type CommandContext } from '../terminal/commands'
 import { syscallTraceFor } from '../terminal/syscallTrace'
+import { simBus } from '../shared/eventBus'
 import { SYNC_BUFFER_CAPACITY } from '../sync/engine'
 
 export type WindowId = 'scheduler' | 'memory' | 'filesystem' | 'terminal' | 'syscalls' | 'sync' | 'network'
@@ -356,4 +357,17 @@ useSimStore.subscribe((state, prevState) => {
   if (state.windows === prevState.windows) return
   if (windowsSaveTimer !== null) clearTimeout(windowsSaveTimer)
   windowsSaveTimer = setTimeout(() => saveWindows(state.windows), WINDOWS_SAVE_DEBOUNCE_MS)
+})
+
+// Cross-tab filesystem consistency (roadmap-v3.md §2.5) — app/engines.ts
+// already re-hydrated the live FilesystemEngine singleton by this point;
+// this just makes the change visible (bump `version` so every subscribed
+// window re-renders) and surfaces it in the terminal, so what's otherwise
+// a silent background reconciliation is actually observable/demoable.
+simBus.on('fs:external-change', () => {
+  useSimStore.setState((s) => ({
+    version: s.version + 1,
+    terminalLines: [...s.terminalLines, makeLine('output', '[SYNC] filesystem updated from another tab.')],
+    lastAnnouncement: 'filesystem updated from another tab',
+  }))
 })

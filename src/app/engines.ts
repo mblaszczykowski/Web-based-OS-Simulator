@@ -10,7 +10,13 @@ import { INIT_PID, SHELL_PID, type Process, type ProcessKind } from '../shared/t
 import { SchedulerEngine, createProcess } from '../scheduler/engine'
 import { MemoryEngine } from '../memory/engine'
 import { FilesystemEngine } from '../filesystem/engine'
-import { loadFilesystemState, saveFilesystemState, clearFilesystemState } from '../filesystem/persistence'
+import {
+  loadFilesystemState,
+  saveFilesystemState,
+  clearFilesystemState,
+  announceFilesystemChange,
+  onExternalFilesystemChange,
+} from '../filesystem/persistence'
 import { SyncEngine } from '../sync/engine'
 import { DeadlockEngine } from '../sync/deadlock'
 import { NetworkEngine } from '../network/engine'
@@ -147,15 +153,39 @@ function scheduleFilesystemSave(): void {
   if (fsSaveTimer !== null) clearTimeout(fsSaveTimer)
   fsSaveTimer = setTimeout(() => {
     fsSaveTimer = null
-    fsSaveInFlight = saveFilesystemState(filesystem.exportState()).finally(() => {
-      fsSaveInFlight = null
-    })
+    fsSaveInFlight = saveFilesystemState(filesystem.exportState())
+      .then(() => announceFilesystemChange())
+      .finally(() => {
+        fsSaveInFlight = null
+      })
   }, FS_SAVE_DEBOUNCE_MS)
 }
 
 simBus.on('fs:mutated', scheduleFilesystemSave)
 simBus.on('fs:crashed', scheduleFilesystemSave)
 simBus.on('fs:recovered', scheduleFilesystemSave)
+
+// Cross-tab consistency (roadmap-v3.md §2.5) — see the long comment in
+// filesystem/persistence.ts for why this exists. A pending local save is
+// cancelled first: it would otherwise fire moments later and overwrite
+// the just-imported, newer state with this tab's now-stale snapshot.
+// Deliberately does not attempt to reconcile MemoryEngine's per-tab
+// `swapped` bookkeeping against whatever /swap/* files land in the
+// imported tree — memory is tab-local by design (plan.md §2.5) and pids
+// are independently numbered per tab, so a swap page file's name can't be
+// meaningfully cross-referenced across tabs anyway.
+onExternalFilesystemChange(() => {
+  if (fsSaveTimer !== null) {
+    clearTimeout(fsSaveTimer)
+    fsSaveTimer = null
+  }
+  void (async () => {
+    const state = await loadFilesystemState()
+    if (state && filesystem.importState(state)) {
+      simBus.emit('fs:external-change', {})
+    }
+  })()
+})
 
 /** The `reset-fs` escape hatch — wipes the in-memory disk and its persisted copy. */
 export function resetFilesystem(): void {
