@@ -111,14 +111,17 @@ A skip link, a screen-reader-announced terminal (`aria-live`), a per-window Tab 
 npm install
 npm run dev        # start the dev server
 npm test           # engine unit/property tests + React component tests
+npm run test:e2e     # Playwright smoke test against a real Chromium, on the production build
 npm run lint        # eslint
 npm run typecheck   # tsc --noEmit
 npm run build        # production build to dist/
 ```
 
+`npm test`'s jsdom component tests cover interaction logic; `npm run test:e2e` (Playwright, `e2e/smoke.spec.ts`) exists specifically for what jsdom can't — a real pointer-drag on a window, real layout, a full boot → desktop → terminal round trip against the actual built `dist/`. First run needs browser binaries: `npx playwright install chromium`.
+
 ## Deployment & CI
 
-`.github/workflows/ci.yml` runs lint, typecheck, tests, a production build, and a Lighthouse audit (performance/accessibility/best-practices/SEO against the built `dist/`, served locally in the CI job — written to the run's job summary, and the raw JSON report uploaded as a build artifact) on every push/PR, and deploys `dist/` to GitHub Pages on every push to `main`. To enable it on your fork: push this repo to GitHub, then turn on **Settings → Pages → Source: GitHub Actions**.
+`.github/workflows/ci.yml` runs lint, typecheck, tests, a production build, the Playwright smoke test against that build, and a Lighthouse audit (performance/accessibility/best-practices/SEO against the built `dist/`, served locally in the CI job — written to the run's job summary, and the raw JSON report uploaded as a build artifact) on every push/PR, and deploys `dist/` to GitHub Pages on every push to `main`. To enable it on your fork: push this repo to GitHub, then turn on **Settings → Pages → Source: GitHub Actions**.
 
 ## License
 

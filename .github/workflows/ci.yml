@@ -23,6 +23,18 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Playwright E2E smoke test (roadmap-v4.md §2.3)
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test
+        env:
+          CI: true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
       - name: Lighthouse audit (roadmap-v4.md §2.5)
         run: |
           npx vite preview --port 4173 &
