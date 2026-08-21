@@ -90,9 +90,30 @@ export function WindowFrame({ id, title, subtitle, accent, icon, children }: Win
     window.addEventListener('pointerup', onUp)
   }
 
+  function handleResizeKeyDown(e: React.KeyboardEvent) {
+    if (maximized) return
+    const step = e.shiftKey ? MOVE_STEP_FAST : MOVE_STEP
+    if (e.key === 'ArrowRight') {
+      e.preventDefault()
+      resizeWindow(id, Math.max(MIN_WIDTH, win.w + step), win.h)
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault()
+      resizeWindow(id, Math.max(MIN_WIDTH, win.w - step), win.h)
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      resizeWindow(id, win.w, Math.max(MIN_HEIGHT, win.h + step))
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      resizeWindow(id, win.w, Math.max(MIN_HEIGHT, win.h - step))
+    }
+  }
+
   function handleResizePointerDown(e: React.PointerEvent) {
     if (maximized) return
-    e.stopPropagation()
+    // Deliberately does NOT stopPropagation — the outer window's own
+    // onPointerDown (focusWindow) should fire here exactly like it does
+    // for the titlebar's drag handler, so resizing a background window
+    // also raises it to the front.
     resizeRef.current = { startX: e.clientX, startY: e.clientY, origW: win.w, origH: win.h }
     const onMove = (ev: PointerEvent) => {
       const resize = resizeRef.current
@@ -162,8 +183,9 @@ export function WindowFrame({ id, title, subtitle, accent, icon, children }: Win
         <div
           className="resize-handle"
           onPointerDown={handleResizePointerDown}
-          role="presentation"
-          aria-hidden="true"
+          tabIndex={0}
+          onKeyDown={handleResizeKeyDown}
+          aria-label={`${title} window resize handle — drag, or focus and use arrow keys, to resize (currently ${Math.round(win.w)} by ${Math.round(win.h)} pixels)`}
         />
       )}
     </div>

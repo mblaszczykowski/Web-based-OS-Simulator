@@ -64,6 +64,7 @@ export function TerminalWindow() {
   const lines = useSimStore((s) => s.terminalLines)
   const runCommand = useSimStore((s) => s.runCommand)
   const demo = useSimStore((s) => s.demo)
+  const lastAnnouncement = useSimStore((s) => s.lastAnnouncement)
   const [value, setValue] = useState('')
   const [history, setHistory] = useState<string[]>(() => loadHistory())
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
@@ -156,9 +157,13 @@ export function TerminalWindow() {
             </div>
           ))}
         </div>
-        {/* Announces new output to screen readers without re-reading the whole scrollback on every render. */}
+        {/*
+          Announces the full result of the most recently run command —
+          not just whichever line happened to render last, since commands
+          like `ps`/`top`/`fsck` routinely produce several lines at once.
+        */}
         <div className="visually-hidden" aria-live="polite" aria-atomic="true">
-          {lines.length > 0 ? lines[lines.length - 1]!.text : ''}
+          {lastAnnouncement}
         </div>
         <div className="term-input-row">
           <span className="term-user">guest@os-sim</span>

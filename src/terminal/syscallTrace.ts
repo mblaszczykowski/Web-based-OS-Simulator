@@ -2,16 +2,13 @@
 // (fictional) syscalls — roadmap.md §1.6. No new domain logic: this just
 // re-describes what a command already did in libc/kernel-call vocabulary.
 
+import { normalizePath as normalize } from './commands'
+
 let fdCounter = 3
 function nextFd(): number {
   const fd = fdCounter
   fdCounter = fdCounter >= 12 ? 3 : fdCounter + 1
   return fd
-}
-
-function normalize(path: string | undefined): string {
-  if (!path) return '/'
-  return path.startsWith('/') ? path : `/${path}`
 }
 
 /** Returns the fictional syscall lines a command "made" — called after the command already ran, given whether it succeeded. */

@@ -1,5 +1,6 @@
 import { MenuBar } from './MenuBar'
 import { Dock } from './Dock'
+import { SkipLink } from './SkipLink'
 import { SchedulerWindow } from '../scheduler/SchedulerWindow'
 import { MemoryWindow } from '../memory/MemoryWindow'
 import { FilesystemWindow } from '../filesystem/FilesystemWindow'
@@ -11,9 +12,7 @@ import { NetworkWindow } from '../network/NetworkWindow'
 export function Desktop() {
   return (
     <div className="app-root">
-      <a className="skip-link" href="#terminal-input">
-        Skip to terminal
-      </a>
+      <SkipLink />
 
       <div className="blob blob--a" />
       <div className="blob blob--b" />

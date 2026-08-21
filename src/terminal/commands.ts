@@ -115,7 +115,7 @@ export const COMMAND_NAMES = [
   'help',
 ]
 
-function normalizePath(path: string | undefined): string {
+export function normalizePath(path: string | undefined): string {
   if (!path) return '/'
   return path.startsWith('/') ? path : `/${path}`
 }

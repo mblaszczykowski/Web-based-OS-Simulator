@@ -81,25 +81,21 @@ export class FilesystemEngine {
   }
 
   mkdir(path: string): FsResult {
-    if (this.crashed) return { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' }
+    const crashedError = this.rejectIfCrashed()
+    if (crashedError) return crashedError
     if (this.findFileEntry(path) || this.findDirEntry(path)) {
       return { ok: false, error: `mkdir: ${path}: File exists` }
     }
     if (this.ancestorIsFile(path)) return { ok: false, error: `mkdir: ${path}: Not a directory` }
 
-    const entry: JournalEntry = { id: this.nextJournalId++, op: 'mkdir', path, status: 'pending', tick: this.tick }
-    this.journal.push(entry)
-    this.trimJournal()
-    this.applyMkdir(path)
-    entry.status = 'committed'
-    this.lastTouchedPath = path
-    simBus.emit('fs:mutated', { op: 'mkdir', path })
+    this.commitJournalEntry('mkdir', { path, touchedPath: path })
     return { ok: true }
   }
 
   /** Moves/renames a file (not a directory — kept in scope with the rest of this shell's file ops). */
   move(srcPath: string, destPath: string): FsResult {
-    if (this.crashed) return { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' }
+    const crashedError = this.rejectIfCrashed()
+    if (crashedError) return crashedError
     if (this.findDirEntry(srcPath)) return { ok: false, error: `mv: ${srcPath}: Is a directory` }
     if (!this.findFileEntry(srcPath)) return { ok: false, error: `mv: ${srcPath}: No such file or directory` }
     if (this.findFileEntry(destPath) || this.findDirEntry(destPath)) {
@@ -107,25 +103,13 @@ export class FilesystemEngine {
     }
     if (this.ancestorIsFile(destPath)) return { ok: false, error: `mv: ${destPath}: Not a directory` }
 
-    const entry: JournalEntry = {
-      id: this.nextJournalId++,
-      op: 'move',
-      path: srcPath,
-      target: destPath,
-      status: 'pending',
-      tick: this.tick,
-    }
-    this.journal.push(entry)
-    this.trimJournal()
-    this.applyMove(srcPath, destPath)
-    entry.status = 'committed'
-    this.lastTouchedPath = destPath
-    simBus.emit('fs:mutated', { op: 'move', path: destPath })
+    this.commitJournalEntry('move', { path: srcPath, target: destPath, touchedPath: destPath })
     return { ok: true }
   }
 
   copy(srcPath: string, destPath: string): FsResult {
-    if (this.crashed) return { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' }
+    const crashedError = this.rejectIfCrashed()
+    if (crashedError) return crashedError
     if (this.findDirEntry(srcPath)) return { ok: false, error: `cp: ${srcPath}: Is a directory` }
     const srcEntry = this.findFileEntry(srcPath)
     if (!srcEntry) return { ok: false, error: `cp: ${srcPath}: No such file or directory` }
@@ -139,26 +123,13 @@ export class FilesystemEngine {
     const freeBlocks = this.blocks.filter((b) => b.owner === null).length
     if (neededBlocks > freeBlocks) return { ok: false, error: `cp: ${destPath}: No space left on device` }
 
-    const entry: JournalEntry = {
-      id: this.nextJournalId++,
-      op: 'copy',
-      path: destPath,
-      content,
-      target: srcPath,
-      status: 'pending',
-      tick: this.tick,
-    }
-    this.journal.push(entry)
-    this.trimJournal()
-    this.applyCopy(destPath, content)
-    entry.status = 'committed'
-    this.lastTouchedPath = destPath
-    simBus.emit('fs:mutated', { op: 'copy', path: destPath })
+    this.commitJournalEntry('copy', { path: destPath, content, target: srcPath, touchedPath: destPath })
     return { ok: true }
   }
 
   list(path = '/'): { ok: true; entries: { name: string; type: DirEntry['type'] }[] } | { ok: false; error: string } {
-    if (this.crashed) return { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' }
+    const crashedError = this.rejectIfCrashed()
+    if (crashedError) return crashedError
     let dir: DirEntry
     try {
       dir = this.resolveDir(this.splitPath(path), false)
@@ -170,7 +141,8 @@ export class FilesystemEngine {
   }
 
   read(path: string): FsReadResult {
-    if (this.crashed) return { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' }
+    const crashedError = this.rejectIfCrashed()
+    if (crashedError) return crashedError
     const entry = this.findFileEntry(path)
     if (!entry) return { ok: false, error: `cat: ${path}: No such file or directory` }
     const inode = this.inodes.get(entry.inode!)!
@@ -207,7 +179,8 @@ export class FilesystemEngine {
   }
 
   private mutate(op: JournalOp, path: string, content?: string): FsResult {
-    if (this.crashed) return { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' }
+    const crashedError = this.rejectIfCrashed()
+    if (crashedError) return crashedError
 
     if ((op === 'create' || op === 'write') && this.findDirEntry(path)) {
       return { ok: false, error: `${op}: ${path}: Is a directory` }
@@ -226,22 +199,41 @@ export class FilesystemEngine {
       return { ok: false, error: `write: ${path}: No space left on device` }
     }
 
+    this.commitJournalEntry(op, { path, content, touchedPath: op === 'delete' ? null : path })
+    return { ok: true }
+  }
+
+  private rejectIfCrashed(): { ok: false; error: string } | null {
+    return this.crashed ? { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' } : null
+  }
+
+  /**
+   * Shared tail for every mutating op (mutate()'s create/write/delete, and
+   * mkdir/move/copy): log it pending, apply it, mark it committed, update
+   * lastTouchedPath, and announce it. Every caller has already done its
+   * own op-specific validation by this point — this only ever runs on an
+   * operation that's going to succeed.
+   */
+  private commitJournalEntry(
+    op: JournalOp,
+    opts: { path: string; content?: string; target?: string; touchedPath: string | null },
+  ): void {
     const entry: JournalEntry = {
       id: this.nextJournalId++,
       op,
-      path,
-      content,
+      path: opts.path,
+      content: opts.content,
+      target: opts.target,
       status: 'pending',
       tick: this.tick,
     }
     this.journal.push(entry)
     this.trimJournal()
 
-    this.apply(op, path, content ?? '')
+    this.apply(op, opts.path, opts.content ?? '', opts.target)
     entry.status = 'committed'
-    if (op !== 'delete') this.lastTouchedPath = path
-    simBus.emit('fs:mutated', { op, path })
-    return { ok: true }
+    if (opts.touchedPath !== null) this.lastTouchedPath = opts.touchedPath
+    simBus.emit('fs:mutated', { op, path: opts.touchedPath ?? opts.path })
   }
 
   private apply(op: JournalOp, path: string, content: string, target?: string): void {

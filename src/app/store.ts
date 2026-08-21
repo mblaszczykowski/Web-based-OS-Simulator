@@ -92,6 +92,8 @@ interface SimStore {
   ganttLog: (number | null)[]
   terminalLines: TerminalLine[]
   syscallLines: SyscallLine[]
+  /** Full text of the most recently run command's output, for the terminal's aria-live region — see runCommand(). */
+  lastAnnouncement: string
   windows: Record<WindowId, WindowState>
   focusedWindow: WindowId | null
   topZ: number
@@ -125,6 +127,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   running: true,
   ganttLog: [],
   syscallLines: [],
+  lastAnnouncement: '',
   terminalLines: [
     makeLine('output', 'OS.SIM boot complete — MLFQ scheduler, Clock paging, journaled filesystem online.'),
     makeLine('output', "Type 'help' to see available commands."),
@@ -150,7 +153,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
     if (!trimmed) return
 
     if (trimmed === 'clear') {
-      set((s) => ({ terminalLines: [], version: s.version + 1 }))
+      set((s) => ({ terminalLines: [], lastAnnouncement: 'screen cleared', version: s.version + 1 }))
       return
     }
 
@@ -203,6 +206,11 @@ export const useSimStore = create<SimStore>((set, get) => ({
         ...output.map((line) => makeLine(line.isError ? 'error' : 'output', line.text)),
       ],
       syscallLines: [...s.syscallLines, ...trace].slice(-SYSCALL_LOG_LIMIT),
+      // The terminal's aria-live region reads this, not individual
+      // lines — a screen-reader user needs the *whole* result of a
+      // command like `ps`/`fsck` (many lines), not just whichever line
+      // happened to render last.
+      lastAnnouncement: [trimmed, ...output.map((line) => line.text)].join('. '),
       version: s.version + 1,
     }))
   },

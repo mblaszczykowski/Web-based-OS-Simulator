@@ -48,8 +48,15 @@ function contrastRatio(hexA: string, hexB: string): number {
   return (lLight! + 0.05) / (lDark! + 0.05)
 }
 
+// The palette is fixed, so there are only PALETTE.length possible
+// results — computed once here rather than re-running the contrast math
+// on every call (this runs on every render of every colored cell in the
+// Gantt chart, RAM grid, disk grid, and allocation strip).
+const LABEL_BY_PALETTE_INDEX = PALETTE.map((bg) =>
+  contrastRatio(bg, DARK_LABEL) >= contrastRatio(bg, LIGHT_LABEL) ? DARK_LABEL : LIGHT_LABEL,
+)
+
 /** WCAG-contrast-safe label color for text rendered directly on a colorForPid() swatch. */
 export function labelColorForPid(pid: number): string {
-  const bg = colorForPid(pid)
-  return contrastRatio(bg, DARK_LABEL) >= contrastRatio(bg, LIGHT_LABEL) ? DARK_LABEL : LIGHT_LABEL
+  return LABEL_BY_PALETTE_INDEX[(pid - 1) % PALETTE.length]!
 }
