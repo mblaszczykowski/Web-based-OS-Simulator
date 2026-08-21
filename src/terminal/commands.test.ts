@@ -54,6 +54,16 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     fsCrash: () => {},
     fsFsck: () => ({ replayed: [] }),
     fsCrashed: () => false,
+    syncStatus: () => ({
+      capacity: 6,
+      occupancy: 0,
+      mutexLocked: false,
+      producedTotal: 0,
+      consumedTotal: 0,
+      corruptionEvents: 0,
+      unsafe: false,
+    }),
+    syncSetUnsafe: () => {},
     ...overrides,
   }
 }

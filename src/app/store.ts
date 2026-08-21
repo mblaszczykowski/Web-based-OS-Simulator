@@ -1,10 +1,11 @@
 import { create } from 'zustand'
 import type { TerminalLine } from '../shared/types'
-import { scheduler, memory, filesystem, spawnProcess, killProcess, stepSimulation } from './engines'
+import { scheduler, memory, filesystem, sync, spawnProcess, killProcess, stepSimulation, resetSync } from './engines'
 import { executeCommand, type CommandContext } from '../terminal/commands'
 import { syscallTraceFor } from '../terminal/syscallTrace'
+import { SYNC_BUFFER_CAPACITY } from '../sync/engine'
 
-export type WindowId = 'scheduler' | 'memory' | 'filesystem' | 'terminal' | 'syscalls'
+export type WindowId = 'scheduler' | 'memory' | 'filesystem' | 'terminal' | 'syscalls' | 'sync'
 
 export interface WindowState {
   x: number
@@ -58,6 +59,7 @@ const initialWindows: Record<WindowId, WindowState> = {
   terminal: { x: 800, y: 408, w: 560, h: 380, open: true, zIndex: 2 },
   filesystem: { x: 140, y: 110, w: 780, h: 580, open: false, zIndex: 1 },
   syscalls: { x: 220, y: 150, w: 460, h: 320, open: false, zIndex: 1 },
+  sync: { x: 180, y: 90, w: 720, h: 560, open: false, zIndex: 1 },
 }
 
 export const useSimStore = create<SimStore>((set, get) => ({
@@ -115,6 +117,19 @@ export const useSimStore = create<SimStore>((set, get) => ({
       fsCrash: () => filesystem.crash(),
       fsFsck: () => filesystem.fsck(),
       fsCrashed: () => filesystem.isCrashed(),
+      syncStatus: () => {
+        const m = sync.getMetrics()
+        return {
+          capacity: SYNC_BUFFER_CAPACITY,
+          occupancy: m.realOccupancy,
+          mutexLocked: m.mutexLocked,
+          producedTotal: m.producedTotal,
+          consumedTotal: m.consumedTotal,
+          corruptionEvents: m.corruptionEvents,
+          unsafe: sync.unsafe,
+        }
+      },
+      syncSetUnsafe: (unsafe) => resetSync(unsafe),
     }
 
     const output = executeCommand(trimmed, ctx)

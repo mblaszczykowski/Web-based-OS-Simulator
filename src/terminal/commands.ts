@@ -17,6 +17,16 @@ export interface MemoryMetricsView {
   usedFrames: number
 }
 
+export interface SyncStatusView {
+  capacity: number
+  occupancy: number
+  mutexLocked: boolean
+  producedTotal: number
+  consumedTotal: number
+  corruptionEvents: number
+  unsafe: boolean
+}
+
 export interface CommandOutputLine {
   text: string
   isError?: boolean
@@ -45,6 +55,8 @@ export interface CommandContext {
   fsCrash(): void
   fsFsck(): { replayed: JournalEntry[] }
   fsCrashed(): boolean
+  syncStatus(): SyncStatusView
+  syncSetUnsafe(unsafe: boolean): void
 }
 
 const HELP_TEXT = [
@@ -64,6 +76,8 @@ const HELP_TEXT = [
   '  rm <file>            delete a file, supports * wildcards',
   '  crash               simulate a power loss mid-write',
   '  fsck                replay the journal and recover the filesystem',
+  '  sync                bounded-buffer producer/consumer status',
+  '  race on|off          toggle the unsynchronized (racy) demo mode',
   '  clear                clear the screen',
   '  help                 show this message',
 ]
@@ -85,6 +99,8 @@ export const COMMAND_NAMES = [
   'rm',
   'crash',
   'fsck',
+  'sync',
+  'race',
   'clear',
   'help',
 ]
@@ -274,6 +290,23 @@ export function executeCommand(input: string, ctx: CommandContext): CommandOutpu
       }
       lines.push('[OK] filesystem consistent')
       return out(...lines)
+    }
+
+    case 'sync': {
+      const s = ctx.syncStatus()
+      return out(
+        `Buffer: ${s.occupancy}/${s.capacity} occupied  mutex=${s.mutexLocked ? 'locked' : 'free'}  mode=${s.unsafe ? 'UNSAFE (race demo)' : 'safe'}`,
+        `Produced: ${s.producedTotal}  Consumed: ${s.consumedTotal}  Corruption events: ${s.corruptionEvents}`,
+      )
+    }
+
+    case 'race': {
+      const mode = args[0]
+      if (mode !== 'on' && mode !== 'off') return err('race: usage: race on|off')
+      ctx.syncSetUnsafe(mode === 'on')
+      return mode === 'on'
+        ? out('⚠ Sync demo restarted WITHOUT the mutex — watch for buffer corruption in the sync window.')
+        : out('Sync demo restarted with the mutex back in place.')
     }
 
     case 'clear':

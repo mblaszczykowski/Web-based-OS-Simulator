@@ -10,11 +10,24 @@ import type { Process, ProcessKind } from '../shared/types'
 import { SchedulerEngine, createProcess } from '../scheduler/engine'
 import { MemoryEngine } from '../memory/engine'
 import { FilesystemEngine } from '../filesystem/engine'
+import { SyncEngine } from '../sync/engine'
 import { simBus } from '../shared/eventBus'
 
 export const scheduler = new SchedulerEngine()
 export const memory = new MemoryEngine()
 export const filesystem = new FilesystemEngine()
+
+// Reassignable (not const) because "show race condition" / "reset" restart
+// this module from scratch rather than mutating it in place — a mode
+// switch is a fresh simulation, not a tweak to the running one. ES module
+// bindings stay live across reassignment, so every `import { sync }` call
+// site still sees the current instance.
+export let sync = new SyncEngine(false)
+
+/** Restart the sync module — used by the "show race condition" demo and its reset. */
+export function resetSync(unsafe: boolean): void {
+  sync = new SyncEngine(unsafe)
+}
 
 // A couple of frames "reserved" for the kernel so the RAM grid looks like a
 // real machine's memory map from the very first render.
@@ -72,6 +85,7 @@ const AUTO_SPAWN_CAP = 7
 export function stepSimulation() {
   const result = scheduler.tick()
   filesystem.advanceTick()
+  sync.tick()
 
   // Whoever is running this tick touches one page of its own address space —
   // this is what actually drives page faults / Clock evictions over time.

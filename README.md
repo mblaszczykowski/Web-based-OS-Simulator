@@ -14,6 +14,7 @@ OS.SIM is not a playground for comparing scheduling algorithms against each othe
 - **Scheduler**: Multi-Level Feedback Queue (MLFQ) — the algorithm real general-purpose kernels approximate, chosen specifically because it adapts to interactive vs. batch workloads without manual tuning.
 - **Memory**: Clock (Second-Chance) page replacement — the cheap, hardware-realistic approximation of LRU that production kernels actually run — plus a First-Fit contiguous allocator shown alongside it purely as a historical reference point.
 - **Filesystem**: a small inode-based filesystem with a write-ahead log, so a simulated crash mid-write can be replayed back to a consistent state on the next `fsck`.
+- **Process sync**: a classic bounded-buffer producer/consumer, guarded by a counting semaphore pair and a mutex — the one correct, synchronized mechanism by default. A "show race condition" mode exists purely to demonstrate the bug the mutex prevents, the same before/after narrative as crash → `fsck`.
 
 No algorithm picker, no "add process" button. Workload is generated automatically and through the terminal (`run <name>`), the same way you'd interact with a real shell.
 
@@ -30,9 +31,10 @@ src/
   scheduler/    MLFQ engine + Gantt chart window        (pure logic + React)
   memory/       Clock paging + First-Fit engine + window
   filesystem/   inode fs + journal/WAL engine + window
-  terminal/     command parser + terminal window
+  sync/         bounded-buffer producer/consumer engine + window
+  terminal/     command parser, terminal window, syscall trace window
   shared/       cross-module types + a small typed event bus
-  app/          desktop shell: store, window manager, menu bar, dock
+  app/          desktop shell: store, window manager, menu bar, dock, boot screen
 ```
 
 Modules only ever talk through the narrow `CommandContext` interface (terminal → engines) and the `EventBus` (engines → anything listening) — the scheduler engine has no idea the terminal exists, and it doesn't know memory exists either. `SchedulerEngine` emits `process:terminated` from the one place a process's state actually flips to `TERMINATED` (`kill()` or a burst running out); `src/app/engines.ts` is just a subscriber that reacts by freeing that process's memory. Spawning (`run` allocates memory as well as scheduling a process) is coordinated the more direct way, one level up in `engines.ts`, since it isn't a state transition an engine owns on its own.
@@ -47,15 +49,25 @@ top                   live scheduler summary
 run <name>            spawn a new process
 kill <pid>            terminate a process
 free                  memory usage summary
-ls [path]             list a directory (default /)
+ls [path]             list a directory (default /), supports * wildcards
 cat <file>            print a file
 write <file> <text>   append text to a file (creates it if missing)
-rm <file>             delete a file
+touch <file>          create an empty file (no-op if it already exists)
+mkdir <dir>           create a directory
+mv <src> <dest>       move/rename a file
+cp <src> <dest>       copy a file
+rm <file>             delete a file, supports * wildcards
 crash                 simulate a power loss mid-write
 fsck                  replay the journal and recover the filesystem
+sync                  bounded-buffer producer/consumer status
+race on|off           toggle the unsynchronized (racy) demo mode
 clear                 clear the screen
 help                  show this message
 ```
+
+Every command also appends a line to the **syscall trace** window — a fictional but realistic `open()`/`read()`/`execve()`-style log, purely for flavour (no new domain logic — it's just a relabeling of what the command already did).
+
+Tab-completes commands and filesystem paths, and persists command history to `localStorage` across reloads — the one piece of state that's *not* wiped on refresh (see [Model trwałości](plan.md#25-model-trwałości-i-restart)).
 
 ## Tech stack
 

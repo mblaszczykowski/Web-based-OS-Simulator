@@ -5,6 +5,7 @@ import { MemoryWindow } from '../memory/MemoryWindow'
 import { FilesystemWindow } from '../filesystem/FilesystemWindow'
 import { TerminalWindow } from '../terminal/TerminalWindow'
 import { SyscallWindow } from '../terminal/SyscallWindow'
+import { SyncWindow } from '../sync/SyncWindow'
 
 export function Desktop() {
   return (
@@ -20,6 +21,7 @@ export function Desktop() {
       <FilesystemWindow />
       <TerminalWindow />
       <SyscallWindow />
+      <SyncWindow />
 
       <Dock />
     </div>

@@ -117,6 +117,35 @@ export interface JournalEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Process synchronization (bounded-buffer producer/consumer)
+// ---------------------------------------------------------------------------
+
+export type SyncRole = 'producer' | 'consumer'
+
+/**
+ * idle -> waiting-{empty,full} (blocked on the counting semaphore) ->
+ * waiting-mutex (has its slot reserved, blocked entering the critical
+ * section) -> in-critical-section (captured its buffer slot, about to
+ * commit) -> back to idle. See sync/engine.ts for the full state machine.
+ */
+export type SyncActorState = 'idle' | 'waiting-empty' | 'waiting-full' | 'waiting-mutex' | 'in-critical-section'
+
+export interface SyncActor {
+  id: number
+  role: SyncRole
+  state: SyncActorState
+  itemsHandled: number
+  /** Buffer slot this actor captured on entering the critical section, or null. */
+  capturedSlot: number | null
+}
+
+export interface SyncLogEntry {
+  id: number
+  text: string
+  kind: 'info' | 'block' | 'warning'
+}
+
+// ---------------------------------------------------------------------------
 // Terminal
 // ---------------------------------------------------------------------------
 
