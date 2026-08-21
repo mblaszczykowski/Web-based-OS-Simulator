@@ -3,6 +3,8 @@ import { Desktop } from './Desktop'
 import { useSimStore } from './store'
 import { hydrateAndBootstrap } from './engines'
 import { BootScreen, BOOT_DURATION_MS } from './BootScreen'
+import { SmallScreenNotice } from './SmallScreenNotice'
+import { useIsNarrowViewport, SMALL_SCREEN_BREAKPOINT_PX } from './useIsNarrowViewport'
 
 const TICK_INTERVAL_MS = 450
 
@@ -11,6 +13,7 @@ export function App() {
   const stepOnce = useSimStore((s) => s.stepOnce)
   const bootstrapped = useRef(false)
   const [ready, setReady] = useState(false)
+  const isNarrow = useIsNarrowViewport(SMALL_SCREEN_BREAKPOINT_PX)
 
   useEffect(() => {
     if (bootstrapped.current) return
@@ -44,6 +47,7 @@ export function App() {
     return () => window.clearInterval(id)
   }, [running, ready, stepOnce])
 
+  if (isNarrow) return <SmallScreenNotice />
   if (!ready) return <BootScreen />
   return <Desktop />
 }

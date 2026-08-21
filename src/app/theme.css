@@ -1132,6 +1132,40 @@ button {
   animation: blink 1.1s steps(1) infinite;
 }
 
+/* Small-screen fallback -------------------------------------------------- */
+.small-screen-notice {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 32px;
+  text-align: center;
+  background: var(--bg-page);
+  color: var(--text-primary);
+}
+.small-screen-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  font-size: 15px;
+}
+.small-screen-notice p {
+  max-width: 320px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.small-screen-notice .small-screen-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 /* Process sync ----------------------------------------------------------- */
 .pill--cs {
   background: var(--accent-sync);
