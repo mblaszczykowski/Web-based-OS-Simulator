@@ -26,6 +26,7 @@ function makeProcess(overrides: Partial<Process> = {}): Process {
 
 function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
   let cwd = '/'
+  const env: Record<string, string> = {}
   return {
     listProcesses: () => [],
     spawnProcess: (name) => makeProcess({ name }),
@@ -67,6 +68,11 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     setCwd: (path) => {
       cwd = path
     },
+    getEnv: (name) => env[name],
+    setEnv: (name, value) => {
+      env[name] = value
+    },
+    listEnv: () => env,
     syncStatus: () => ({
       capacity: 6,
       occupancy: 0,
@@ -450,6 +456,73 @@ describe('executeCommand', () => {
       expect(executeCommand('stress 0', makeContext())[0]).toMatchObject({ isError: true })
       expect(executeCommand('stress -1', makeContext())[0]).toMatchObject({ isError: true })
       expect(executeCommand('stress abc', makeContext())[0]).toMatchObject({ isError: true })
+    })
+  })
+
+  describe('environment variables (roadmap-v4.md §1.2)', () => {
+    it('export sets a variable and echo $VAR substitutes its value', () => {
+      const ctx = makeContext()
+      executeCommand('export FOO=bar', ctx)
+      expect(texts('echo $FOO', ctx)).toEqual(['bar'])
+    })
+
+    it('${VAR} braced form also substitutes', () => {
+      const ctx = makeContext()
+      executeCommand('export FOO=bar', ctx)
+      expect(texts('echo ${FOO}', ctx)).toEqual(['bar'])
+    })
+
+    it('an unset variable substitutes to an empty string', () => {
+      expect(texts('echo $NOPE', makeContext())).toEqual([''])
+    })
+
+    it('a literal $ not matching an identifier passes through unchanged', () => {
+      expect(texts('echo $ $$ 5$', makeContext())).toEqual(['$ $$ 5$'])
+    })
+
+    it('export with no arguments lists every exported variable, sorted', () => {
+      const ctx = makeContext()
+      executeCommand('export FOO=bar', ctx)
+      executeCommand('export BAZ=qux', ctx)
+      expect(texts('export', ctx)).toEqual(['BAZ=qux', 'FOO=bar'])
+    })
+
+    it('rejects an invalid identifier', () => {
+      expect(executeCommand('export 1BAD=x', makeContext())[0]).toMatchObject({ isError: true })
+    })
+
+    it('rejects export with no = at all', () => {
+      expect(executeCommand('export FOO', makeContext())[0]).toMatchObject({ isError: true })
+    })
+
+    it('substitution reaches into a path argument', () => {
+      const fsRead = vi.fn(() => ({ ok: true as const, content: 'hi' }))
+      const ctx = makeContext({ fsRead })
+      executeCommand('export DIR=/home', ctx)
+      executeCommand('cat $DIR/notes.txt', ctx)
+      expect(fsRead).toHaveBeenCalledWith('/home/notes.txt')
+    })
+
+    it('substitution applies once across a chained line', () => {
+      const ctx = makeContext()
+      executeCommand('export FOO=bar', ctx)
+      expect(texts('echo $FOO ; echo $FOO', ctx)).toEqual(['bar', 'bar'])
+    })
+  })
+
+  describe('man (roadmap-v4.md §1.4)', () => {
+    it('shows a manual entry for a known command', () => {
+      const lines = texts('man ls', makeContext())
+      expect(lines[0]).toMatch(/^ls -/)
+      expect(lines.length).toBeGreaterThanOrEqual(3)
+    })
+
+    it('errors for an unknown command', () => {
+      expect(executeCommand('man nope', makeContext())[0]).toMatchObject({ isError: true, text: 'No manual entry for nope' })
+    })
+
+    it('errors with no argument', () => {
+      expect(executeCommand('man', makeContext())[0]).toMatchObject({ isError: true })
     })
   })
 })

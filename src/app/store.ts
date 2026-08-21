@@ -109,6 +109,8 @@ interface SimStore {
   ganttHistoryStartTick: number
   /** Terminal working directory — roadmap-v3.md §1.1. Mutated only via `cd` (through CommandContext.setCwd). */
   cwd: string
+  /** Terminal environment variables — roadmap-v4.md §1.2. Session-scoped like cwd, not persisted across reload. */
+  env: Record<string, string>
   terminalLines: TerminalLine[]
   syscallLines: SyscallLine[]
   /** Full text of the most recently run command's output, for the terminal's aria-live region — see runCommand(). */
@@ -228,6 +230,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   ganttHistory: [],
   ganttHistoryStartTick: 1,
   cwd: '/',
+  env: {},
   syscallLines: [],
   lastAnnouncement: '',
   terminalLines: [
@@ -295,6 +298,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
       fsReset: () => resetFilesystem(),
       getCwd: () => get().cwd,
       setCwd: (path) => set({ cwd: path }),
+      getEnv: (name) => get().env[name],
+      setEnv: (name, value) => set((s) => ({ env: { ...s.env, [name]: value } })),
+      listEnv: () => get().env,
       syncStatus: () => {
         const m = sync.getMetrics()
         return {

@@ -70,6 +70,10 @@ export interface CommandContext {
   /** Current working directory — roadmap-v3.md §1.1. */
   getCwd(): string
   setCwd(path: string): void
+  /** Environment variables — roadmap-v4.md §1.2. A plain key-value store, not a scripting language: see substituteEnvVars(). */
+  getEnv(name: string): string | undefined
+  setEnv(name: string, value: string): void
+  listEnv(): Record<string, string>
   syncStatus(): SyncStatusView
   syncSetUnsafe(unsafe: boolean): void
   networkPing(host: string): void
@@ -106,6 +110,9 @@ const HELP_TEXT = [
   '  race on|off          toggle the unsynchronized (racy) demo mode',
   '  ping [host]           send simulated ICMP echo packets to a host',
   '  curl [host]           simulate one HTTP request/response round trip',
+  '  export [KEY=VALUE]   set an environment variable, or list all if no argument',
+  '  echo [args...]        print arguments, after $VAR substitution',
+  '  man <command>         show a short manual page for a command',
   '  clear                clear the screen',
   '  help                 show this message',
   '',
@@ -114,6 +121,7 @@ const HELP_TEXT = [
   'or pipe output through a filter with | (only `grep <pattern>` is supported), e.g.:',
   '  ls | grep .log',
   '  mkdir /tmp && write /tmp/x.txt hi',
+  '$VAR and ${VAR} are substituted with an exported value (empty if unset) before a line runs.',
 ]
 
 /** All command names — exported so the terminal UI can tab-complete against them. */
@@ -144,9 +152,47 @@ export const COMMAND_NAMES = [
   'race',
   'ping',
   'curl',
+  'export',
+  'echo',
+  'man',
   'clear',
   'help',
 ]
+
+/** Short manual pages — roadmap-v4.md §1.4. One entry per COMMAND_NAMES; a static map, no per-command logic. */
+const MAN_PAGES: Record<string, string[]> = {
+  ps: ['ps - list processes', 'usage: ps', 'Shows every process with its pid, state, and MLFQ queue level.', 'example: ps'],
+  top: ['top - live scheduler summary', 'usage: top', 'CPU utilization, process counts by state, average waiting/turnaround, context switches.', 'example: top'],
+  run: ['run - spawn a new process', 'usage: run [name]', 'Starts a process under the MLFQ scheduler; a random name is used if omitted.', 'example: run compiler'],
+  stress: ['stress - spawn many CPU-bound processes at once', 'usage: stress [n]', 'Spawns n (default 6, capped at 20) processes to show MLFQ demotion and Clock evictions under load.', 'example: stress 12'],
+  kill: ['kill - terminate or pause/resume a process', 'usage: kill <pid> | kill -STOP <pid> | kill -CONT <pid>', '-STOP/-CONT send SIGSTOP/SIGCONT (pause/resume) instead of terminating.', 'example: kill -STOP 3'],
+  free: ['free - memory usage summary', 'usage: free', 'Frames used, page faults, hit ratio, and external fragmentation.', 'example: free'],
+  cd: ['cd - change the working directory', 'usage: cd [dir]', 'No argument returns to /. Relative paths resolve against the current directory.', 'example: cd /home'],
+  pwd: ['pwd - print the working directory', 'usage: pwd', 'example: pwd'],
+  ls: ['ls - list a directory', 'usage: ls [-l] [path]', 'Defaults to the current directory; supports * wildcards. -l shows permissions and size.', 'example: ls -l /home'],
+  cat: ['cat - print a file', 'usage: cat <file>', 'example: cat /notes.txt'],
+  write: ['write - append text to a file', 'usage: write <file> <text>', 'Creates the file first if it does not exist.', 'example: write /notes.txt hello world'],
+  touch: ['touch - create an empty file', 'usage: touch <file>', 'A no-op if the file already exists.', 'example: touch /todo.txt'],
+  mkdir: ['mkdir - create a directory', 'usage: mkdir <dir>', 'example: mkdir /projects'],
+  mv: ['mv - move or rename a file', 'usage: mv <src> <dest>', 'example: mv /a.txt /archive/a.txt'],
+  cp: ['cp - copy a file', 'usage: cp <src> <dest>', 'example: cp /a.txt /a.bak.txt'],
+  ln: ['ln - create a hard link', 'usage: ln <target> <link>', 'The link shares content with target; editing one is visible through the other.', 'example: ln /notes.txt /home/notes-link.txt'],
+  chmod: ['chmod - change file permissions', 'usage: chmod <mode> <file>', 'mode is 1-3 octal digits (e.g. 644 or 6); only the owner digit is meaningful here.', 'example: chmod 644 /notes.txt'],
+  rm: ['rm - delete a file', 'usage: rm <file>', 'Supports * wildcards.', 'example: rm *.tmp'],
+  grep: ['grep - filter piped output by substring', 'usage: <command> | grep <pattern>', 'Only works as a pipe target; a plain substring match, not a regex engine.', 'example: ls | grep .log'],
+  crash: ['crash - simulate a power loss mid-write', 'usage: crash', 'Leaves a pending write in the journal; recover with fsck.', 'example: crash'],
+  fsck: ['fsck - replay the journal and recover the filesystem', 'usage: fsck', 'example: fsck'],
+  'reset-fs': ['reset-fs - wipe the disk', 'usage: reset-fs', 'Clears both the in-memory and persisted filesystem back to a fresh, empty disk.', 'example: reset-fs'],
+  sync: ['sync - bounded-buffer producer/consumer status', 'usage: sync', 'Buffer occupancy, mutex state, and produced/consumed/corruption counters.', 'example: sync'],
+  race: ['race - toggle the unsynchronized sync demo', 'usage: race on|off', 'on restarts the producer/consumer demo without its mutex, to show the corruption it normally prevents.', 'example: race on'],
+  ping: ['ping - send simulated ICMP echo packets', 'usage: ping [host]', 'Watch the Network window for the replies.', 'example: ping server'],
+  curl: ['curl - simulate an HTTP request/response', 'usage: curl [host]', 'One simulated round trip; watch the Network window for the response.', 'example: curl server'],
+  export: ['export - set or list environment variables', 'usage: export [KEY=VALUE]', 'No argument lists every currently exported variable.', 'example: export HOME=/home/guest'],
+  echo: ['echo - print arguments', 'usage: echo [args...]', '$VAR/${VAR} in the arguments are substituted before echo runs.', 'example: echo $HOME'],
+  man: ['man - show a manual page for a command', 'usage: man <command>', 'example: man ls'],
+  clear: ['clear - clear the terminal screen', 'usage: clear', 'example: clear'],
+  help: ['help - list every available command', 'usage: help', 'example: help'],
+}
 
 const DEFAULT_STRESS_COUNT = 6
 /** Safety valve on an explicit user request — nothing else in the sim ever spawns this many processes at once. */
@@ -207,6 +253,25 @@ function formatLongEntry(entry: { name: string; type: string; mode?: number; siz
 /** Splits on whitespace but keeps the tail (e.g. `write`'s text) as one chunk. */
 function tokenize(input: string): string[] {
   return input.trim().split(/\s+/).filter(Boolean)
+}
+
+const VAR_REF = /\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)/g
+
+/**
+ * Substitutes `$VAR`/`${VAR}` with an exported value, or an empty string if
+ * unset — roadmap-v4.md §1.2. Applied once to the whole raw input line,
+ * before `;`/`&&`/`|` are split, so it works uniformly across a chained or
+ * piped line. This is deliberately the ceiling of "variables": no quoting
+ * exists in this shell (see splitSequence's comment) and none is added
+ * here, so a literal `$` that doesn't match an identifier just passes
+ * through unchanged, and there's no way to prevent substitution inside a
+ * value that happens to contain one.
+ */
+function substituteEnvVars(input: string, ctx: CommandContext): string {
+  return input.replace(VAR_REF, (_match, braced: string | undefined, bare: string | undefined) => {
+    const name = braced ?? bare ?? ''
+    return ctx.getEnv(name) ?? ''
+  })
 }
 
 /** Translates a simple `*`-only glob into an anchored RegExp. */
@@ -519,6 +584,30 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       return out(`GET / HTTP/1.1 -> ${host} — watch the Network window for the response.`)
     }
 
+    case 'export': {
+      if (args.length === 0) {
+        const entries = Object.entries(ctx.listEnv()).sort(([a], [b]) => a.localeCompare(b))
+        return out(...entries.map(([key, value]) => `${key}=${value}`))
+      }
+      const eq = args[0]!.indexOf('=')
+      if (eq === -1) return err('export: usage: export [KEY=VALUE]')
+      const key = args[0]!.slice(0, eq)
+      const value = args[0]!.slice(eq + 1)
+      if (!/^[A-Za-z_]\w*$/.test(key)) return err(`export: not a valid identifier: ${key}`)
+      ctx.setEnv(key, value)
+      return []
+    }
+
+    case 'echo':
+      return out(args.join(' '))
+
+    case 'man': {
+      if (!args[0]) return err('man: usage: man <command>')
+      const page = MAN_PAGES[args[0]]
+      if (!page) return err(`No manual entry for ${args[0]}`)
+      return out(...page)
+    }
+
     case 'clear':
       return []
 
@@ -622,7 +711,7 @@ function runPipeline(text: string, ctx: CommandContext, ran: RanCommand[]): Comm
  * `;`/`&&`-joined line).
  */
 export function runCommandLine(input: string, ctx: CommandContext): CommandLineResult {
-  const segments = splitSequence(input)
+  const segments = splitSequence(substituteEnvVars(input, ctx))
   const lines: CommandOutputLine[] = []
   const ran: RanCommand[] = []
   let lastFailed = false
