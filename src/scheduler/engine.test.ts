@@ -229,3 +229,24 @@ describe('createProcess — parentPid (roadmap.md §2.2)', () => {
     expect(fromShell.parentPid).toBe(SHELL_PID)
   })
 })
+
+describe('SchedulerEngine — malformed (even-length) bursts array', () => {
+  // Found by the property test in engine.property.test.ts: a well-formed
+  // bursts array always starts and ends on a CPU burst (odd length), but
+  // nothing enforces that at the type level. An even-length array used to
+  // schedule one extra "phantom" CPU tick past the end of the array
+  // before terminating, silently over-counting totalBurstTicks.
+  it('terminates right after the last I/O burst finishes, without burning a phantom CPU tick', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    const p1 = createProcess('odd-input', 'cpu-bound', [1, 1]) // CPU 1, IO 1 — ends on I/O, not CPU
+    engine.spawn(p1)
+
+    engine.tick() // runs the 1-tick CPU burst, then blocks for I/O
+    expect(p1.state).toBe('WAITING')
+
+    engine.tick() // I/O burst finishes; no further burst exists -> terminates here, not next tick
+    expect(p1.state).toBe('TERMINATED')
+    expect(p1.finishTick).toBe(2)
+    expect(p1.totalBurstTicks).toBe(1) // exactly the declared CPU burst, no phantom extra tick
+  })
+})

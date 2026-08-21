@@ -115,8 +115,9 @@ export class SchedulerEngine {
   constructor(private config: SchedulerConfig = DEFAULT_SCHEDULER_CONFIG) {}
 
   /**
-   * Single choke point for every state transition into TERMINATED — both
-   * kill() and tick()'s natural-completion branch call this exactly once
+   * Single choke point for every state transition into TERMINATED —
+   * kill(), the RUNNING winner's natural-completion branch, and the I/O
+   * resolution step's malformed-bursts guard each call this exactly once
    * per process, which is what lets `process:terminated` be emitted here
    * (rather than inferred by polling for it afterwards) and keeps
    * `processes` bounded (old dead processes are pruned; their stats live
@@ -215,13 +216,27 @@ export class SchedulerEngine {
       }
       process.burstRemaining--
       if (process.burstRemaining <= 0) {
+        this.waiting.delete(pid)
         process.burstIndex++
-        process.burstRemaining = process.bursts[process.burstIndex] ?? 0
+        if (process.burstIndex >= process.bursts.length) {
+          // A well-formed bursts array always starts and ends on a CPU
+          // burst (see the class docs), so an I/O burst is never the
+          // last element — this only fires for a malformed (even-length)
+          // array. Terminating immediately, rather than defaulting
+          // burstRemaining to 0 and scheduling a phantom CPU tick next
+          // tick, keeps totalBurstTicks exactly equal to the sum of the
+          // array's declared CPU-position entries no matter what the
+          // caller passed in.
+          process.state = 'TERMINATED'
+          process.finishTick = this.tickCount
+          this.recordTermination(process, 'natural')
+          continue
+        }
+        process.burstRemaining = process.bursts[process.burstIndex]!
         process.state = 'READY'
         // Rule 3: no demotion on return from I/O — same queue level as before.
         process.sliceRemaining = this.config.quanta[process.queueLevel]
         this.queues[process.queueLevel].push(pid)
-        this.waiting.delete(pid)
       }
     }
 
