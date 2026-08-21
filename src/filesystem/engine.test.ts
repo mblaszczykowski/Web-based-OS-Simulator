@@ -116,6 +116,24 @@ describe('FilesystemEngine — crash / fsck recovery', () => {
     expect(fs.getJournal().length).toBe(journalLengthAfterFirst)
   })
 
+  it('mkdir then crash then fsck does not corrupt the tree with a duplicate file+dir sibling (found by code review)', () => {
+    // crash() always fabricates a pending op:'write' entry targeting
+    // lastTouchedPath, whatever that path actually refers to — mkdir()
+    // sets lastTouchedPath to a directory. fsck() replaying that entry
+    // must not create a shadow file entry alongside the real directory.
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.mkdir('/d')
+
+    fs.crash()
+    const { replayed } = fs.fsck()
+    expect(replayed).toHaveLength(1)
+    expect(replayed[0]).toMatchObject({ op: 'write', path: '/d' })
+
+    expect(fs.list('/')).toEqual({ ok: true, entries: [{ name: 'd', type: 'dir' }] }) // still exactly one entry
+    expect(fs.read('/d')).toEqual({ ok: false, error: 'cat: /d: No such file or directory' }) // still a dir, not readable as a file
+    expect(fs.list('/d')).toEqual({ ok: true, entries: [] }) // still an empty, usable directory
+  })
+
   it('fsck() tolerates an unrecognized journal op instead of throwing (defends against a corrupted persisted journal)', () => {
     // A pending journal entry can only normally exist via crash()'s own
     // fabricated 'write' entry, so an unrecognized op can't arise from

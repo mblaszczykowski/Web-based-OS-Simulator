@@ -239,6 +239,15 @@ export const useSimStore = create<SimStore>((set, get) => ({
     set({ demo: { active: true, typedText: '' } })
     get().focusWindow('terminal')
 
+    // write() is append-only (matches the real terminal command), and the
+    // disk now persists across reloads (roadmap.md §1.5) — so without
+    // this, watching the demo more than once in a session, or after a
+    // reload, would show /notes.txt accumulating "hellohellohello..."
+    // instead of the clean "hello" the `cat` step is meant to display.
+    // Silent (not one of DEMO_STEPS) so a first-ever run doesn't show a
+    // spurious "No such file" error before the file has ever existed.
+    filesystem.delete('/notes.txt')
+
     for (const step of DEMO_STEPS) {
       if (cancelled()) return
       const command = typeof step.command === 'function' ? step.command() : step.command

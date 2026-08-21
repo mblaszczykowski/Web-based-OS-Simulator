@@ -12,6 +12,7 @@ import { MemoryEngine } from '../memory/engine'
 import { FilesystemEngine } from '../filesystem/engine'
 import { loadFilesystemState, saveFilesystemState, clearFilesystemState } from '../filesystem/persistence'
 import { SyncEngine } from '../sync/engine'
+import { DeadlockEngine } from '../sync/deadlock'
 import { NetworkEngine } from '../network/engine'
 import { simBus } from '../shared/eventBus'
 
@@ -19,6 +20,11 @@ export const scheduler = new SchedulerEngine()
 export const memory = new MemoryEngine()
 export const filesystem = new FilesystemEngine()
 export const network = new NetworkEngine()
+// A module-level singleton like every other engine here, not component
+// state — a window/tab being closed or switched away from must never
+// discard simulation progress (that's the whole reason every other window
+// just reads straight off a shared instance instead of owning its own).
+export const deadlock = new DeadlockEngine()
 
 // Reassignable (not const) because "show race condition" / "reset" restart
 // this module from scratch rather than mutating it in place — a mode
@@ -71,12 +77,40 @@ function swapPath(pid: number, page: number): string {
   return `/swap/${pid}-${page}.swp`
 }
 
+// Best-effort: while the filesystem is crashed, every mutation (including
+// these) is rejected. Skipping the attempt here just avoids a doomed
+// write/delete call; it doesn't (and, given MemoryEngine stays
+// filesystem-unaware by design, can't cleanly) reconcile
+// PageTableEntry.swapped with what's actually on disk — that flag can
+// briefly read "swapped" for a page with no real backing file until it
+// next faults, a narrow, self-correcting, and non-crashing edge case
+// accepted as a limitation of keeping the two engines decoupled.
 function swapOut(pid: number, page: number): void {
+  if (filesystem.isCrashed()) return
   filesystem.write(swapPath(pid, page), SWAP_PAGE_CONTENT)
 }
 
 function swapIn(pid: number, page: number): void {
+  if (filesystem.isCrashed()) return
   filesystem.delete(swapPath(pid, page))
+}
+
+/**
+ * Deletes every file under /swap. Memory (and with it, which pages are
+ * swapped) never persists across reloads — only the filesystem does — so
+ * any /swap files hydrated from a previous session are orphaned by
+ * construction: nothing in the freshly-booted, empty memory engine still
+ * "owns" them. Left in place, a low pid reused after reload could later
+ * append fresh swap content onto a stale file instead of writing clean
+ * content, since write() is append-only — silently corrupting/growing it
+ * across repeated reload+evict cycles.
+ */
+function clearSwapFiles(): void {
+  const result = filesystem.list('/swap')
+  if (!result.ok) return
+  for (const entry of result.entries) {
+    if (entry.type === 'file') filesystem.delete(`/swap/${entry.name}`)
+  }
 }
 
 // SchedulerEngine emits `process:terminated` exactly once per process,
@@ -100,12 +134,22 @@ simBus.on('process:terminated', ({ pid }) => {
 // writes to IndexedDB once, not once per keystroke's worth of state.
 const FS_SAVE_DEBOUNCE_MS = 400
 let fsSaveTimer: ReturnType<typeof setTimeout> | null = null
+// Tracked separately from fsSaveTimer, which is cleared to null the
+// moment the timer *fires* — well before the async IndexedDB write it
+// kicks off actually completes. Without this, resetFilesystem() calling
+// clearFilesystemState() while a save from *before* the reset is still
+// in flight is a real race: whichever of the two IndexedDB transactions
+// commits last wins, and if it's the stale save, the pre-reset disk gets
+// silently resurrected on the next load despite the explicit reset.
+let fsSaveInFlight: Promise<void> | null = null
 
 function scheduleFilesystemSave(): void {
   if (fsSaveTimer !== null) clearTimeout(fsSaveTimer)
   fsSaveTimer = setTimeout(() => {
     fsSaveTimer = null
-    void saveFilesystemState(filesystem.exportState())
+    fsSaveInFlight = saveFilesystemState(filesystem.exportState()).finally(() => {
+      fsSaveInFlight = null
+    })
   }, FS_SAVE_DEBOUNCE_MS)
 }
 
@@ -115,12 +159,18 @@ simBus.on('fs:recovered', scheduleFilesystemSave)
 
 /** The `reset-fs` escape hatch — wipes the in-memory disk and its persisted copy. */
 export function resetFilesystem(): void {
-  filesystem.resetToEmpty()
+  filesystem.resetToEmpty() // synchronous — the live engine (what the UI reads) is correct immediately
   if (fsSaveTimer !== null) {
     clearTimeout(fsSaveTimer)
     fsSaveTimer = null
   }
-  void clearFilesystemState()
+  const inFlight = fsSaveInFlight
+  void (async () => {
+    // Let any save that had already started finish first, so the clear
+    // below is always the last IndexedDB write — see fsSaveInFlight above.
+    if (inFlight) await inFlight.catch(() => {})
+    await clearFilesystemState()
+  })()
 }
 
 export function spawnProcess(name: string, kind: ProcessKind = randomKind(), parentPid: number = INIT_PID): Process {
@@ -195,5 +245,6 @@ export function bootstrapWorkload(fromDisk = false): void {
 export async function hydrateAndBootstrap(): Promise<void> {
   const state = await loadFilesystemState()
   const fromDisk = state !== null && filesystem.importState(state)
+  if (fromDisk) clearSwapFiles()
   bootstrapWorkload(fromDisk)
 }

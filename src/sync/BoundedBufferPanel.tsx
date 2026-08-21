@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { WarningIcon } from '../app/icons'
-import { sync, resetSync } from '../app/engines'
+import { sync } from '../app/engines'
+import { useSimStore } from '../app/store'
 import type { SyncActor } from '../shared/types'
 
 const STATE_LABEL: Record<SyncActor['state'], string> = {
@@ -38,6 +39,7 @@ function ActorRow({ actor }: { actor: SyncActor }) {
 
 export function BoundedBufferPanel() {
   const logRef = useRef<HTMLDivElement>(null)
+  const runCommand = useSimStore((s) => s.runCommand)
 
   const actors = sync.getActors()
   const producers = actors.filter((a) => a.role === 'producer')
@@ -49,7 +51,11 @@ export function BoundedBufferPanel() {
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight })
-  }, [log])
+    // sync.getLog() returns the engine's own array, mutated in place
+    // (push/shift) rather than reassigned — `log` above is therefore the
+    // same reference every render, so `log.length` (a primitive that
+    // actually changes) is what makes this effect re-fire as entries arrive.
+  }, [log.length])
 
   return (
     <div className="win-body">
@@ -103,7 +109,7 @@ export function BoundedBufferPanel() {
         <button
           type="button"
           className={sync.unsafe ? 'btn-outline' : 'btn-danger'}
-          onClick={() => resetSync(!sync.unsafe)}
+          onClick={() => runCommand(sync.unsafe ? 'race off' : 'race on')}
         >
           <WarningIcon />
           {sync.unsafe ? 'Reset to safe mode' : 'Show race condition'}

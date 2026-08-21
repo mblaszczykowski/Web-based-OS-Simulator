@@ -13,6 +13,8 @@ export interface Packet {
   /** Position along the link, 0 (client) .. 1 (server) or vice versa depending on direction. Can start negative to stagger a burst. */
   progress: number
   seq: number
+  /** The host this packet's request/reply pair is talking to — captured at launch, not read from shared engine state (see the note on `hostLabel` below). */
+  host: string
 }
 
 export interface NetworkLogEntry {
@@ -37,6 +39,12 @@ export class NetworkEngine {
   private nextSeq = 1
   private log: NetworkLogEntry[] = []
   private nextLogId = 1
+  // Only for UI labeling ("ping {hostLabel}" quick-action, the server
+  // node's name) — "most recently referenced host" is a reasonable
+  // convenience there. NOT used for per-packet log lines: a packet
+  // in flight must remember the host *it* was launched against, since a
+  // second ping/curl to a different host can overwrite this before the
+  // first one's replies arrive — see Packet.host.
   private hostLabel = 'server'
 
   private pingsSent = 0
@@ -61,6 +69,7 @@ export class NetworkEngine {
         direction: 'client-to-server',
         progress: -i * 0.4,
         seq,
+        host,
       })
     }
     this.pingsSent += count
@@ -71,7 +80,14 @@ export class NetworkEngine {
     this.hostLabel = host
     const seq = this.nextSeq++
     this.pushLog(`GET / HTTP/1.1 -> ${host} (seq=${seq})`)
-    this.packets.push({ id: this.nextPacketId++, kind: 'http-req', direction: 'client-to-server', progress: 0, seq })
+    this.packets.push({
+      id: this.nextPacketId++,
+      kind: 'http-req',
+      direction: 'client-to-server',
+      progress: 0,
+      seq,
+      host,
+    })
     this.requestsSent++
   }
 
@@ -91,21 +107,29 @@ export class NetworkEngine {
   private onArrive(p: Packet, survivors: Packet[]): void {
     switch (p.kind) {
       case 'ping':
-        this.pushLog(`${this.hostLabel}: echo reply (seq=${p.seq})`)
-        survivors.push({ id: this.nextPacketId++, kind: 'pong', direction: 'server-to-client', progress: 0, seq: p.seq })
+        this.pushLog(`${p.host}: echo reply (seq=${p.seq})`)
+        survivors.push({
+          id: this.nextPacketId++,
+          kind: 'pong',
+          direction: 'server-to-client',
+          progress: 0,
+          seq: p.seq,
+          host: p.host,
+        })
         break
       case 'pong':
         this.pingsReceived++
-        this.pushLog(`client: reply from ${this.hostLabel}: seq=${p.seq} time=${LATENCY_TICKS * 2}t`)
+        this.pushLog(`client: reply from ${p.host}: seq=${p.seq} time=${LATENCY_TICKS * 2}t`)
         break
       case 'http-req':
-        this.pushLog(`${this.hostLabel}: 200 OK (seq=${p.seq})`)
+        this.pushLog(`${p.host}: 200 OK (seq=${p.seq})`)
         survivors.push({
           id: this.nextPacketId++,
           kind: 'http-res',
           direction: 'server-to-client',
           progress: 0,
           seq: p.seq,
+          host: p.host,
         })
         break
       case 'http-res':

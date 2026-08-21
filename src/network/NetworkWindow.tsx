@@ -39,7 +39,10 @@ export function NetworkWindow() {
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight })
-  }, [log])
+    // NetworkEngine.getLog() returns its own array, mutated in place
+    // (push/shift) rather than reassigned, so `log` is the same reference
+    // every render — `log.length` is what actually changes as entries arrive.
+  }, [log.length])
 
   return (
     <WindowFrame id="network" title="Network" subtitle="packet flow" accent="var(--accent-network)" icon={<NetworkIcon />}>

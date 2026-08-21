@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { DeadlockEngine, type DeadlockActorId } from './deadlock'
+import type { DeadlockActorId } from './deadlock'
 import { WarningIcon } from '../app/icons'
+import { deadlock as engine } from '../app/engines'
 
 const STEP_DELAY_MS = 750
 
@@ -56,7 +57,6 @@ function Arrow({
 }
 
 export function DeadlockPanel() {
-  const [engine] = useState(() => new DeadlockEngine())
   const [, forceRender] = useState(0)
   const runTokenRef = useRef(0)
 
@@ -95,8 +95,12 @@ export function DeadlockPanel() {
   const step = engine.getStep()
   const held = engine.getHeldBy()
   const wants = engine.getWants()
-  const cycleEdges = new Set(engine.getWaitForGraph().map((e) => `${e.from}-${e.to}`))
   const deadlocked = step === 'deadlocked'
+  // Gated on the actual detected cycle, not just "the wait-for graph has
+  // any edges" — one actor waiting on another (e.g. the 'p1-blocked-on-r2'
+  // step) is a real edge but not yet a cycle, and shouldn't render as
+  // critical/red before hasCycle() actually says so.
+  const cycleEdges = new Set(deadlocked ? engine.getWaitForGraph().map((e) => `${e.from}-${e.to}`) : [])
 
   return (
     <div className="win-body">

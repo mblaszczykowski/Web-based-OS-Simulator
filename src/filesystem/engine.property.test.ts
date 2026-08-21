@@ -12,6 +12,7 @@ const opArb = fc.oneof(
   fc.record({ kind: fc.constant('create' as const), path: fc.constantFrom(...PATHS) }),
   fc.record({ kind: fc.constant('write' as const), path: fc.constantFrom(...PATHS), text: fc.string({ maxLength: 12 }) }),
   fc.record({ kind: fc.constant('delete' as const), path: fc.constantFrom(...PATHS) }),
+  fc.record({ kind: fc.constant('mkdir' as const), path: fc.constantFrom(...PATHS) }),
   fc.record({
     kind: fc.constant('move' as const),
     path: fc.constantFrom(...PATHS),
@@ -34,6 +35,7 @@ describe('FilesystemEngine — property: block accounting always reconciles', ()
           if (op.kind === 'create') fs.create(op.path)
           else if (op.kind === 'write') fs.write(op.path, op.text)
           else if (op.kind === 'delete') fs.delete(op.path)
+          else if (op.kind === 'mkdir') fs.mkdir(op.path)
           else if (op.kind === 'move') fs.move(op.path, op.target)
           else fs.copy(op.path, op.target)
 
