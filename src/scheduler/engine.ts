@@ -183,21 +183,40 @@ export class SchedulerEngine {
   }
 
   /**
-   * SIGCONT — always resumes into READY at the process's last queue level,
-   * the same "no demotion" treatment rule 3 gives a process returning from
-   * I/O (see the class docs). This is a deliberate simplification for a
-   * process that was WAITING (mid I/O-burst) when stopped: rather than
-   * resuming the remainder of that burst, it re-enters the ready queue
-   * directly — treating stopped time as skipped entirely, consistent with
-   * stop()'s own "tick() doesn't consume the burst" behavior.
+   * SIGCONT — resumes into READY at the process's last queue level, never
+   * demoting it for having been stopped. Whether it also gets a *fresh*
+   * slice depends on what kind of burst it was paused mid-way through
+   * (bursts[] alternates CPU/IO/CPU/... starting and ending on CPU — see
+   * generateBursts() — so burstIndex's parity tells us which):
+   *  - Stopped mid-CPU-burst (RUNNING, or READY about to run one): resumes
+   *    with whatever sliceRemaining/burstRemaining it already had. Fixed
+   *    from an earlier version that unconditionally reset sliceRemaining
+   *    to a full quantum here — that let repeated SIGSTOP/SIGCONT grant an
+   *    unlimited string of fresh quanta at Q0, defeating MLFQ demotion
+   *    entirely (found by code review).
+   *  - Stopped mid-I/O-burst (WAITING): the same deliberate simplification
+   *    as before — rather than resuming the remainder of that I/O wait, it
+   *    completes that burst instantly (advancing burstIndex/burstRemaining
+   *    exactly like the real I/O-return step in tick() does) and gets a
+   *    fresh slice for the CPU burst it's about to start. This has to
+   *    actually advance burstIndex, not just jump to READY — the RUNNING
+   *    branch in tick() has no idea a paused burst was really an I/O one
+   *    and would otherwise silently misaccount it as CPU time, permanently
+   *    shifting which of the process's remaining bursts count as CPU vs
+   *    I/O (also found by code review).
    */
   cont(pid: number): Process | undefined {
     const process = this.processes.get(pid)
     if (!process || process.state === 'TERMINATED') return undefined
     if (process.state !== 'STOPPED') return process // idempotent — signalling a process that isn't stopped is harmless
 
+    const wasWaitingOnIO = process.burstIndex % 2 === 1
+    if (wasWaitingOnIO) {
+      process.burstIndex++
+      process.burstRemaining = process.bursts[process.burstIndex] ?? 0
+      process.sliceRemaining = this.config.quanta[process.queueLevel]
+    }
     process.state = 'READY'
-    process.sliceRemaining = this.config.quanta[process.queueLevel]
     this.queues[process.queueLevel].push(pid)
     return process
   }

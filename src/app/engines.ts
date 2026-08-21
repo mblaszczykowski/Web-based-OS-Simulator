@@ -96,14 +96,21 @@ function swapPath(pid: number, page: number): string {
 // briefly read "swapped" for a page with no real backing file until it
 // next faults, a narrow, self-correcting, and non-crashing edge case
 // accepted as a limitation of keeping the two engines decoupled.
+// Uses the permission-bypassing write/delete, not the normal ones: /swap
+// files are deliberately visible for inspection (`ls /swap`, `free`'s
+// hint), which means a user can reach them with `chmod`. Enforcing that
+// against the memory subsystem's own bookkeeping writes would let a user
+// permanently leak a disk block just by chmod'ing a swap file read-only
+// (found by code review) — real swap space isn't something userspace
+// permissions apply to either.
 function swapOut(pid: number, page: number): void {
   if (filesystem.isCrashed()) return
-  filesystem.write(swapPath(pid, page), SWAP_PAGE_CONTENT)
+  filesystem.writeIgnoringPermissions(swapPath(pid, page), SWAP_PAGE_CONTENT)
 }
 
 function swapIn(pid: number, page: number): void {
   if (filesystem.isCrashed()) return
-  filesystem.delete(swapPath(pid, page))
+  filesystem.deleteIgnoringPermissions(swapPath(pid, page))
 }
 
 /**
@@ -120,7 +127,7 @@ function clearSwapFiles(): void {
   const result = filesystem.list('/swap')
   if (!result.ok) return
   for (const entry of result.entries) {
-    if (entry.type === 'file') filesystem.delete(`/swap/${entry.name}`)
+    if (entry.type === 'file') filesystem.deleteIgnoringPermissions(`/swap/${entry.name}`)
   }
 }
 
@@ -145,24 +152,27 @@ simBus.on('process:terminated', ({ pid }) => {
 // writes to IndexedDB once, not once per keystroke's worth of state.
 const FS_SAVE_DEBOUNCE_MS = 400
 let fsSaveTimer: ReturnType<typeof setTimeout> | null = null
-// Tracked separately from fsSaveTimer, which is cleared to null the
-// moment the timer *fires* — well before the async IndexedDB write it
-// kicks off actually completes. Without this, resetFilesystem() calling
-// clearFilesystemState() while a save from *before* the reset is still
-// in flight is a real race: whichever of the two IndexedDB transactions
-// commits last wins, and if it's the stale save, the pre-reset disk gets
-// silently resurrected on the next load despite the explicit reset.
-let fsSaveInFlight: Promise<void> | null = null
+// Every save currently in flight, not just the latest one. A single
+// shared variable isn't enough here: the debounce restarts on every
+// mutation, but nothing stops a *second* debounced save from starting
+// (and overwriting a single "the in-flight save" slot) while the first
+// one is still pending — a slow IndexedDB write plus back-to-back
+// mutations makes this a real, if narrow, window. resetFilesystem() and
+// the cross-tab handler below both need to wait for ALL of them, or
+// whichever one finishes last after they've stopped waiting can still
+// silently resurrect stale content (found by code review).
+const fsSavesInFlight = new Set<Promise<void>>()
 
 function scheduleFilesystemSave(): void {
   if (fsSaveTimer !== null) clearTimeout(fsSaveTimer)
   fsSaveTimer = setTimeout(() => {
     fsSaveTimer = null
-    fsSaveInFlight = saveFilesystemState(filesystem.exportState())
+    const save = saveFilesystemState(filesystem.exportState())
       .then(() => announceFilesystemChange())
       .finally(() => {
-        fsSaveInFlight = null
+        fsSavesInFlight.delete(save)
       })
+    fsSavesInFlight.add(save)
   }, FS_SAVE_DEBOUNCE_MS)
 }
 
@@ -170,23 +180,37 @@ simBus.on('fs:mutated', scheduleFilesystemSave)
 simBus.on('fs:crashed', scheduleFilesystemSave)
 simBus.on('fs:recovered', scheduleFilesystemSave)
 
+/** Is there a local save pending or in flight right now — i.e. does this tab have its own unsaved/unconfirmed edit? */
+function hasPendingLocalSave(): boolean {
+  return fsSaveTimer !== null || fsSavesInFlight.size > 0
+}
+
 // Cross-tab consistency (roadmap-v3.md §2.5) — see the long comment in
-// filesystem/persistence.ts for why this exists. A pending local save is
-// cancelled first: it would otherwise fire moments later and overwrite
-// the just-imported, newer state with this tab's now-stale snapshot.
+// filesystem/persistence.ts for why this exists. Only absorbs another
+// tab's change while THIS tab has no unsaved local edit of its own: an
+// earlier version always overwrote the live engine via importState(),
+// which meant an actively-edited tab could have its own not-yet-saved
+// work silently discarded by a change announced from elsewhere — not
+// just a brief window, but for as long as edits kept restarting the
+// debounce (found by code review). A tab with local edits pending simply
+// doesn't sync until it goes idle; its own next save still wins normally.
+// `state === null` means the other tab's change was a reset (see
+// resetFilesystem() below, which now also announces) — mirrored locally
+// with resetToEmpty() rather than silently keeping stale content.
+//
 // Deliberately does not attempt to reconcile MemoryEngine's per-tab
 // `swapped` bookkeeping against whatever /swap/* files land in the
 // imported tree — memory is tab-local by design (plan.md §2.5) and pids
 // are independently numbered per tab, so a swap page file's name can't be
 // meaningfully cross-referenced across tabs anyway.
 onExternalFilesystemChange(() => {
-  if (fsSaveTimer !== null) {
-    clearTimeout(fsSaveTimer)
-    fsSaveTimer = null
-  }
+  if (hasPendingLocalSave()) return
   void (async () => {
     const state = await loadFilesystemState()
-    if (state && filesystem.importState(state)) {
+    if (state) {
+      if (filesystem.importState(state)) simBus.emit('fs:external-change', {})
+    } else {
+      filesystem.resetToEmpty()
       simBus.emit('fs:external-change', {})
     }
   })()
@@ -199,12 +223,17 @@ export function resetFilesystem(): void {
     clearTimeout(fsSaveTimer)
     fsSaveTimer = null
   }
-  const inFlight = fsSaveInFlight
+  const inFlight = [...fsSavesInFlight]
   void (async () => {
-    // Let any save that had already started finish first, so the clear
-    // below is always the last IndexedDB write — see fsSaveInFlight above.
-    if (inFlight) await inFlight.catch(() => {})
+    // Let every save already in flight finish first, so the clear below
+    // is always the last IndexedDB write — see fsSavesInFlight above.
+    await Promise.allSettled(inFlight)
     await clearFilesystemState()
+    // Other tabs only find out about a reset by hearing about it — this
+    // was missing before (found by code review): without it, another
+    // open tab keeps its stale pre-reset state indefinitely, and its next
+    // save silently re-persists that stale disk, undoing the reset.
+    announceFilesystemChange()
   })()
 }
 

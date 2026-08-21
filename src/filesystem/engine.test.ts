@@ -316,6 +316,40 @@ describe('FilesystemEngine — chmod / permissions (roadmap-v3.md §2.3)', () =>
     expect(fs.chmod('/nope.txt', 0o6).ok).toBe(false)
     expect(fs.chmod('/a.txt', 6)).toEqual({ ok: true }) // sanity: a valid call still works
   })
+
+  it('regression: crash() + fsck() cannot bypass the write-permission check (found by code review)', () => {
+    // crash() always fabricates a pending 'write' entry against
+    // lastTouchedPath, regardless of what actually last happened — fsck()
+    // used to replay it straight through apply(), which never checked
+    // MODE_WRITE, silently appending to a file whose write bit had since
+    // been removed.
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hi')
+    fs.chmod('/a.txt', 0b100) // r-- : read-only, also sets lastTouchedPath to /a.txt
+
+    fs.crash()
+    const { replayed } = fs.fsck()
+    expect(replayed).toHaveLength(1)
+
+    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hi' }) // unchanged — the replay was silently skipped
+    expect(fs.isCrashed()).toBe(false) // fsck() still clears crashed state even though the replay itself was a no-op
+  })
+})
+
+describe('FilesystemEngine — internal permission-bypassing writes (swap coordinator only)', () => {
+  it('writeIgnoringPermissions/deleteIgnoringPermissions succeed against a read-only file', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.write('/swap/1-0.swp', 'x')
+    fs.chmod('/swap/1-0.swp', 0b100) // r-- : simulate a user locking it down
+
+    expect(fs.write('/swap/1-0.swp', '!').ok).toBe(false) // the normal path still enforces permissions
+    expect(fs.writeIgnoringPermissions('/swap/1-0.swp', '!')).toEqual({ ok: true })
+    expect(fs.read('/swap/1-0.swp')).toEqual({ ok: true, content: 'x!' })
+
+    expect(fs.delete('/swap/1-0.swp').ok).toBe(false)
+    expect(fs.deleteIgnoringPermissions('/swap/1-0.swp')).toEqual({ ok: true })
+    expect(fs.read('/swap/1-0.swp').ok).toBe(false)
+  })
 })
 
 describe('FilesystemEngine — export / import round-trip (persistence)', () => {

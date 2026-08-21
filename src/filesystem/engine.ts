@@ -96,6 +96,24 @@ export class FilesystemEngine {
     return this.mutate('delete', path)
   }
 
+  /**
+   * write()/delete() that skip the permission check (roadmap-v3.md §2.3
+   * still applies to every OTHER caller) — for the memory subsystem's
+   * swap-to-disk coordinator (app/engines.ts) only, never exposed through
+   * CommandContext/the terminal. `/swap/*` files are kernel-managed
+   * bookkeeping, not user data, even though they're deliberately visible
+   * for inspection (`ls /swap`, `free`'s hint) — a user chmod'ing one
+   * read-only must not be able to permanently leak a disk block by
+   * blocking its own cleanup (found by code review).
+   */
+  writeIgnoringPermissions(path: string, text: string): FsResult {
+    return this.mutate('write', path, text, { skipPermissionCheck: true })
+  }
+
+  deleteIgnoringPermissions(path: string): FsResult {
+    return this.mutate('delete', path, undefined, { skipPermissionCheck: true })
+  }
+
   mkdir(path: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
@@ -237,7 +255,7 @@ export class FilesystemEngine {
     return { replayed: pending }
   }
 
-  private mutate(op: JournalOp, path: string, content?: string): FsResult {
+  private mutate(op: JournalOp, path: string, content?: string, opts: { skipPermissionCheck?: boolean } = {}): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
 
@@ -258,7 +276,9 @@ export class FilesystemEngine {
     // EXISTING file: writing a brand-new one has nothing to deny yet (it
     // gets DEFAULT_FILE_MODE once applyCreate() actually makes it), and
     // rm's existence check above guarantees the file is there by this point.
-    if (op === 'write' || op === 'delete') {
+    // Skipped for the swap coordinator's internal calls — see
+    // writeIgnoringPermissions()/deleteIgnoringPermissions() above.
+    if ((op === 'write' || op === 'delete') && !opts.skipPermissionCheck) {
       const existing = this.findFileEntry(path)
       if (existing) {
         const inode = this.inodes.get(existing.inode!)!
@@ -269,7 +289,12 @@ export class FilesystemEngine {
       return { ok: false, error: `write: ${path}: No space left on device` }
     }
 
-    this.commitJournalEntry(op, { path, content, touchedPath: op === 'delete' ? null : path })
+    this.commitJournalEntry(op, {
+      path,
+      content,
+      touchedPath: op === 'delete' ? null : path,
+      skipPermissionCheck: opts.skipPermissionCheck,
+    })
     return { ok: true }
   }
 
@@ -282,11 +307,16 @@ export class FilesystemEngine {
    * mkdir/move/copy): log it pending, apply it, mark it committed, update
    * lastTouchedPath, and announce it. Every caller has already done its
    * own op-specific validation by this point — this only ever runs on an
-   * operation that's going to succeed.
+   * operation that's going to succeed. `skipPermissionCheck` only ever
+   * comes from mutate() forwarding writeIgnoringPermissions()/
+   * deleteIgnoringPermissions()'s own opt-out — fsck()'s replay call
+   * below never passes it, so a replayed entry is always re-checked
+   * against the file's CURRENT mode regardless of what let the original
+   * write commit (see applyWrite()/applyDelete()).
    */
   private commitJournalEntry(
     op: JournalOp,
-    opts: { path: string; content?: string; target?: string; touchedPath: string | null },
+    opts: { path: string; content?: string; target?: string; touchedPath: string | null; skipPermissionCheck?: boolean },
   ): void {
     const entry: JournalEntry = {
       id: this.nextJournalId++,
@@ -300,20 +330,20 @@ export class FilesystemEngine {
     this.journal.push(entry)
     this.trimJournal()
 
-    this.apply(op, opts.path, opts.content ?? '', opts.target)
+    this.apply(op, opts.path, opts.content ?? '', opts.target, opts.skipPermissionCheck)
     entry.status = 'committed'
     if (opts.touchedPath !== null) this.lastTouchedPath = opts.touchedPath
     simBus.emit('fs:mutated', { op, path: opts.touchedPath ?? opts.path })
   }
 
-  private apply(op: JournalOp, path: string, content: string, target?: string): void {
+  private apply(op: JournalOp, path: string, content: string, target?: string, skipPermissionCheck = false): void {
     switch (op) {
       case 'create':
         return this.applyCreate(path)
       case 'write':
-        return this.applyWrite(path, content)
+        return this.applyWrite(path, content, skipPermissionCheck)
       case 'delete':
-        return this.applyDelete(path)
+        return this.applyDelete(path, skipPermissionCheck)
       case 'mkdir':
         return this.applyMkdir(path)
       case 'move':
@@ -422,7 +452,7 @@ export class FilesystemEngine {
     dir.children!.push({ name, type: 'file', inode: inode.id })
   }
 
-  private applyWrite(path: string, text: string): void {
+  private applyWrite(path: string, text: string, skipPermissionCheck = false): void {
     let fileEntry = this.findFileEntry(path)
     if (!fileEntry) {
       this.applyCreate(path)
@@ -430,6 +460,13 @@ export class FilesystemEngine {
       if (!fileEntry) return
     }
     const inode = this.inodes.get(fileEntry.inode!)!
+    // write()/mutate() already check this for a normal call, but fsck()
+    // always calls apply() with skipPermissionCheck left at its default
+    // (false) — without this, crash()+fsck() could silently bypass the
+    // write-permission check entirely (crash() always fabricates a
+    // generic 'write' op against whatever path was last touched,
+    // regardless of its current mode — found by code review).
+    if (!skipPermissionCheck && !(inode.mode & MODE_WRITE)) return
     inode.content += text
     inode.size = inode.content.length
 
@@ -441,10 +478,13 @@ export class FilesystemEngine {
     }
   }
 
-  private applyDelete(path: string): void {
+  private applyDelete(path: string, skipPermissionCheck = false): void {
     const fileEntry = this.findFileEntry(path)
     if (!fileEntry) return
     const inode = this.inodes.get(fileEntry.inode!)
+    // Same reasoning as applyWrite() above — fsck() replay must not be
+    // able to bypass the write-permission check that gates a normal rm().
+    if (inode && !skipPermissionCheck && !(inode.mode & MODE_WRITE)) return
     if (inode) {
       // A hard-linked file (roadmap-v3.md §2.1) has more than one
       // directory entry pointing at this inode — only the entry named by

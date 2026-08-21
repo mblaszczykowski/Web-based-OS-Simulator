@@ -224,6 +224,61 @@ describe('SchedulerEngine — stop() / cont() (roadmap-v3.md §2.2, SIGSTOP/SIGC
     expect(engine.stop(p1.pid)).toBeUndefined()
     expect(engine.cont(p1.pid)).toBeUndefined()
   })
+
+  it('regression: repeated SIGSTOP/SIGCONT cannot dodge MLFQ demotion by granting endless fresh quanta (found by code review)', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    const p1 = createProcess('hog', 'cpu-bound', [100])
+    engine.spawn(p1)
+
+    engine.tick() // 1
+    engine.tick() // 2
+    engine.tick() // 3 — one tick left in the 4-tick Q0 quantum
+    expect(p1.queueLevel).toBe(0)
+    expect(p1.sliceRemaining).toBe(1)
+
+    // Stop and resume repeatedly right at this exact point in the slice —
+    // a version that reset sliceRemaining to a fresh quantum on cont()
+    // would let this process sit at Q0 forever, never demoted.
+    for (let i = 0; i < 5; i++) {
+      engine.stop(p1.pid)
+      engine.cont(p1.pid)
+      expect(p1.sliceRemaining).toBe(1) // unchanged by the stop/cont cycle itself
+    }
+
+    engine.tick() // the 4th tick of the ORIGINAL quantum — must demote now
+    expect(p1.queueLevel).toBe(1)
+  })
+
+  it('regression: resuming a process stopped mid-I/O-burst treats that I/O as complete instead of miscounting the wait as CPU time (found by code review)', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    // CPU 2, IO 5, CPU 3 — burstIndex 1 (the IO burst) is where we'll stop it.
+    const p1 = createProcess('interactive', 'interactive', [2, 5, 3])
+    engine.spawn(p1)
+    engine.tick()
+    engine.tick() // burns the 2-tick CPU burst -> WAITING, burstIndex 1, burstRemaining 5
+    expect(p1.state).toBe('WAITING')
+    expect(p1.burstIndex).toBe(1)
+
+    engine.stop(p1.pid)
+    expect(p1.state).toBe('STOPPED')
+
+    const resumed = engine.cont(p1.pid)
+    expect(resumed?.state).toBe('READY')
+    // The I/O burst is treated as having just completed: burstIndex
+    // advances to the final CPU burst, with a fresh slice — exactly what
+    // the real I/O-return step in tick() would have done.
+    expect(p1.burstIndex).toBe(2)
+    expect(p1.burstRemaining).toBe(3)
+    expect(p1.sliceRemaining).toBe(4)
+
+    engine.tick() // dispatched
+    engine.tick()
+    engine.tick() // finishes its real final 3-tick CPU burst
+    expect(p1.state).toBe('TERMINATED')
+    // totalBurstTicks only ever counted genuine CPU bursts (2 + 3 = 5) —
+    // the abandoned I/O wait was never miscounted as CPU work.
+    expect(p1.totalBurstTicks).toBe(5)
+  })
 })
 
 describe('SchedulerEngine — process:terminated event', () => {
