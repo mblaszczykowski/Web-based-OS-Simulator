@@ -14,10 +14,6 @@ export function Desktop() {
     <div className="app-root">
       <SkipLink />
 
-      <div className="blob blob--a" />
-      <div className="blob blob--b" />
-      <div className="blob blob--c" />
-
       <MenuBar />
 
       <SchedulerWindow />

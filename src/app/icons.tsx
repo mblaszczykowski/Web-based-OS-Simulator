@@ -149,6 +149,24 @@ export function NetworkIcon({ size = 14 }: IconProps) {
   )
 }
 
+export function CpuIcon({ size = 13 }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <rect x="6" y="6" width="8" height="8" rx="1" />
+      <path d="M9 2v3M11 2v3M9 15v3M11 15v3M2 9h3M2 11h3M15 9h3M15 11h3" />
+    </svg>
+  )
+}
+
+export function MemChipIcon({ size = 13 }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="5" width="14" height="10" rx="1.5" />
+      <path d="M6.5 8v4M10 8v4M13.5 8v4" />
+    </svg>
+  )
+}
+
 export function WarningIcon({ size = 13 }: IconProps) {
   return (
     <svg viewBox="0 0 20 20" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">

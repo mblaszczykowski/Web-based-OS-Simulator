@@ -1,6 +1,6 @@
 import { useSimStore } from './store'
 import { memory, scheduler } from './engines'
-import { LogoIcon, PauseIcon, PlayIcon } from './icons'
+import { CpuIcon, LogoIcon, MemChipIcon, PauseIcon, PlayIcon } from './icons'
 
 export function MenuBar() {
   const running = useSimStore((s) => s.running)
@@ -39,8 +39,15 @@ export function MenuBar() {
         >
           {demo.active ? '■ Stop demo' : '▶ Watch demo'}
         </button>
-        <span>CPU {cpu}%</span>
-        <span>MEM {mem}%</span>
+        <span className="menubar-stat">
+          <CpuIcon size={13} />
+          CPU <strong>{cpu}%</strong>
+        </span>
+        <span className="menubar-stat">
+          <MemChipIcon size={13} />
+          MEM <strong>{mem}%</strong>
+        </span>
+        <span className="menubar-sep" />
         <button
           type="button"
           className="menubar-btn"

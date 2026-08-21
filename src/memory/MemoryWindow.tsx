@@ -12,6 +12,7 @@ export function MemoryWindow() {
   const blocks = memory.getContiguousBlocks()
   const metrics = memory.getMetrics()
   const usedFrames = frames.filter((f) => f.owner !== null).length
+  const kernelFrames = frames.filter((f) => f.owner?.pid === 0).length
 
   const processes = scheduler.getProcesses()
   const focusProcess = scheduler.getRunning() ?? processes.find((p) => p.state !== 'TERMINATED')
@@ -20,7 +21,7 @@ export function MemoryWindow() {
   const totalArena = blocks.reduce((sum, b) => sum + b.size, 0)
 
   return (
-    <WindowFrame id="memory" title="Memory" subtitle="Clock paging" accent="var(--accent-memory)" icon={<MemoryIcon />}>
+    <WindowFrame id="memory" title="Memory" subtitle="Clock paging" accent="var(--accent)" icon={<MemoryIcon />}>
       <div className="win-body">
         <div className="mem-sidebar">
           <div className="field">
@@ -70,7 +71,10 @@ export function MemoryWindow() {
         <div className="mem-main">
           <div>
             <div className="row-between">
-              <span className="label">RAM &mdash; {frames.length} frames</span>
+              <span className="label">
+                RAM &mdash; {frames.length} frames &middot; {kernelFrames} kernel &middot; {usedFrames - kernelFrames} allocated
+                &middot; {frames.length - usedFrames} free
+              </span>
               <div className="legend">
                 <span className="legend-item">
                   <span className="swatch" style={{ background: 'var(--kernel)' }} />

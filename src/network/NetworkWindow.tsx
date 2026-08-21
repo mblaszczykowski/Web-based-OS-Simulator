@@ -52,7 +52,7 @@ export function NetworkWindow() {
   }, [latestLogId])
 
   return (
-    <WindowFrame id="network" title="Network" subtitle="packet flow" accent="var(--accent-network)" icon={<NetworkIcon />}>
+    <WindowFrame id="network" title="Network" subtitle="packet flow" accent="var(--accent)" icon={<NetworkIcon />}>
       <div className="win-body">
         <div className="mem-sidebar">
           <div className="field">

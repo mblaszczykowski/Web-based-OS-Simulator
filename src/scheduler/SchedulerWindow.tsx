@@ -38,7 +38,7 @@ export function SchedulerWindow() {
   }
 
   return (
-    <WindowFrame id="scheduler" title="Scheduler" subtitle="MLFQ" accent="var(--accent-scheduler)" icon={<SchedulerIcon />}>
+    <WindowFrame id="scheduler" title="Scheduler" subtitle="MLFQ" accent="var(--accent)" icon={<SchedulerIcon />}>
       <div className="win-body">
         <div className="sched-sidebar">
           <div className="field">

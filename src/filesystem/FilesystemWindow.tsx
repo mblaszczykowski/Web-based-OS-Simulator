@@ -44,7 +44,7 @@ export function FilesystemWindow() {
       id="filesystem"
       title="Filesystem"
       subtitle="inode-based · journaled"
-      accent="var(--accent-fs)"
+      accent="var(--accent)"
       icon={<FilesystemIcon />}
     >
       <div className="win-body">

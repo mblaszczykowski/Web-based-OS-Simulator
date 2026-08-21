@@ -150,7 +150,7 @@ export function TerminalWindow() {
       id="terminal"
       title="Terminal"
       subtitle={demo.active ? 'auto-demo running…' : undefined}
-      accent="var(--accent-terminal)"
+      accent="var(--accent)"
       icon={<TerminalIcon />}
     >
       <div className="term-body" onClick={() => inputRef.current?.focus()}>

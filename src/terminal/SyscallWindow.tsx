@@ -16,7 +16,7 @@ export function SyscallWindow() {
       id="syscalls"
       title="Syscall trace"
       subtitle="fictional, for flavour"
-      accent="var(--accent-syscall)"
+      accent="var(--accent)"
       icon={<TraceIcon />}
     >
       <div className="win-body column">

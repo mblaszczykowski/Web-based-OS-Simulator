@@ -57,7 +57,7 @@ export function SyncWindow() {
       id="sync"
       title="Process sync"
       subtitle={tab === 'buffer' ? 'bounded buffer' : tab === 'deadlock' ? 'deadlock detection' : "banker's algorithm"}
-      accent="var(--accent-sync)"
+      accent="var(--accent)"
       icon={<SyncIcon />}
     >
       <div className="win-tabs" role="tablist" aria-label="Sync module demo" onKeyDown={handleTabsKeyDown}>
