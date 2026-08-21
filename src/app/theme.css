@@ -353,6 +353,31 @@ button {
   background: rgba(255, 255, 255, 0.1);
   color: var(--text-primary);
 }
+.win-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 8px 14px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.win-tab {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-radius: 6px 6px 0 0;
+  border-bottom: 2px solid transparent;
+}
+.win-tab:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+}
+.win-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
 .win-body {
   flex-grow: 1;
   display: flex;
