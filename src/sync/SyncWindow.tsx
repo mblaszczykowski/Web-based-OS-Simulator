@@ -4,12 +4,14 @@ import { SyncIcon } from '../app/icons'
 import { useSimStore } from '../app/store'
 import { BoundedBufferPanel } from './BoundedBufferPanel'
 import { DeadlockPanel } from './DeadlockPanel'
+import { BankerPanel } from './BankerPanel'
 
-type Tab = 'buffer' | 'deadlock'
+type Tab = 'buffer' | 'deadlock' | 'banker'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'buffer', label: 'Bounded buffer' },
   { id: 'deadlock', label: 'Deadlock detection' },
+  { id: 'banker', label: "Banker's Algorithm" },
 ]
 
 // Fills the remaining vertical space below the tab bar exactly like the
@@ -22,11 +24,16 @@ export function SyncWindow() {
   const [tab, setTab] = useState<Tab>('buffer')
   const bufferTabRef = useRef<HTMLButtonElement>(null)
   const deadlockTabRef = useRef<HTMLButtonElement>(null)
+  const bankerTabRef = useRef<HTMLButtonElement>(null)
   // Only true when a tab change originated from arrow-key navigation (not
   // a click, which already focuses the button it hits) — see the effect below.
   const shouldFocusTab = useRef(false)
 
-  const tabRefs: Record<Tab, RefObject<HTMLButtonElement>> = { buffer: bufferTabRef, deadlock: deadlockTabRef }
+  const tabRefs: Record<Tab, RefObject<HTMLButtonElement>> = {
+    buffer: bufferTabRef,
+    deadlock: deadlockTabRef,
+    banker: bankerTabRef,
+  }
 
   useEffect(() => {
     if (!shouldFocusTab.current) return
@@ -49,7 +56,7 @@ export function SyncWindow() {
     <WindowFrame
       id="sync"
       title="Process sync"
-      subtitle={tab === 'buffer' ? 'bounded buffer' : 'deadlock detection'}
+      subtitle={tab === 'buffer' ? 'bounded buffer' : tab === 'deadlock' ? 'deadlock detection' : "banker's algorithm"}
       accent="var(--accent-sync)"
       icon={<SyncIcon />}
     >
@@ -80,6 +87,19 @@ export function SyncWindow() {
         >
           Deadlock detection
         </button>
+        <button
+          ref={bankerTabRef}
+          type="button"
+          id="sync-tab-banker"
+          role="tab"
+          aria-selected={tab === 'banker'}
+          aria-controls="sync-panel-banker"
+          tabIndex={tab === 'banker' ? 0 : -1}
+          className={`win-tab${tab === 'banker' ? ' active' : ''}`}
+          onClick={() => setTab('banker')}
+        >
+          Banker&rsquo;s Algorithm
+        </button>
       </div>
       <div
         id="sync-panel-buffer"
@@ -98,6 +118,15 @@ export function SyncWindow() {
         style={TABPANEL_STYLE}
       >
         {tab === 'deadlock' && <DeadlockPanel />}
+      </div>
+      <div
+        id="sync-panel-banker"
+        role="tabpanel"
+        aria-labelledby="sync-tab-banker"
+        hidden={tab !== 'banker'}
+        style={TABPANEL_STYLE}
+      >
+        {tab === 'banker' && <BankerPanel />}
       </div>
     </WindowFrame>
   )

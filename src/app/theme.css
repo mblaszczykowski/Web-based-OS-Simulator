@@ -1256,6 +1256,42 @@ button {
   font-weight: 700;
 }
 
+/* Banker's Algorithm (roadmap-v3.md §3.1) ---------------------------------- */
+.sync-log-row--granted {
+  color: var(--accent-terminal);
+}
+.sync-log-row--denied {
+  color: var(--critical);
+}
+.banker-request-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.banker-select,
+.banker-input {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 6px;
+}
+.banker-input {
+  width: 48px;
+}
+.banker-qty-label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 /* Syscall trace ----------------------------------------------------------- */
 .syscall-panel {
   flex-grow: 1;

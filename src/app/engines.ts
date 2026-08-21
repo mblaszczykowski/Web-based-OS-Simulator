@@ -19,6 +19,7 @@ import {
 } from '../filesystem/persistence'
 import { SyncEngine } from '../sync/engine'
 import { DeadlockEngine } from '../sync/deadlock'
+import { BankerEngine } from '../sync/banker'
 import { NetworkEngine } from '../network/engine'
 import { simBus } from '../shared/eventBus'
 
@@ -31,6 +32,10 @@ export const network = new NetworkEngine()
 // discard simulation progress (that's the whole reason every other window
 // just reads straight off a shared instance instead of owning its own).
 export const deadlock = new DeadlockEngine()
+// Deadlock *avoidance* (roadmap-v3.md §3.1) — sits alongside `deadlock`
+// (detection) as a second, independent extension of the sync module, same
+// singleton-per-module pattern as every other engine here.
+export const banker = new BankerEngine()
 
 // Reassignable (not const) because "show race condition" / "reset" restart
 // this module from scratch rather than mutating it in place — a mode
