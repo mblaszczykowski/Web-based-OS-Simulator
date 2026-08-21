@@ -124,6 +124,65 @@ const initialWindows: Record<WindowId, WindowState> = {
   network: { x: 260, y: 180, w: 520, h: 400, open: false, zIndex: 1 },
 }
 
+const WINDOW_IDS = Object.keys(initialWindows) as WindowId[]
+
+// Window layout persistence (roadmap-v3.md §1.4) — cosmetic UI state, so
+// localStorage (same medium as terminal history), not IndexedDB (that's
+// reserved for the simulated "disk" — see filesystem/persistence.ts).
+// Debounced the same way the filesystem save is, so dragging/resizing
+// doesn't hit localStorage on every pointermove tick.
+const WINDOWS_STORAGE_KEY = 'ossim.windows.layout'
+const WINDOWS_SAVE_DEBOUNCE_MS = 400
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v)
+}
+
+function isValidWindowState(v: unknown): v is WindowState {
+  if (typeof v !== 'object' || v === null) return false
+  const w = v as Record<string, unknown>
+  return (
+    isFiniteNumber(w.x) &&
+    isFiniteNumber(w.y) &&
+    isFiniteNumber(w.w) &&
+    isFiniteNumber(w.h) &&
+    isFiniteNumber(w.zIndex) &&
+    typeof w.open === 'boolean'
+  )
+}
+
+/**
+ * Loads a persisted layout, merged field-by-field onto the defaults: a
+ * stored record missing an entry (e.g. a window added in a later build
+ * than the one that saved it) or with a malformed one just falls back to
+ * that single window's default instead of discarding the whole layout.
+ */
+function loadWindows(): Record<WindowId, WindowState> {
+  try {
+    const raw = window.localStorage.getItem(WINDOWS_STORAGE_KEY)
+    if (!raw) return initialWindows
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return initialWindows
+    const record = parsed as Record<string, unknown>
+    const merged = { ...initialWindows }
+    for (const id of WINDOW_IDS) {
+      const candidate = record[id]
+      if (isValidWindowState(candidate)) merged[id] = candidate
+    }
+    return merged
+  } catch {
+    return initialWindows
+  }
+}
+
+function saveWindows(windows: Record<WindowId, WindowState>): void {
+  try {
+    window.localStorage.setItem(WINDOWS_STORAGE_KEY, JSON.stringify(windows))
+  } catch {
+    // localStorage unavailable (private mode / quota) — layout just won't persist, not fatal.
+  }
+}
+
 export const useSimStore = create<SimStore>((set, get) => ({
   tick: 0,
   version: 0,
@@ -136,7 +195,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
     makeLine('output', 'OS.SIM boot complete — MLFQ scheduler, Clock paging, journaled filesystem online.'),
     makeLine('output', "Type 'help' to see available commands."),
   ],
-  windows: initialWindows,
+  windows: loadWindows(),
   focusedWindow: 'scheduler',
   topZ: 3,
   demo: { active: false, typedText: '' },
@@ -291,3 +350,10 @@ export const useSimStore = create<SimStore>((set, get) => ({
     set({ demo: { active: false, typedText: '' } })
   },
 }))
+
+let windowsSaveTimer: ReturnType<typeof setTimeout> | null = null
+useSimStore.subscribe((state, prevState) => {
+  if (state.windows === prevState.windows) return
+  if (windowsSaveTimer !== null) clearTimeout(windowsSaveTimer)
+  windowsSaveTimer = setTimeout(() => saveWindows(state.windows), WINDOWS_SAVE_DEBOUNCE_MS)
+})
