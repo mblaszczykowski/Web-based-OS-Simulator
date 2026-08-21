@@ -3,7 +3,7 @@ import { WindowFrame } from '../app/WindowFrame'
 import { FilesystemIcon, FolderIcon, FileIcon, WarningIcon } from '../app/icons'
 import { useSimStore } from '../app/store'
 import { filesystem } from '../app/engines'
-import { colorForPid } from '../app/colors'
+import { colorForPid, labelColorForPid } from '../app/colors'
 
 function TreeNode({ entry, depth }: { entry: DirEntry; depth: number }) {
   if (entry.type === 'file') {
@@ -99,7 +99,9 @@ export function FilesystemWindow() {
                 <div
                   key={b.index}
                   className={`cell${b.owner === null ? ' free' : ''}`}
-                  style={b.owner !== null ? { background: colorForPid(b.owner) } : undefined}
+                  style={
+                    b.owner !== null ? { background: colorForPid(b.owner), color: labelColorForPid(b.owner) } : undefined
+                  }
                   title={b.owner !== null ? `inode ${b.owner}` : 'free'}
                 >
                   {b.owner === null ? '·' : `I${b.owner}`}

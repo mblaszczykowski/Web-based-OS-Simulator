@@ -2,7 +2,7 @@ import { WindowFrame } from '../app/WindowFrame'
 import { MemoryIcon } from '../app/icons'
 import { useSimStore } from '../app/store'
 import { memory, scheduler } from '../app/engines'
-import { colorForPid } from '../app/colors'
+import { colorForPid, labelColorForPid } from '../app/colors'
 
 export function MemoryWindow() {
   useSimStore((s) => s.version) // subscribed purely so this window re-renders on every tick/command
@@ -87,7 +87,11 @@ export function MemoryWindow() {
                 <div
                   key={f.index}
                   className={`cell${f.owner === null ? ' free' : f.owner.pid === 0 ? ' kernel' : ''}${f.index === clockHand ? ' hand' : ''}`}
-                  style={f.owner && f.owner.pid !== 0 ? { background: colorForPid(f.owner.pid) } : undefined}
+                  style={
+                    f.owner && f.owner.pid !== 0
+                      ? { background: colorForPid(f.owner.pid), color: labelColorForPid(f.owner.pid) }
+                      : undefined
+                  }
                   title={f.index === clockHand ? 'clock hand' : undefined}
                 >
                   {f.owner === null ? '·' : f.owner.pid === 0 ? 'OS' : `P${f.owner.pid}`}
@@ -134,7 +138,11 @@ export function MemoryWindow() {
                     <div
                       key={b.id}
                       className={`alloc-seg${b.owner === null ? ' free' : ''}`}
-                      style={{ flex: b.size, background: b.owner !== null ? colorForPid(b.owner) : undefined }}
+                      style={{
+                        flex: b.size,
+                        background: b.owner !== null ? colorForPid(b.owner) : undefined,
+                        color: b.owner !== null ? labelColorForPid(b.owner) : undefined,
+                      }}
                     >
                       {b.owner !== null ? `P${b.owner}` : ''}
                     </div>

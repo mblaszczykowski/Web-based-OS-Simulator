@@ -75,6 +75,10 @@ Tab-completes commands and filesystem paths, and persists command history to `lo
 
 React + TypeScript, Zustand, Vite, Vitest — no D3/Recharts, no backend. All visualisations (Gantt chart, RAM/disk grids, allocation strip) are hand-built CSS/flex/grid. The filesystem's "disk" persists across reloads via IndexedDB — scheduler and memory still reset on refresh, deliberately (see `plan.md` §2.5).
 
+## Accessibility
+
+A skip link, a screen-reader-announced terminal (`aria-live`), a per-window Tab focus trap, keyboard-movable/resizable windows (focus a titlebar, then use arrow keys), and labeled controls throughout. The color palette's contrast was formally verified against WCAG AA — that check found and fixed two real gaps: `--text-muted` was ~2.9:1 against panel backgrounds (needs 4.5:1), and one categorical PID color failed against a fixed dark label, so cell/segment labels now pick whichever of a dark/light label actually has higher contrast against that specific swatch (see `src/app/colors.ts`).
+
 ## Getting started
 
 ```bash

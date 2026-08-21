@@ -10,6 +10,10 @@ import { SyncWindow } from '../sync/SyncWindow'
 export function Desktop() {
   return (
     <div className="app-root">
+      <a className="skip-link" href="#terminal-input">
+        Skip to terminal
+      </a>
+
       <div className="blob blob--a" />
       <div className="blob blob--b" />
       <div className="blob blob--c" />

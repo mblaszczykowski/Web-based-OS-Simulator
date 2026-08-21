@@ -3,7 +3,7 @@ import { SchedulerIcon } from '../app/icons'
 import { useSimStore } from '../app/store'
 import { scheduler } from '../app/engines'
 import { DEFAULT_SCHEDULER_CONFIG } from './engine'
-import { colorForPid } from '../app/colors'
+import { colorForPid, labelColorForPid } from '../app/colors'
 import { ProcessTree } from './ProcessTree'
 
 const STATE_PILL_CLASS: Record<string, string> = {
@@ -100,7 +100,7 @@ export function SchedulerWindow() {
               <div
                 key={i}
                 className={`gantt-seg${pid === null ? ' idle' : ''}`}
-                style={{ background: pid === null ? undefined : colorForPid(pid) }}
+                style={pid === null ? undefined : { background: colorForPid(pid), color: labelColorForPid(pid) }}
                 title={pid === null ? 'idle' : `P${pid}`}
               >
                 {pid !== null && ganttLog.length <= 24 ? `P${pid}` : ''}

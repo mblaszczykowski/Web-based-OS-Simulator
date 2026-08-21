@@ -8,7 +8,11 @@
   --border-strong: rgba(255, 255, 255, 0.16);
   --text-primary: #eef1f6;
   --text-secondary: #9aa3b2;
-  --text-muted: #5b6474;
+  /* Was #5b6474 — measured ~2.9:1 against panel/window backgrounds, well
+     under WCAG AA's 4.5:1 for normal text (roadmap.md §2.5's contrast
+     verification). This value clears >=4.5:1 against every background it
+     actually appears on while staying visibly dimmer than --text-secondary. */
+  --text-muted: #7e8898;
 
   --accent-scheduler: #3987e5;
   --accent-memory: #d95926;
@@ -35,6 +39,37 @@
 
 * {
   box-sizing: border-box;
+}
+
+/* Accessibility utilities (roadmap.md §2.5) ---------------------------- */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.skip-link {
+  position: absolute;
+  top: -100%;
+  left: 8px;
+  z-index: 200;
+  padding: 8px 14px;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  border: 1px solid var(--accent-scheduler);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: top 0.15s ease;
+}
+.skip-link:focus {
+  top: 8px;
 }
 
 body {
@@ -267,6 +302,10 @@ button {
 }
 .titlebar:active {
   cursor: grabbing;
+}
+.titlebar:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .win-icon {
   display: flex;

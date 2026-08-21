@@ -156,11 +156,16 @@ export function TerminalWindow() {
             </div>
           ))}
         </div>
+        {/* Announces new output to screen readers without re-reading the whole scrollback on every render. */}
+        <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+          {lines.length > 0 ? lines[lines.length - 1]!.text : ''}
+        </div>
         <div className="term-input-row">
           <span className="term-user">guest@os-sim</span>
           <span className="term-muted">:~$</span>
           <input
             ref={inputRef}
+            id="terminal-input"
             className="term-input"
             value={demo.active ? demo.typedText : value}
             onChange={(e) => setValue(e.target.value)}

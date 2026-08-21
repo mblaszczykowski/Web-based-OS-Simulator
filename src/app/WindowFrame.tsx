@@ -25,8 +25,50 @@ export function WindowFrame({ id, title, subtitle, accent, icon, children }: Win
   const [maximized, setMaximized] = useState(false)
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null)
   const resizeRef = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null)
+  const windowRef = useRef<HTMLDivElement>(null)
 
   if (!win.open) return null
+
+  const MOVE_STEP = 10
+  const MOVE_STEP_FAST = 30
+
+  function handleTitlebarKeyDown(e: React.KeyboardEvent) {
+    if (maximized) return
+    const step = e.shiftKey ? MOVE_STEP_FAST : MOVE_STEP
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault()
+      moveWindow(id, win.x - step, win.y)
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault()
+      moveWindow(id, win.x + step, win.y)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      moveWindow(id, win.x, win.y - step)
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      moveWindow(id, win.x, win.y + step)
+    }
+  }
+
+  // Tab/Shift+Tab wrap within this window's own focusable elements while
+  // it's the focused window, instead of escaping into whatever window
+  // happens to sit behind it in DOM order (roadmap.md §2.5).
+  function handleWindowKeyDown(e: React.KeyboardEvent) {
+    if (e.key !== 'Tab' || focusedWindow !== id || !windowRef.current) return
+    const focusable = windowRef.current.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    )
+    if (focusable.length === 0) return
+    const first = focusable[0]!
+    const last = focusable[focusable.length - 1]!
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault()
+      last.focus()
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault()
+      first.focus()
+    }
+  }
 
   function handlePointerDown(e: React.PointerEvent) {
     // Focusing happens once, via the outer window's own onPointerDown
@@ -76,11 +118,21 @@ export function WindowFrame({ id, title, subtitle, accent, icon, children }: Win
 
   return (
     <div
+      ref={windowRef}
       className={`window${focusedWindow === id ? ' focused' : ''}`}
       style={{ ...style, zIndex: win.zIndex, '--accent': accent } as unknown as React.CSSProperties}
       onPointerDown={() => focusWindow(id)}
+      onKeyDown={handleWindowKeyDown}
+      role="region"
+      aria-label={`${title} window`}
     >
-      <div className="titlebar" onPointerDown={handlePointerDown}>
+      <div
+        className="titlebar"
+        onPointerDown={handlePointerDown}
+        tabIndex={0}
+        onKeyDown={handleTitlebarKeyDown}
+        aria-label={`${title} window titlebar — drag, or focus and use arrow keys, to move`}
+      >
         <div className="win-icon">{icon}</div>
         <span className="win-title">{title}</span>
         {subtitle && <span className="win-sub">&middot; {subtitle}</span>}
