@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { executeCommand, type CommandContext } from './commands'
+import { COMMAND_NAMES, executeCommand, type CommandContext } from './commands'
 import { SHELL_PID, type Process } from '../shared/types'
 
 function makeProcess(overrides: Partial<Process> = {}): Process {
@@ -64,6 +64,14 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     fsFsck: () => ({ replayed: [] }),
     fsCrashed: () => false,
     fsReset: () => {},
+    ioMetrics: () => ({
+      cylinderCount: 8,
+      headPosition: 0,
+      pendingCount: 0,
+      completedCount: 0,
+      avgSeekDistance: 0,
+      avgWaitTicks: 0,
+    }),
     getCwd: () => cwd,
     setCwd: (path) => {
       cwd = path
@@ -523,6 +531,35 @@ describe('executeCommand', () => {
 
     it('errors with no argument', () => {
       expect(executeCommand('man', makeContext())[0]).toMatchObject({ isError: true })
+    })
+
+    it('has an entry for every command in COMMAND_NAMES', () => {
+      for (const name of COMMAND_NAMES) {
+        expect(executeCommand(`man ${name}`, makeContext())[0]).not.toMatchObject({ isError: true })
+      }
+    })
+  })
+
+  describe('iostat (roadmap-v4.md §1.1)', () => {
+    it('reports the SCAN scheduler status', () => {
+      const ctx = makeContext({
+        ioMetrics: () => ({
+          cylinderCount: 64,
+          headPosition: 12,
+          pendingCount: 3,
+          completedCount: 40,
+          avgSeekDistance: 5.5,
+          avgWaitTicks: 2.25,
+        }),
+      })
+      const lines = texts('iostat', ctx)
+      expect(lines[0]).toBe('Head: cylinder 12/63  Queue depth: 3  Completed: 40')
+      expect(lines[1]).toBe('Avg seek distance: 5.5 cylinders  Avg wait: 2.3 ticks')
+    })
+
+    it('has a man page', () => {
+      const lines = texts('man iostat', makeContext())
+      expect(lines[0]).toMatch(/^iostat -/)
     })
   })
 })

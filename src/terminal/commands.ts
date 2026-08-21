@@ -19,6 +19,15 @@ export interface MemoryMetricsView {
   swappedPages: number
 }
 
+export interface IoMetricsView {
+  cylinderCount: number
+  headPosition: number
+  pendingCount: number
+  completedCount: number
+  avgSeekDistance: number
+  avgWaitTicks: number
+}
+
 export interface SyncStatusView {
   capacity: number
   occupancy: number
@@ -67,6 +76,8 @@ export interface CommandContext {
   fsFsck(): { replayed: JournalEntry[] }
   fsCrashed(): boolean
   fsReset(): void
+  /** SCAN disk-head scheduler metrics — roadmap-v4.md §1.1. */
+  ioMetrics(): IoMetricsView
   /** Current working directory — roadmap-v3.md §1.1. */
   getCwd(): string
   setCwd(path: string): void
@@ -106,6 +117,7 @@ const HELP_TEXT = [
   '  crash               simulate a power loss mid-write',
   '  fsck                replay the journal and recover the filesystem',
   '  reset-fs             wipe the disk (in memory and the persisted copy)',
+  '  iostat               disk I/O scheduler status (SCAN head position, queue, seek/wait)',
   '  sync                bounded-buffer producer/consumer status',
   '  race on|off          toggle the unsynchronized (racy) demo mode',
   '  ping [host]           send simulated ICMP echo packets to a host',
@@ -148,6 +160,7 @@ export const COMMAND_NAMES = [
   'crash',
   'fsck',
   'reset-fs',
+  'iostat',
   'sync',
   'race',
   'ping',
@@ -183,6 +196,7 @@ const MAN_PAGES: Record<string, string[]> = {
   crash: ['crash - simulate a power loss mid-write', 'usage: crash', 'Leaves a pending write in the journal; recover with fsck.', 'example: crash'],
   fsck: ['fsck - replay the journal and recover the filesystem', 'usage: fsck', 'example: fsck'],
   'reset-fs': ['reset-fs - wipe the disk', 'usage: reset-fs', 'Clears both the in-memory and persisted filesystem back to a fresh, empty disk.', 'example: reset-fs'],
+  iostat: ['iostat - disk I/O scheduler status', 'usage: iostat', 'SCAN head position/direction, pending queue depth, average seek distance and wait, requests completed.', 'example: iostat'],
   sync: ['sync - bounded-buffer producer/consumer status', 'usage: sync', 'Buffer occupancy, mutex state, and produced/consumed/corruption counters.', 'example: sync'],
   race: ['race - toggle the unsynchronized sync demo', 'usage: race on|off', 'on restarts the producer/consumer demo without its mutex, to show the corruption it normally prevents.', 'example: race on'],
   ping: ['ping - send simulated ICMP echo packets', 'usage: ping [host]', 'Watch the Network window for the replies.', 'example: ping server'],
@@ -553,6 +567,14 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       // code review).
       ctx.setCwd('/')
       return out('[RESET] disk wiped — a fresh, empty filesystem is now mounted.')
+    }
+
+    case 'iostat': {
+      const m = ctx.ioMetrics()
+      return out(
+        `Head: cylinder ${m.headPosition}/${m.cylinderCount - 1}  Queue depth: ${m.pendingCount}  Completed: ${m.completedCount}`,
+        `Avg seek distance: ${m.avgSeekDistance.toFixed(1)} cylinders  Avg wait: ${m.avgWaitTicks.toFixed(1)} ticks`,
+      )
     }
 
     case 'sync': {

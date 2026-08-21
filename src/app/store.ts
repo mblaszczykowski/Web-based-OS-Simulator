@@ -296,6 +296,17 @@ export const useSimStore = create<SimStore>((set, get) => ({
       fsFsck: () => filesystem.fsck(),
       fsCrashed: () => filesystem.isCrashed(),
       fsReset: () => resetFilesystem(),
+      ioMetrics: () => {
+        const m = filesystem.getIoMetrics()
+        return {
+          cylinderCount: m.cylinderCount,
+          headPosition: m.headPosition,
+          pendingCount: m.pendingCount,
+          completedCount: m.completedCount,
+          avgSeekDistance: m.avgSeekDistance,
+          avgWaitTicks: m.avgWaitTicks,
+        }
+      },
       getCwd: () => get().cwd,
       setCwd: (path) => set({ cwd: path }),
       getEnv: (name) => get().env[name],
