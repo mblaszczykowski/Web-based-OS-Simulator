@@ -7,6 +7,7 @@ describe('buildRunCsv', () => {
       tick: 3,
       metrics: { completed: 2, avgWaitingTicks: 1.5, avgTurnaroundTicks: 4.25, contextSwitches: 1, cpuUtilization: 0.75 },
       ganttHistory: [1, 1, null],
+      startTick: 1,
     })
     const lines = csv.split('\n')
 
@@ -21,11 +22,28 @@ describe('buildRunCsv', () => {
     expect(lines).toContain('3,') // idle tick — no pid
   })
 
+  it('regression: numbers rows from startTick, not from array index, once history has been trimmed (found by code review)', () => {
+    // Simulates a run where GANTT_HISTORY_CAP already trimmed the front —
+    // ganttHistory[0] is really tick 10001, not tick 1.
+    const csv = buildRunCsv({
+      tick: 10003,
+      metrics: { completed: 0, avgWaitingTicks: 0, avgTurnaroundTicks: 0, contextSwitches: 0, cpuUtilization: 0 },
+      ganttHistory: [5, 5, null],
+      startTick: 10001,
+    })
+    const lines = csv.split('\n')
+    expect(lines).toContain('10001,5')
+    expect(lines).toContain('10002,5')
+    expect(lines).toContain('10003,')
+    expect(lines).not.toContain('1,5') // not mislabeled by array position
+  })
+
   it('produces a valid, non-empty export even for a run with no history yet', () => {
     const csv = buildRunCsv({
       tick: 0,
       metrics: { completed: 0, avgWaitingTicks: 0, avgTurnaroundTicks: 0, contextSwitches: 0, cpuUtilization: 0 },
       ganttHistory: [],
+      startTick: 1,
     })
     expect(csv).toContain('tick,pid')
     expect(csv.split('\n').at(-1)).toBe('tick,pid') // no trailing rows, but no crash either

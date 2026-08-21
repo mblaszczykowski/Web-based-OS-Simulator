@@ -18,8 +18,10 @@ export interface RunExportData {
   /** Current simulation tick — stamped into the export so two downloads from the same run are distinguishable. */
   tick: number
   metrics: RunExportMetrics
-  /** One entry per tick since boot: the pid that ran, or null if the CPU was idle that tick. */
+  /** One entry per tick since boot (or since GANTT_HISTORY_CAP started trimming the oldest ones): the pid that ran, or null if the CPU was idle that tick. */
   ganttHistory: (number | null)[]
+  /** Real tick number of ganttHistory[0] — 1 unless the cap has trimmed the front, in which case rows must be numbered from here, not from array index (found by code review: numbering purely by index mislabeled every row once the cap kicked in). */
+  startTick: number
 }
 
 /** Builds a small, human-readable CSV: a metrics summary block, then one row per tick of Gantt history. */
@@ -36,7 +38,7 @@ export function buildRunCsv(data: RunExportData): string {
     '',
     'tick,pid',
   ]
-  data.ganttHistory.forEach((pid, i) => lines.push(`${i + 1},${pid ?? ''}`))
+  data.ganttHistory.forEach((pid, i) => lines.push(`${data.startTick + i},${pid ?? ''}`))
   return lines.join('\n')
 }
 

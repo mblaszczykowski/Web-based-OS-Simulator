@@ -11,5 +11,8 @@ export function downloadTextFile(filename: string, content: string, mimeType = '
   document.body.appendChild(anchor)
   anchor.click()
   document.body.removeChild(anchor)
-  URL.revokeObjectURL(url)
+  // Revoking on the next tick, not synchronously — a browser's actual
+  // save-to-disk step after an <a download> click isn't guaranteed to
+  // have read the blob's data yet by the time click() returns.
+  setTimeout(() => URL.revokeObjectURL(url), 0)
 }

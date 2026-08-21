@@ -36,13 +36,20 @@ export function NetworkWindow() {
   const log = network.getLog()
   const stats = network.getStats()
   const hostLabel = network.getHostLabel()
+  // NetworkEngine.getLog() returns its own array, mutated in place
+  // (push/shift) rather than reassigned, so `log` is the same reference
+  // every render. `log.length` alone isn't enough either: getLog() caps
+  // itself as a ring buffer once LOG_LIMIT is hit (push+shift), so length
+  // stops changing at that point even as entries keep arriving — the
+  // effect below would silently stop re-firing (found by code review).
+  // ids are assigned monotonically and never reused, so the newest
+  // entry's id keeps changing regardless of whether the array is still
+  // growing or already capped.
+  const latestLogId = log.at(-1)?.id
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight })
-    // NetworkEngine.getLog() returns its own array, mutated in place
-    // (push/shift) rather than reassigned, so `log` is the same reference
-    // every render — `log.length` is what actually changes as entries arrive.
-  }, [log.length])
+  }, [latestLogId])
 
   return (
     <WindowFrame id="network" title="Network" subtitle="packet flow" accent="var(--accent-network)" icon={<NetworkIcon />}>

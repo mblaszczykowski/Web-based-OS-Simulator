@@ -48,14 +48,20 @@ export function BoundedBufferPanel() {
   const { inPtr, outPtr } = sync.getPointers()
   const metrics = sync.getMetrics()
   const log = sync.getLog()
+  // sync.getLog() returns the engine's own array, mutated in place
+  // (push/shift) rather than reassigned — `log` above is therefore the
+  // same reference every render. `log.length` isn't a reliable dependency
+  // either: getLog() caps itself as a ring buffer once LOG_LIMIT is hit
+  // (push+shift), so length stops changing at that point even as entries
+  // keep arriving, silently stopping the effect below from re-firing
+  // (found by code review). ids are assigned monotonically and never
+  // reused, so the newest entry's id keeps changing regardless of whether
+  // the array is still growing or already capped.
+  const latestLogId = log.at(-1)?.id
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight })
-    // sync.getLog() returns the engine's own array, mutated in place
-    // (push/shift) rather than reassigned — `log` above is therefore the
-    // same reference every render, so `log.length` (a primitive that
-    // actually changes) is what makes this effect re-fire as entries arrive.
-  }, [log.length])
+  }, [latestLogId])
 
   return (
     <div className="win-body">

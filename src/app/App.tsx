@@ -16,6 +16,14 @@ export function App() {
   const isNarrow = useIsNarrowViewport(SMALL_SCREEN_BREAKPOINT_PX)
 
   useEffect(() => {
+    // Below the small-screen breakpoint we show SmallScreenNotice instead
+    // of ever booting — without this guard, the boot/hydration work (and,
+    // via `ready` below, the tick interval) ran anyway in the background
+    // on a screen the user can't even see the result of, contradicting
+    // SmallScreenNotice.tsx's own "skips the boot sequence and desktop
+    // entirely" comment (found by code review). If the viewport later
+    // widens past the breakpoint, this effect re-runs and boots normally.
+    if (isNarrow) return
     if (bootstrapped.current) return
     bootstrapped.current = true
     // The boot animation is purely cosmetic (roadmap.md §1.2) and runs on
@@ -39,13 +47,13 @@ export function App() {
         stepOnce()
         setReady(true)
       })
-  }, [stepOnce])
+  }, [stepOnce, isNarrow])
 
   useEffect(() => {
-    if (!running || !ready) return
+    if (!running || !ready || isNarrow) return
     const id = window.setInterval(() => stepOnce(), TICK_INTERVAL_MS)
     return () => window.clearInterval(id)
-  }, [running, ready, stepOnce])
+  }, [running, ready, isNarrow, stepOnce])
 
   if (isNarrow) return <SmallScreenNotice />
   if (!ready) return <BootScreen />

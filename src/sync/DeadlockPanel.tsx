@@ -62,14 +62,18 @@ export function DeadlockPanel() {
 
   const rerender = () => forceRender((n) => n + 1)
 
-  useEffect(() => () => {
-    runTokenRef.current++ // unmounting mid-run — invalidate any pending timers
-  }, [])
-
-  function runScenario() {
-    if (engine.getStep() !== 'idle' && engine.getStep() !== 'resolved') return
-    if (engine.getStep() === 'resolved') engine.reset()
-    const token = ++runTokenRef.current
+  /**
+   * Drives `engine.advance()` forward on a timer until it reaches
+   * 'deadlocked'. The engine itself is a shared app-level singleton
+   * (app/engines.ts) whose progress survives this component unmounting —
+   * but the setTimeout chain that was advancing it does not: `token`
+   * becomes stale the moment this component unmounts (see the effect
+   * below), so a scenario left mid-way (switch sync tabs, close the
+   * window) used to freeze there permanently — 'Run scenario' and 'Break
+   * deadlock' are both disabled for any step that isn't idle/resolved/
+   * deadlocked, so only Reset could ever recover it (found by code review).
+   */
+  function stepLoop(token: number) {
     const step = () => {
       if (runTokenRef.current !== token) return
       engine.advance()
@@ -79,6 +83,34 @@ export function DeadlockPanel() {
       }
     }
     step()
+  }
+
+  useEffect(() => {
+    const token = ++runTokenRef.current
+    // Resume driving the scenario if we're mounting onto one already
+    // left mid-way by an earlier unmount (see stepLoop()'s docs above) —
+    // 'deadlocked' needs no resuming, it's a stable state waiting on the
+    // user's "Break deadlock" click, same as 'idle'/'resolved' need no
+    // resuming since nothing is running.
+    const step = engine.getStep()
+    if (step !== 'idle' && step !== 'resolved' && step !== 'deadlocked') {
+      stepLoop(token)
+    }
+    return () => {
+      // Deliberately reads/increments whatever the CURRENT value is, not
+      // a stale snapshot from when the effect ran — the lint rule's
+      // concern doesn't apply to a ref used as a mutable counter.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      runTokenRef.current++ // unmounting — invalidate any pending timer from this instance
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function runScenario() {
+    if (engine.getStep() !== 'idle' && engine.getStep() !== 'resolved') return
+    if (engine.getStep() === 'resolved') engine.reset()
+    const token = ++runTokenRef.current
+    stepLoop(token)
   }
 
   function breakDeadlock(victim: DeadlockActorId) {

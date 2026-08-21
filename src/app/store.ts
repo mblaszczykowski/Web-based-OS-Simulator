@@ -105,6 +105,8 @@ interface SimStore {
   ganttLog: (number | null)[]
   /** Every tick since boot, for "export this run" — see GANTT_HISTORY_CAP. */
   ganttHistory: (number | null)[]
+  /** Real tick number of ganttHistory[0] — 1 until the cap trims the front, then it advances with every trim so exported rows stay labeled with the real tick, not the array index (found by code review). */
+  ganttHistoryStartTick: number
   /** Terminal working directory — roadmap-v3.md §1.1. Mutated only via `cd` (through CommandContext.setCwd). */
   cwd: string
   terminalLines: TerminalLine[]
@@ -165,11 +167,32 @@ function isValidWindowState(v: unknown): v is WindowState {
   )
 }
 
+// Keeps at least MIN_VISIBLE_PX of a window's titlebar reachable within
+// the viewport — without this, dragging (or arrow-key-nudging) a window
+// past the edge left it permanently unreachable once window positions
+// started persisting (roadmap-v3.md §1.4): before persistence existed, a
+// reload silently discarded an off-screen position and fixed it by
+// accident; now the exact same off-screen coordinates just get restored
+// forever, hiding the window (and its only drag handle) with no "reset
+// layout" command exposed (found by code review).
+const MIN_VISIBLE_PX = 80
+
+function clampWindowPosition(x: number, y: number, w: number): { x: number; y: number } {
+  const viewportW = typeof window !== 'undefined' ? window.innerWidth : 1280
+  const viewportH = typeof window !== 'undefined' ? window.innerHeight : 800
+  const minX = MIN_VISIBLE_PX - w
+  const maxX = Math.max(minX, viewportW - MIN_VISIBLE_PX)
+  const maxY = Math.max(0, viewportH - MIN_VISIBLE_PX)
+  return { x: Math.min(Math.max(x, minX), maxX), y: Math.min(Math.max(y, 0), maxY) }
+}
+
 /**
  * Loads a persisted layout, merged field-by-field onto the defaults: a
  * stored record missing an entry (e.g. a window added in a later build
  * than the one that saved it) or with a malformed one just falls back to
  * that single window's default instead of discarding the whole layout.
+ * Positions are re-clamped on load too, in case an already-persisted
+ * layout predates clampWindowPosition() above.
  */
 function loadWindows(): Record<WindowId, WindowState> {
   try {
@@ -181,7 +204,7 @@ function loadWindows(): Record<WindowId, WindowState> {
     const merged = { ...initialWindows }
     for (const id of WINDOW_IDS) {
       const candidate = record[id]
-      if (isValidWindowState(candidate)) merged[id] = candidate
+      if (isValidWindowState(candidate)) merged[id] = { ...candidate, ...clampWindowPosition(candidate.x, candidate.y, candidate.w) }
     }
     return merged
   } catch {
@@ -203,6 +226,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   running: true,
   ganttLog: [],
   ganttHistory: [],
+  ganttHistoryStartTick: 1,
   cwd: '/',
   syscallLines: [],
   lastAnnouncement: '',
@@ -219,12 +243,17 @@ export const useSimStore = create<SimStore>((set, get) => ({
 
   stepOnce: () => {
     const result = stepSimulation()
-    set((s) => ({
-      tick: s.tick + 1,
-      version: s.version + 1,
-      ganttLog: [...s.ganttLog.slice(-(GANTT_WINDOW - 1)), result.sample.pid],
-      ganttHistory: [...s.ganttHistory.slice(-(GANTT_HISTORY_CAP - 1)), result.sample.pid],
-    }))
+    set((s) => {
+      const nextHistory = [...s.ganttHistory, result.sample.pid]
+      const overflow = Math.max(0, nextHistory.length - GANTT_HISTORY_CAP)
+      return {
+        tick: s.tick + 1,
+        version: s.version + 1,
+        ganttLog: [...s.ganttLog.slice(-(GANTT_WINDOW - 1)), result.sample.pid],
+        ganttHistory: overflow > 0 ? nextHistory.slice(overflow) : nextHistory,
+        ganttHistoryStartTick: s.ganttHistoryStartTick + overflow,
+      }
+    })
   },
 
   runCommand: (input) => {
@@ -322,7 +351,10 @@ export const useSimStore = create<SimStore>((set, get) => ({
   openWindow: (id) => get().focusWindow(id),
 
   moveWindow: (id, x, y) =>
-    set((s) => ({ windows: { ...s.windows, [id]: { ...s.windows[id]!, x, y } } })),
+    set((s) => {
+      const win = s.windows[id]!
+      return { windows: { ...s.windows, [id]: { ...win, ...clampWindowPosition(x, y, win.w) } } }
+    }),
 
   resizeWindow: (id, w, h) =>
     set((s) => ({ windows: { ...s.windows, [id]: { ...s.windows[id]!, w, h } } })),

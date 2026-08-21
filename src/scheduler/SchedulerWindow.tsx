@@ -21,6 +21,7 @@ export function SchedulerWindow() {
   useSimStore((s) => s.version) // subscribed purely so this window re-renders on every tick/command
   const ganttLog = useSimStore((s) => s.ganttLog)
   const ganttHistory = useSimStore((s) => s.ganttHistory)
+  const ganttHistoryStartTick = useSimStore((s) => s.ganttHistoryStartTick)
   const tick = useSimStore((s) => s.tick)
   const runCommand = useSimStore((s) => s.runCommand)
 
@@ -32,7 +33,7 @@ export function SchedulerWindow() {
   const [quantum0, quantum1] = DEFAULT_SCHEDULER_CONFIG.quanta
 
   function exportRun() {
-    const csv = buildRunCsv({ tick, metrics, ganttHistory })
+    const csv = buildRunCsv({ tick, metrics, ganttHistory, startTick: ganttHistoryStartTick })
     downloadTextFile(runExportFilename(tick), csv)
   }
 

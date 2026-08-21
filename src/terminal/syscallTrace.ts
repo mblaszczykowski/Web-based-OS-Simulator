@@ -33,6 +33,15 @@ export function syscallTraceFor(input: string, ok: boolean, cwd: string): string
       return ['fork() = <pid>', `execve("/bin/${name}", [...], [...]) = 0`]
     }
 
+    case 'stress': {
+      // Real forks/execs are actually happening here too — this had no
+      // case at all before (found by code review), so `stress` silently
+      // produced zero trace lines despite spawning several processes,
+      // unlike every other spawning command.
+      const count = args[0] ?? '6'
+      return [`fork() = <pid> (x${count})`, `execve("/bin/proc", [...], [...]) = 0 (x${count})`]
+    }
+
     case 'kill': {
       if (args[0] === '-STOP' || args[0] === '-CONT') {
         const signal = args[0] === '-STOP' ? 'SIGSTOP' : 'SIGCONT'

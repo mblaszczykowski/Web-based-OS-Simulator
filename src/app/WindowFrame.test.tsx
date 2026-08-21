@@ -64,6 +64,23 @@ describe('WindowFrame', () => {
     expect(useSimStore.getState().windows.terminal).toMatchObject({ x: 110, y: 130 }) // fast step (30) while stepping down
   })
 
+  it('regression: cannot be moved off-screen — a window is never left permanently unreachable (found by code review)', async () => {
+    const user = userEvent.setup()
+    renderWindow() // starts at x:100,y:100, w:400 — well within the viewport
+    const titlebar = screen.getByRole('button', { name: 'Maximize' }).closest('.titlebar') as HTMLElement
+    titlebar.focus()
+
+    // Way more ArrowLeft/ArrowUp presses than needed to drive x/y deeply
+    // negative if nothing clamped it — this used to persist to
+    // localStorage and get restored on every future load, permanently
+    // hiding the window and its only drag handle.
+    for (let i = 0; i < 100; i++) await user.keyboard('{Shift>}{ArrowLeft}{ArrowUp}{/Shift}')
+
+    const { x, y } = useSimStore.getState().windows.terminal
+    expect(y).toBeGreaterThanOrEqual(0) // top edge never goes above the viewport
+    expect(x + 400).toBeGreaterThan(0) // some part of the 400px-wide window stays on-screen
+  })
+
   it('resizes the window with arrow keys on the resize handle, clamped to a minimum size', async () => {
     const user = userEvent.setup()
     renderWindow()

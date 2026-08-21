@@ -482,6 +482,11 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
 
     case 'reset-fs': {
       ctx.fsReset()
+      // The wiped disk only has root — leaving cwd pointing at whatever
+      // directory it was in before would break every subsequent
+      // cwd-relative command until the user manually `cd /` (found by
+      // code review).
+      ctx.setCwd('/')
       return out('[RESET] disk wiped — a fresh, empty filesystem is now mounted.')
     }
 

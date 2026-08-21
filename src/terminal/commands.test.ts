@@ -354,6 +354,14 @@ describe('executeCommand', () => {
       expect(texts('pwd', ctx)).toEqual(['/var/log'])
     })
 
+    it('regression: reset-fs also resets cwd to root, since the wiped disk only has root (found by code review)', () => {
+      const ctx = makeContext()
+      executeCommand('cd /home/guest', ctx)
+      expect(ctx.getCwd()).toBe('/home/guest')
+      executeCommand('reset-fs', ctx)
+      expect(ctx.getCwd()).toBe('/')
+    })
+
     it('resolves relative file arguments against cwd, leaving absolute ones untouched', () => {
       const fsRead = vi.fn(() => ({ ok: true as const, content: 'hi' }))
       const ctx = makeContext({ fsRead })
