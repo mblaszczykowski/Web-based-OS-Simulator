@@ -4,6 +4,7 @@ import { SchedulerWindow } from '../scheduler/SchedulerWindow'
 import { MemoryWindow } from '../memory/MemoryWindow'
 import { FilesystemWindow } from '../filesystem/FilesystemWindow'
 import { TerminalWindow } from '../terminal/TerminalWindow'
+import { SyscallWindow } from '../terminal/SyscallWindow'
 
 export function Desktop() {
   return (
@@ -18,6 +19,7 @@ export function Desktop() {
       <MemoryWindow />
       <FilesystemWindow />
       <TerminalWindow />
+      <SyscallWindow />
 
       <Dock />
     </div>

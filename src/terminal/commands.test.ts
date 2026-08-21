@@ -45,8 +45,12 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     }),
     fsList: () => ({ ok: true, entries: [] }),
     fsRead: () => ({ ok: false, error: 'not found' }),
+    fsCreate: () => ({ ok: true }),
     fsWrite: () => ({ ok: true }),
     fsDelete: () => ({ ok: true }),
+    fsMkdir: () => ({ ok: true }),
+    fsMove: () => ({ ok: true }),
+    fsCopy: () => ({ ok: true }),
     fsCrash: () => {},
     fsFsck: () => ({ replayed: [] }),
     fsCrashed: () => false,
@@ -133,5 +137,75 @@ describe('executeCommand', () => {
 
   it('ignores blank input', () => {
     expect(executeCommand('   ', makeContext())).toEqual([])
+  })
+
+  it('touch creates a missing file but no-ops (not an error) if it already exists', () => {
+    const fsCreate = vi.fn(() => ({ ok: true as const }))
+    const ctx = makeContext({ fsRead: () => ({ ok: false, error: 'nope' }), fsCreate })
+    expect(executeCommand('touch new.txt', ctx)).toEqual([{ text: 'Touched /new.txt.' }])
+    expect(fsCreate).toHaveBeenCalledWith('/new.txt')
+
+    const ctxExisting = makeContext({ fsRead: () => ({ ok: true, content: 'x' }), fsCreate })
+    expect(executeCommand('touch existing.txt', ctxExisting)).toEqual([{ text: 'Touched /existing.txt.' }])
+  })
+
+  it('mkdir normalizes the path and surfaces fs errors', () => {
+    const fsMkdir = vi.fn(() => ({ ok: false as const, error: 'mkdir: /x: File exists' }))
+    const ctx = makeContext({ fsMkdir })
+    expect(executeCommand('mkdir x', ctx)).toEqual([{ text: 'mkdir: /x: File exists', isError: true }])
+    expect(fsMkdir).toHaveBeenCalledWith('/x')
+  })
+
+  it('mv requires both a source and a destination', () => {
+    expect(executeCommand('mv a.txt', makeContext())[0]).toMatchObject({ isError: true })
+    const fsMove = vi.fn(() => ({ ok: true as const }))
+    expect(executeCommand('mv a.txt b.txt', makeContext({ fsMove }))).toEqual([
+      { text: 'Moved /a.txt -> /b.txt.' },
+    ])
+    expect(fsMove).toHaveBeenCalledWith('/a.txt', '/b.txt')
+  })
+
+  it('cp requires both a source and a destination', () => {
+    expect(executeCommand('cp a.txt', makeContext())[0]).toMatchObject({ isError: true })
+    const fsCopy = vi.fn(() => ({ ok: true as const }))
+    expect(executeCommand('cp a.txt b.txt', makeContext({ fsCopy }))).toEqual([
+      { text: 'Copied /a.txt -> /b.txt.' },
+    ])
+    expect(fsCopy).toHaveBeenCalledWith('/a.txt', '/b.txt')
+  })
+
+  it('ls with a wildcard filters entries by glob', () => {
+    const ctx = makeContext({
+      fsList: () => ({
+        ok: true,
+        entries: [
+          { name: 'a.txt', type: 'file' },
+          { name: 'b.txt', type: 'file' },
+          { name: 'readme.md', type: 'file' },
+        ],
+      }),
+    })
+    expect(texts('ls *.txt', ctx)).toEqual(['a.txt  b.txt'])
+    expect(executeCommand('ls *.zip', ctx)[0]).toMatchObject({ isError: true })
+  })
+
+  it('rm with a wildcard deletes every matching file', () => {
+    const fsDelete = vi.fn(() => ({ ok: true as const }))
+    const ctx = makeContext({
+      fsList: () => ({
+        ok: true,
+        entries: [
+          { name: 'a.txt', type: 'file' },
+          { name: 'b.txt', type: 'file' },
+          { name: 'keep.md', type: 'file' },
+        ],
+      }),
+      fsDelete,
+    })
+    const out = executeCommand('rm *.txt', ctx)
+    expect(fsDelete).toHaveBeenCalledWith('/a.txt')
+    expect(fsDelete).toHaveBeenCalledWith('/b.txt')
+    expect(fsDelete).not.toHaveBeenCalledWith('/keep.md')
+    expect(out).toEqual([{ text: 'Removed /a.txt.' }, { text: 'Removed /b.txt.' }])
   })
 })

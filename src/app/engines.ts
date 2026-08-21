@@ -102,3 +102,14 @@ export function bootstrapWorkload(): void {
   spawnProcess(randomName(), 'interactive')
   filesystem.write('/var/log/boot.log', 'system initialised\n')
 }
+
+/**
+ * Called once, on app start. Scheduler/memory always reset on reload (see
+ * plan.md §2.5) so bootstrapWorkload() always spawns a fresh initial
+ * workload; the filesystem is the one engine that will eventually persist
+ * across reloads (roadmap.md §1.5), which is why this is async and lives
+ * separately from the synchronous bootstrapWorkload() above.
+ */
+export async function hydrateAndBootstrap(): Promise<void> {
+  bootstrapWorkload()
+}

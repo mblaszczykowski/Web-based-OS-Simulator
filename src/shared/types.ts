@@ -102,14 +102,16 @@ export interface DiskBlock {
   owner: number | null
 }
 
-export type JournalOp = 'create' | 'write' | 'delete'
+export type JournalOp = 'create' | 'write' | 'delete' | 'mkdir' | 'move' | 'copy'
 
 export interface JournalEntry {
   id: number
   op: JournalOp
   path: string
-  /** Content payload for create/write, unused for delete. */
+  /** Content payload for create/write/copy (copy's is a snapshot of the source, taken at request time), unused otherwise. */
   content?: string
+  /** Destination path for move/copy; unused otherwise. */
+  target?: string
   status: 'pending' | 'committed'
   tick: number
 }

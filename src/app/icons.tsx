@@ -109,6 +109,36 @@ export function LogoIcon({ size = 16 }: IconProps) {
   )
 }
 
+export function TraceIcon({ size = 14 }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 5l3 3-3 3" />
+      <line x1="8" y1="5" x2="17" y2="5" />
+      <line x1="8" y1="11" x2="17" y2="11" />
+      <line x1="3" y1="15" x2="17" y2="15" />
+    </svg>
+  )
+}
+
+export function SyncIcon({ size = 14 }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="6" y="9" width="8" height="7" rx="1.5" />
+      <path d="M8 9V6a2 2 0 014 0v3" />
+    </svg>
+  )
+}
+
+export function NetworkIcon({ size = 14 }: IconProps) {
+  return (
+    <svg viewBox="0 0 20 20" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+      <circle cx="4" cy="10" r="2.3" />
+      <circle cx="16" cy="10" r="2.3" />
+      <line x1="6.3" y1="10" x2="13.7" y2="10" />
+    </svg>
+  )
+}
+
 export function WarningIcon({ size = 13 }: IconProps) {
   return (
     <svg viewBox="0 0 20 20" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">

@@ -36,8 +36,12 @@ export interface CommandContext {
   memoryMetrics(): MemoryMetricsView
   fsList(path: string): { ok: true; entries: { name: string; type: string }[] } | { ok: false; error: string }
   fsRead(path: string): { ok: true; content: string } | { ok: false; error: string }
+  fsCreate(path: string): { ok: true } | { ok: false; error: string }
   fsWrite(path: string, text: string): { ok: true } | { ok: false; error: string }
   fsDelete(path: string): { ok: true } | { ok: false; error: string }
+  fsMkdir(path: string): { ok: true } | { ok: false; error: string }
+  fsMove(src: string, dest: string): { ok: true } | { ok: false; error: string }
+  fsCopy(src: string, dest: string): { ok: true } | { ok: false; error: string }
   fsCrash(): void
   fsFsck(): { replayed: JournalEntry[] }
   fsCrashed(): boolean
@@ -50,14 +54,39 @@ const HELP_TEXT = [
   '  run <name>          spawn a new process',
   '  kill <pid>          terminate a process',
   '  free                memory usage summary',
-  '  ls [path]           list a directory (default /)',
+  '  ls [path]           list a directory (default /), supports * wildcards',
   '  cat <file>           print a file',
   '  write <file> <text>  append text to a file (creates it if missing)',
-  '  rm <file>            delete a file',
+  '  touch <file>          create an empty file (no-op if it already exists)',
+  '  mkdir <dir>           create a directory',
+  '  mv <src> <dest>       move/rename a file',
+  '  cp <src> <dest>       copy a file',
+  '  rm <file>            delete a file, supports * wildcards',
   '  crash               simulate a power loss mid-write',
   '  fsck                replay the journal and recover the filesystem',
   '  clear                clear the screen',
   '  help                 show this message',
+]
+
+/** All command names — exported so the terminal UI can tab-complete against them. */
+export const COMMAND_NAMES = [
+  'ps',
+  'top',
+  'run',
+  'kill',
+  'free',
+  'ls',
+  'cat',
+  'write',
+  'touch',
+  'mkdir',
+  'mv',
+  'cp',
+  'rm',
+  'crash',
+  'fsck',
+  'clear',
+  'help',
 ]
 
 function normalizePath(path: string | undefined): string {
@@ -72,6 +101,21 @@ function pct(ratio: number): string {
 /** Splits on whitespace but keeps the tail (e.g. `write`'s text) as one chunk. */
 function tokenize(input: string): string[] {
   return input.trim().split(/\s+/).filter(Boolean)
+}
+
+/** Translates a simple `*`-only glob into an anchored RegExp. */
+function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
+  return new RegExp(`^${escaped}$`)
+}
+
+/** Splits a possibly-wildcarded path into its containing directory and the final glob segment. */
+function splitPattern(pathArg: string): { dir: string; pattern: string } {
+  const normalized = normalizePath(pathArg)
+  const idx = normalized.lastIndexOf('/')
+  const dir = idx <= 0 ? '/' : normalized.slice(0, idx)
+  const pattern = normalized.slice(idx + 1)
+  return { dir, pattern }
 }
 
 function out(...lines: string[]): CommandOutputLine[] {
@@ -139,6 +183,15 @@ export function executeCommand(input: string, ctx: CommandContext): CommandOutpu
     }
 
     case 'ls': {
+      if (args[0]?.includes('*')) {
+        const { dir, pattern } = splitPattern(args[0])
+        const result = ctx.fsList(dir)
+        if (!result.ok) return err(result.error)
+        const re = globToRegExp(pattern)
+        const matched = result.entries.filter((e) => re.test(e.name))
+        if (matched.length === 0) return err(`ls: cannot access '${args[0]}': No such file or directory`)
+        return out(matched.map((e) => (e.type === 'dir' ? `${e.name}/` : e.name)).join('  '))
+      }
       const result = ctx.fsList(normalizePath(args[0]))
       if (!result.ok) return err(result.error)
       if (result.entries.length === 0) return []
@@ -161,8 +214,50 @@ export function executeCommand(input: string, ctx: CommandContext): CommandOutpu
 
     case 'rm': {
       if (!args[0]) return err('rm: missing file operand')
+      if (args[0].includes('*')) {
+        const { dir, pattern } = splitPattern(args[0])
+        const listResult = ctx.fsList(dir)
+        if (!listResult.ok) return err(listResult.error)
+        const re = globToRegExp(pattern)
+        const matches = listResult.entries.filter((e) => e.type === 'file' && re.test(e.name))
+        if (matches.length === 0) return err(`rm: no files matched '${args[0]}'`)
+        return matches.flatMap((m) => {
+          const fullPath = dir === '/' ? `/${m.name}` : `${dir}/${m.name}`
+          const result = ctx.fsDelete(fullPath)
+          return result.ok ? out(`Removed ${fullPath}.`) : err(result.error)
+        })
+      }
       const result = ctx.fsDelete(normalizePath(args[0]))
       return result.ok ? out(`Removed ${normalizePath(args[0])}.`) : err(result.error)
+    }
+
+    case 'touch': {
+      if (!args[0]) return err('touch: missing file operand')
+      const path = normalizePath(args[0])
+      if (ctx.fsRead(path).ok) return out(`Touched ${path}.`) // already exists — real touch just bumps mtime, so this is a no-op
+      const result = ctx.fsCreate(path)
+      return result.ok ? out(`Touched ${path}.`) : err(result.error)
+    }
+
+    case 'mkdir': {
+      if (!args[0]) return err('mkdir: missing operand')
+      const path = normalizePath(args[0])
+      const result = ctx.fsMkdir(path)
+      return result.ok ? out(`Created directory ${path}.`) : err(result.error)
+    }
+
+    case 'mv': {
+      if (args.length < 2) return err('mv: usage: mv <src> <dest>')
+      const [src, dest] = args
+      const result = ctx.fsMove(normalizePath(src), normalizePath(dest))
+      return result.ok ? out(`Moved ${normalizePath(src)} -> ${normalizePath(dest)}.`) : err(result.error)
+    }
+
+    case 'cp': {
+      if (args.length < 2) return err('cp: usage: cp <src> <dest>')
+      const [src, dest] = args
+      const result = ctx.fsCopy(normalizePath(src), normalizePath(dest))
+      return result.ok ? out(`Copied ${normalizePath(src)} -> ${normalizePath(dest)}.`) : err(result.error)
     }
 
     case 'crash': {

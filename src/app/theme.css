@@ -14,6 +14,9 @@
   --accent-memory: #d95926;
   --accent-fs: #9085e9;
   --accent-terminal: #199e70;
+  --accent-syscall: #c98500;
+  --accent-sync: #d55181;
+  --accent-network: #008300;
 
   --p1: #3987e5;
   --p2: #d95926;
@@ -960,6 +963,56 @@ button {
   50% {
     opacity: 0;
   }
+}
+
+/* Boot screen ----------------------------------------------------------- */
+.boot-screen {
+  position: fixed;
+  inset: 0;
+  background: #05070a;
+  color: #8fe3b8;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.boot-lines {
+  width: 420px;
+  line-height: 1.9;
+}
+.boot-line {
+  white-space: pre-wrap;
+}
+.boot-caret {
+  color: var(--accent-terminal);
+}
+.boot-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 14px;
+  background: #8fe3b8;
+  vertical-align: -2px;
+  animation: blink 1.1s steps(1) infinite;
+}
+
+/* Syscall trace ----------------------------------------------------------- */
+.syscall-panel {
+  flex-grow: 1;
+  overflow-y: auto;
+  background: #090b0d;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+.syscall-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #e8c07d;
 }
 
 /* Scrollbars ---------------------------------------------------------- */

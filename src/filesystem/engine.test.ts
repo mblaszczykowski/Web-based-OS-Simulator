@@ -127,3 +127,67 @@ describe('FilesystemEngine — journal history cap', () => {
     expect(journal.map((e) => e.path)).toEqual(['/2.txt', '/3.txt'])
   })
 })
+
+describe('FilesystemEngine — mkdir', () => {
+  it('creates an empty directory and rejects collisions', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    expect(fs.mkdir('/etc')).toEqual({ ok: true })
+    expect(fs.list('/etc')).toEqual({ ok: true, entries: [] })
+
+    expect(fs.mkdir('/etc').ok).toBe(false) // already exists as a dir
+    fs.write('/etc/passwd', 'root')
+    expect(fs.mkdir('/etc/passwd').ok).toBe(false) // already exists as a file
+    expect(fs.mkdir('/etc/passwd/x').ok).toBe(false) // ancestor is a file, not a directory
+  })
+})
+
+describe('FilesystemEngine — mv', () => {
+  it('moves a file to a new path, preserving its inode and content', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hello')
+    const inodeIdBefore = fs.getInodes()[0]!.id
+
+    expect(fs.move('/a.txt', '/b.txt')).toEqual({ ok: true })
+    expect(fs.read('/a.txt').ok).toBe(false)
+    expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello' })
+    expect(fs.getInodes()).toHaveLength(1)
+    expect(fs.getInodes()[0]!.id).toBe(inodeIdBefore) // same inode, just relocated
+  })
+
+  it('rejects moving a directory, or onto an existing path', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
+    fs.mkdir('/dir')
+    fs.write('/a.txt', 'x')
+    fs.write('/b.txt', 'y')
+
+    expect(fs.move('/dir', '/dir2').ok).toBe(false)
+    expect(fs.move('/nope.txt', '/x.txt').ok).toBe(false)
+    expect(fs.move('/a.txt', '/b.txt').ok).toBe(false) // destination already exists
+  })
+})
+
+describe('FilesystemEngine — cp', () => {
+  it('copies a file into an independent inode with its own blocks', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hello') // 2 blocks
+
+    expect(fs.copy('/a.txt', '/b.txt')).toEqual({ ok: true })
+    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hello' }) // source untouched
+    expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello' })
+    expect(fs.getInodes()).toHaveLength(2)
+
+    // Independent inodes: writing to the copy doesn't touch the original.
+    fs.write('/b.txt', '!')
+    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hello' })
+    expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello!' })
+  })
+
+  it('rejects copying onto an existing path or when the disk is full', () => {
+    const fs = new FilesystemEngine({ blockCount: 2, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'ab') // 1 block
+    fs.write('/b.txt', 'cd') // 1 block, disk now full
+
+    expect(fs.copy('/a.txt', '/b.txt').ok).toBe(false) // dest exists
+    expect(fs.copy('/a.txt', '/c.txt')).toEqual({ ok: false, error: 'cp: /c.txt: No space left on device' })
+  })
+})

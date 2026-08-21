@@ -1,4 +1,5 @@
 import type { DirEntry, DiskBlock, Inode, JournalEntry, JournalOp } from '../shared/types'
+import { simBus } from '../shared/eventBus'
 
 export interface FilesystemConfig {
   blockCount: number
@@ -62,6 +63,83 @@ export class FilesystemEngine {
     return this.mutate('delete', path)
   }
 
+  mkdir(path: string): FsResult {
+    if (this.crashed) return { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' }
+    if (this.findFileEntry(path) || this.findDirEntry(path)) {
+      return { ok: false, error: `mkdir: ${path}: File exists` }
+    }
+    if (this.ancestorIsFile(path)) return { ok: false, error: `mkdir: ${path}: Not a directory` }
+
+    const entry: JournalEntry = { id: this.nextJournalId++, op: 'mkdir', path, status: 'pending', tick: this.tick }
+    this.journal.push(entry)
+    this.trimJournal()
+    this.applyMkdir(path)
+    entry.status = 'committed'
+    this.lastTouchedPath = path
+    simBus.emit('fs:mutated', { op: 'mkdir', path })
+    return { ok: true }
+  }
+
+  /** Moves/renames a file (not a directory — kept in scope with the rest of this shell's file ops). */
+  move(srcPath: string, destPath: string): FsResult {
+    if (this.crashed) return { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' }
+    if (this.findDirEntry(srcPath)) return { ok: false, error: `mv: ${srcPath}: Is a directory` }
+    if (!this.findFileEntry(srcPath)) return { ok: false, error: `mv: ${srcPath}: No such file or directory` }
+    if (this.findFileEntry(destPath) || this.findDirEntry(destPath)) {
+      return { ok: false, error: `mv: ${destPath}: already exists` }
+    }
+    if (this.ancestorIsFile(destPath)) return { ok: false, error: `mv: ${destPath}: Not a directory` }
+
+    const entry: JournalEntry = {
+      id: this.nextJournalId++,
+      op: 'move',
+      path: srcPath,
+      target: destPath,
+      status: 'pending',
+      tick: this.tick,
+    }
+    this.journal.push(entry)
+    this.trimJournal()
+    this.applyMove(srcPath, destPath)
+    entry.status = 'committed'
+    this.lastTouchedPath = destPath
+    simBus.emit('fs:mutated', { op: 'move', path: destPath })
+    return { ok: true }
+  }
+
+  copy(srcPath: string, destPath: string): FsResult {
+    if (this.crashed) return { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' }
+    if (this.findDirEntry(srcPath)) return { ok: false, error: `cp: ${srcPath}: Is a directory` }
+    const srcEntry = this.findFileEntry(srcPath)
+    if (!srcEntry) return { ok: false, error: `cp: ${srcPath}: No such file or directory` }
+    if (this.findFileEntry(destPath) || this.findDirEntry(destPath)) {
+      return { ok: false, error: `cp: ${destPath}: already exists` }
+    }
+    if (this.ancestorIsFile(destPath)) return { ok: false, error: `cp: ${destPath}: Not a directory` }
+
+    const content = this.inodes.get(srcEntry.inode!)!.content
+    const neededBlocks = content.length === 0 ? 0 : Math.ceil(content.length / this.config.blockSizeBytes)
+    const freeBlocks = this.blocks.filter((b) => b.owner === null).length
+    if (neededBlocks > freeBlocks) return { ok: false, error: `cp: ${destPath}: No space left on device` }
+
+    const entry: JournalEntry = {
+      id: this.nextJournalId++,
+      op: 'copy',
+      path: destPath,
+      content,
+      target: srcPath,
+      status: 'pending',
+      tick: this.tick,
+    }
+    this.journal.push(entry)
+    this.trimJournal()
+    this.applyCopy(destPath, content)
+    entry.status = 'committed'
+    this.lastTouchedPath = destPath
+    simBus.emit('fs:mutated', { op: 'copy', path: destPath })
+    return { ok: true }
+  }
+
   list(path = '/'): { ok: true; entries: { name: string; type: DirEntry['type'] }[] } | { ok: false; error: string } {
     if (this.crashed) return { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' }
     let dir: DirEntry
@@ -96,16 +174,18 @@ export class FilesystemEngine {
     })
     this.trimJournal()
     this.crashed = true
+    simBus.emit('fs:crashed', {})
   }
 
   /** Replay every pending journal entry (fsck / next mount). Returns the entries it replayed. */
   fsck(): { replayed: JournalEntry[] } {
     const pending = this.journal.filter((entry) => entry.status === 'pending')
     for (const entry of pending) {
-      this.apply(entry.op, entry.path, entry.content ?? '')
+      this.apply(entry.op, entry.path, entry.content ?? '', entry.target)
       entry.status = 'committed'
     }
     this.crashed = false
+    simBus.emit('fs:recovered', { replayed: pending.length })
     return { replayed: pending }
   }
 
@@ -143,13 +223,53 @@ export class FilesystemEngine {
     this.apply(op, path, content ?? '')
     entry.status = 'committed'
     if (op !== 'delete') this.lastTouchedPath = path
+    simBus.emit('fs:mutated', { op, path })
     return { ok: true }
   }
 
-  private apply(op: JournalOp, path: string, content: string): void {
+  private apply(op: JournalOp, path: string, content: string, target?: string): void {
     if (op === 'create') this.applyCreate(path)
     else if (op === 'write') this.applyWrite(path, content)
-    else this.applyDelete(path)
+    else if (op === 'delete') this.applyDelete(path)
+    else if (op === 'mkdir') this.applyMkdir(path)
+    else if (op === 'move') this.applyMove(path, target!)
+    else if (op === 'copy') this.applyCopy(path, content)
+  }
+
+  private applyMkdir(path: string): void {
+    if (this.findDirEntry(path) || this.findFileEntry(path)) return
+    const segments = this.splitPath(path)
+    const name = segments.pop()
+    if (!name) return
+    const dir = this.resolveDir(segments, true)
+    dir.children!.push({ name, type: 'dir', children: [] })
+  }
+
+  private applyMove(srcPath: string, destPath: string): void {
+    const fileEntry = this.findFileEntry(srcPath)
+    if (!fileEntry) return
+    const srcSegments = this.splitPath(srcPath)
+    srcSegments.pop()
+    const srcDir = this.resolveDir(srcSegments, false)
+    srcDir.children = (srcDir.children ?? []).filter((c) => c !== fileEntry)
+
+    const destSegments = this.splitPath(destPath)
+    const destName = destSegments.pop()!
+    const destDir = this.resolveDir(destSegments, true)
+    destDir.children!.push({ ...fileEntry, name: destName })
+  }
+
+  private applyCopy(destPath: string, content: string): void {
+    this.applyCreate(destPath)
+    const fileEntry = this.findFileEntry(destPath)
+    if (!fileEntry) return
+    const inode = this.inodes.get(fileEntry.inode!)!
+    inode.content = content
+    inode.size = content.length
+    const neededBlocks = content.length === 0 ? 0 : Math.ceil(content.length / this.config.blockSizeBytes)
+    if (neededBlocks > 0) {
+      inode.blockIds.push(...this.allocateFreeBlocks(inode.id, neededBlocks))
+    }
   }
 
   private applyCreate(path: string): void {
