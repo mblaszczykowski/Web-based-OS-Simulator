@@ -5,6 +5,7 @@ import {
   memory,
   filesystem,
   sync,
+  network,
   spawnProcess,
   killProcess,
   stepSimulation,
@@ -15,7 +16,7 @@ import { executeCommand, type CommandContext } from '../terminal/commands'
 import { syscallTraceFor } from '../terminal/syscallTrace'
 import { SYNC_BUFFER_CAPACITY } from '../sync/engine'
 
-export type WindowId = 'scheduler' | 'memory' | 'filesystem' | 'terminal' | 'syscalls' | 'sync'
+export type WindowId = 'scheduler' | 'memory' | 'filesystem' | 'terminal' | 'syscalls' | 'sync' | 'network'
 
 export interface WindowState {
   x: number
@@ -115,6 +116,7 @@ const initialWindows: Record<WindowId, WindowState> = {
   filesystem: { x: 140, y: 110, w: 780, h: 580, open: false, zIndex: 1 },
   syscalls: { x: 220, y: 150, w: 460, h: 320, open: false, zIndex: 1 },
   sync: { x: 180, y: 90, w: 720, h: 560, open: false, zIndex: 1 },
+  network: { x: 260, y: 180, w: 520, h: 400, open: false, zIndex: 1 },
 }
 
 export const useSimStore = create<SimStore>((set, get) => ({
@@ -187,6 +189,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
         }
       },
       syncSetUnsafe: (unsafe) => resetSync(unsafe),
+      networkPing: (host) => network.ping(host),
+      networkCurl: (host) => network.curl(host),
     }
 
     const output = executeCommand(trimmed, ctx)

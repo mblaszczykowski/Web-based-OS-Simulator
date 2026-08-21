@@ -67,6 +67,8 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
       unsafe: false,
     }),
     syncSetUnsafe: () => {},
+    networkPing: () => {},
+    networkCurl: () => {},
     ...overrides,
   }
 }

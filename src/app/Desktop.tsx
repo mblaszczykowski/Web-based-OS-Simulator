@@ -6,6 +6,7 @@ import { FilesystemWindow } from '../filesystem/FilesystemWindow'
 import { TerminalWindow } from '../terminal/TerminalWindow'
 import { SyscallWindow } from '../terminal/SyscallWindow'
 import { SyncWindow } from '../sync/SyncWindow'
+import { NetworkWindow } from '../network/NetworkWindow'
 
 export function Desktop() {
   return (
@@ -26,6 +27,7 @@ export function Desktop() {
       <TerminalWindow />
       <SyscallWindow />
       <SyncWindow />
+      <NetworkWindow />
 
       <Dock />
     </div>

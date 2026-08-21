@@ -15,6 +15,7 @@ OS.SIM is not a playground for comparing scheduling algorithms against each othe
 - **Memory**: Clock (Second-Chance) page replacement — the cheap, hardware-realistic approximation of LRU that production kernels actually run — plus a First-Fit contiguous allocator shown alongside it purely as a historical reference point. Evicted pages are actually swapped to a `/swap` file on the simulated disk (and read back on the next fault) — the one place two subsystems are wired together directly, coordinated from `app/engines.ts` rather than either engine depending on the other.
 - **Filesystem**: a small inode-based filesystem with a write-ahead log, so a simulated crash mid-write can be replayed back to a consistent state on the next `fsck`.
 - **Process sync**: a classic bounded-buffer producer/consumer, guarded by a counting semaphore pair and a mutex — the one correct, synchronized mechanism by default. A "show race condition" mode exists purely to demonstrate the bug the mutex prevents, the same before/after narrative as crash → `fsck`. A second tab in the same window extends this into **deadlock detection**: a scripted circular-wait scenario (two processes, two resources) drives a real wait-for-graph DFS cycle detector, with a resource-allocation graph and a "break the deadlock" resolution step.
+- **Network**: two simulated hosts and a pure packet-flow visualisation — `ping`/`curl` in the terminal launch packets that animate across a fixed link over a few ticks. No real TCP/IP stack or sockets, by design (plan.md §3).
 
 No algorithm picker, no "add process" button. Workload is generated automatically and through the terminal (`run <name>`), the same way you'd interact with a real shell.
 
@@ -33,7 +34,8 @@ src/
   scheduler/    MLFQ engine + Gantt chart window        (pure logic + React)
   memory/       Clock paging + First-Fit engine + window
   filesystem/   inode fs + journal/WAL engine + window
-  sync/         bounded-buffer producer/consumer engine + window
+  sync/         bounded-buffer producer/consumer + deadlock detection, engine + window
+  network/      packet-flow visualisation engine + window
   terminal/     command parser, terminal window, syscall trace window
   shared/       cross-module types + a small typed event bus
   app/          desktop shell: store, window manager, menu bar, dock, boot screen
@@ -61,8 +63,11 @@ cp <src> <dest>       copy a file
 rm <file>             delete a file, supports * wildcards
 crash                 simulate a power loss mid-write
 fsck                  replay the journal and recover the filesystem
+reset-fs              wipe the disk (in memory and the persisted copy)
 sync                  bounded-buffer producer/consumer status
 race on|off           toggle the unsynchronized (racy) demo mode
+ping [host]           send simulated ICMP echo packets to a host
+curl [host]           simulate one HTTP request/response round trip
 clear                 clear the screen
 help                  show this message
 ```

@@ -59,6 +59,8 @@ export interface CommandContext {
   fsReset(): void
   syncStatus(): SyncStatusView
   syncSetUnsafe(unsafe: boolean): void
+  networkPing(host: string): void
+  networkCurl(host: string): void
 }
 
 const HELP_TEXT = [
@@ -81,6 +83,8 @@ const HELP_TEXT = [
   '  reset-fs             wipe the disk (in memory and the persisted copy)',
   '  sync                bounded-buffer producer/consumer status',
   '  race on|off          toggle the unsynchronized (racy) demo mode',
+  '  ping [host]           send simulated ICMP echo packets to a host',
+  '  curl [host]           simulate one HTTP request/response round trip',
   '  clear                clear the screen',
   '  help                 show this message',
 ]
@@ -105,6 +109,8 @@ export const COMMAND_NAMES = [
   'reset-fs',
   'sync',
   'race',
+  'ping',
+  'curl',
   'clear',
   'help',
 ]
@@ -316,6 +322,18 @@ export function executeCommand(input: string, ctx: CommandContext): CommandOutpu
       return mode === 'on'
         ? out('⚠ Sync demo restarted WITHOUT the mutex — watch for buffer corruption in the sync window.')
         : out('Sync demo restarted with the mutex back in place.')
+    }
+
+    case 'ping': {
+      const host = args[0] ?? 'server'
+      ctx.networkPing(host)
+      return out(`PING ${host}: 4 packets sent — watch the Network window for replies.`)
+    }
+
+    case 'curl': {
+      const host = args[0] ?? 'server'
+      ctx.networkCurl(host)
+      return out(`GET / HTTP/1.1 -> ${host} — watch the Network window for the response.`)
     }
 
     case 'clear':

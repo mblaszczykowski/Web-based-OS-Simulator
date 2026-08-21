@@ -12,11 +12,13 @@ import { MemoryEngine } from '../memory/engine'
 import { FilesystemEngine } from '../filesystem/engine'
 import { loadFilesystemState, saveFilesystemState, clearFilesystemState } from '../filesystem/persistence'
 import { SyncEngine } from '../sync/engine'
+import { NetworkEngine } from '../network/engine'
 import { simBus } from '../shared/eventBus'
 
 export const scheduler = new SchedulerEngine()
 export const memory = new MemoryEngine()
 export const filesystem = new FilesystemEngine()
+export const network = new NetworkEngine()
 
 // Reassignable (not const) because "show race condition" / "reset" restart
 // this module from scratch rather than mutating it in place — a mode
@@ -141,6 +143,7 @@ export function stepSimulation() {
   const result = scheduler.tick()
   filesystem.advanceTick()
   sync.tick()
+  network.tick()
 
   // Whoever is running this tick touches one page of its own address space —
   // this is what actually drives page faults / Clock evictions over time.
