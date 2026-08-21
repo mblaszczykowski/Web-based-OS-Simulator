@@ -17,6 +17,11 @@ export interface MemoryMetricsView {
   usedFrames: number
 }
 
+export interface CommandOutputLine {
+  text: string
+  isError?: boolean
+}
+
 /**
  * Everything a terminal command needs from the rest of the simulator. The
  * parser below never touches the engines or the Zustand store directly —
@@ -69,14 +74,22 @@ function tokenize(input: string): string[] {
   return input.trim().split(/\s+/).filter(Boolean)
 }
 
-export function executeCommand(input: string, ctx: CommandContext): string[] {
+function out(...lines: string[]): CommandOutputLine[] {
+  return lines.map((text) => ({ text }))
+}
+
+function err(text: string): CommandOutputLine[] {
+  return [{ text, isError: true }]
+}
+
+export function executeCommand(input: string, ctx: CommandContext): CommandOutputLine[] {
   const tokens = tokenize(input)
   const [cmd, ...args] = tokens
   if (!cmd) return []
 
   switch (cmd) {
     case 'help':
-      return HELP_TEXT
+      return out(...HELP_TEXT)
 
     case 'ps': {
       const header = 'PID   STATE       QUEUE  CMD'
@@ -88,7 +101,7 @@ export function executeCommand(input: string, ctx: CommandContext): string[] {
           p.name,
         ].join(''),
       )
-      return [header, ...rows]
+      return out(header, ...rows)
     }
 
     case 'top': {
@@ -97,81 +110,81 @@ export function executeCommand(input: string, ctx: CommandContext): string[] {
       const running = procs.filter((p) => p.state === 'RUNNING').length
       const ready = procs.filter((p) => p.state === 'READY').length
       const waiting = procs.filter((p) => p.state === 'WAITING').length
-      return [
+      return out(
         `CPU: ${pct(m.cpuUtilization)}  Procs: ${procs.length} (${running} running, ${ready} ready, ${waiting} waiting)`,
         `Avg waiting: ${m.avgWaitingTicks.toFixed(1)} ticks  Avg turnaround: ${m.avgTurnaroundTicks.toFixed(1)} ticks  Ctx switches: ${m.contextSwitches}`,
-      ]
+      )
     }
 
     case 'run': {
       const name = args.join(' ') || `proc${Math.floor(Math.random() * 1000)}`
       const process = ctx.spawnProcess(name)
-      return [`Started process ${process.pid} (${process.name}).`]
+      return out(`Started process ${process.pid} (${process.name}).`)
     }
 
     case 'kill': {
       const pid = Number(args[0])
-      if (!args[0] || Number.isNaN(pid)) return [`kill: usage: kill <pid>`]
+      if (!args[0] || Number.isNaN(pid)) return err('kill: usage: kill <pid>')
       const ok = ctx.killProcess(pid)
-      return ok ? [`Process ${pid} terminated.`] : [`kill: (${pid}) - No such process`]
+      return ok ? out(`Process ${pid} terminated.`) : err(`kill: (${pid}) - No such process`)
     }
 
     case 'free': {
       const m = ctx.memoryMetrics()
-      return [
+      return out(
         `Frames: ${m.usedFrames}/${m.frameCount} used`,
         `Page faults: ${m.pageFaults}  Accesses: ${m.accesses}  Hit ratio: ${pct(m.hitRatio)}`,
         `External fragmentation (contiguous arena): ${pct(m.externalFragmentation)}`,
-      ]
+      )
     }
 
     case 'ls': {
       const result = ctx.fsList(normalizePath(args[0]))
-      if (!result.ok) return [result.error]
+      if (!result.ok) return err(result.error)
       if (result.entries.length === 0) return []
-      return [result.entries.map((e) => (e.type === 'dir' ? `${e.name}/` : e.name)).join('  ')]
+      return out(result.entries.map((e) => (e.type === 'dir' ? `${e.name}/` : e.name)).join('  '))
     }
 
     case 'cat': {
-      if (!args[0]) return ['cat: missing file operand']
+      if (!args[0]) return err('cat: missing file operand')
       const result = ctx.fsRead(normalizePath(args[0]))
-      if (!result.ok) return [result.error]
-      return result.content.length === 0 ? [] : result.content.split('\n')
+      if (!result.ok) return err(result.error)
+      return result.content.length === 0 ? [] : out(...result.content.split('\n'))
     }
 
     case 'write': {
-      if (args.length < 2) return ['write: usage: write <file> <text>']
+      if (args.length < 2) return err('write: usage: write <file> <text>')
       const [path, ...rest] = args
       const result = ctx.fsWrite(normalizePath(path), rest.join(' '))
-      return result.ok ? [`Wrote to ${normalizePath(path)}.`] : [result.error]
+      return result.ok ? out(`Wrote to ${normalizePath(path)}.`) : err(result.error)
     }
 
     case 'rm': {
-      if (!args[0]) return ['rm: missing file operand']
+      if (!args[0]) return err('rm: missing file operand')
       const result = ctx.fsDelete(normalizePath(args[0]))
-      return result.ok ? [`Removed ${normalizePath(args[0])}.`] : [result.error]
+      return result.ok ? out(`Removed ${normalizePath(args[0])}.`) : err(result.error)
     }
 
     case 'crash': {
       ctx.fsCrash()
-      return ['[CRASH] power loss — pending write left in the journal. Run `fsck` to recover.']
+      return out('[CRASH] power loss — pending write left in the journal. Run `fsck` to recover.')
     }
 
     case 'fsck': {
       const { replayed } = ctx.fsFsck()
-      if (replayed.length === 0) return ['[FSCK] journal clean, nothing to replay.']
+      if (replayed.length === 0) return out('[FSCK] journal clean, nothing to replay.')
       const lines = ['[FSCK] scanning journal…']
       for (const entry of replayed) {
         lines.push(`[REPLAY] ${entry.op} ${entry.path} → committed`)
       }
       lines.push('[OK] filesystem consistent')
-      return lines
+      return out(...lines)
     }
 
     case 'clear':
       return []
 
     default:
-      return [`command not found: ${cmd}`]
+      return err(`command not found: ${cmd}`)
   }
 }

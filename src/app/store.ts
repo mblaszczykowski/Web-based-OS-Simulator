@@ -106,7 +106,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       terminalLines: [
         ...s.terminalLines,
         makeLine('prompt', trimmed),
-        ...output.map((line) => makeLine(line.toLowerCase().includes('error') ? 'error' : 'output', line)),
+        ...output.map((line) => makeLine(line.isError ? 'error' : 'output', line.text)),
       ],
       version: s.version + 1,
     }))

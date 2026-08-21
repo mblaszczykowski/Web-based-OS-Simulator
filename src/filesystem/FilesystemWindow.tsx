@@ -16,12 +16,10 @@ function TreeNode({ entry, depth }: { entry: DirEntry; depth: number }) {
   }
   return (
     <>
-      {depth > 0 && (
-        <div className="tree-row folder" style={{ paddingLeft: depth * 16 }}>
-          <FolderIcon />
-          {entry.name}/
-        </div>
-      )}
+      <div className="tree-row folder" style={{ paddingLeft: depth * 16 }}>
+        <FolderIcon />
+        {entry.name}/
+      </div>
       {(entry.children ?? []).map((child) => (
         <TreeNode key={`${depth}-${child.name}`} entry={child} depth={depth + 1} />
       ))}
