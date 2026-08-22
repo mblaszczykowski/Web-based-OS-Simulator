@@ -7,7 +7,7 @@
 // snapshot.
 
 import { INIT_PID, SHELL_PID, type Process, type ProcessKind } from '../shared/types'
-import { SchedulerEngine, createProcess } from '../scheduler/engine'
+import { SchedulerEngine, createProcess, generateBursts } from '../scheduler/engine'
 import { MemoryEngine } from '../memory/engine'
 import { FilesystemEngine, DEFAULT_FS_CONFIG } from '../filesystem/engine'
 import {
@@ -382,6 +382,49 @@ export function spawnThreadGroup(name: string, count: number, parentPid: number 
 }
 
 /**
+ * `fork <pid>` — roadmap-v5.md §1.3. A child process with a copy-on-write
+ * duplicate of its parent's address space: same page count, every resident
+ * page *shared* read-only rather than copied, and the copy deferred until
+ * one of the two actually writes. `free` shows unchanged memory usage
+ * immediately after this, and only climbs once they diverge — which is the
+ * observation the whole mechanism exists to make.
+ *
+ * The child inherits the parent's *remaining* work, since that is what
+ * fork duplicates: execution continues in both. The one adjustment is
+ * parity — `bursts` alternates CPU/IO and must start on a CPU burst (see
+ * generateBursts()), so a parent caught mid-I/O hands over from the next
+ * CPU burst instead of from the I/O one it is currently serving. A parent
+ * on its final burst has nothing left to hand over, so the child is given
+ * a freshly generated workload rather than an empty one.
+ *
+ * Returns undefined for anything that has no address space of its own to
+ * duplicate: an unknown or dead pid, or a thread (roadmap-v4.md §2.1),
+ * whose `memoryOwnerPid` points at its group leader. Forking one thread of
+ * a group is a genuinely ambiguous operation on a real system too, and
+ * refusing is better than picking an interpretation silently.
+ */
+export function forkProcess(pid: number): Process | undefined {
+  const parent = scheduler.getProcess(pid)
+  if (!parent || parent.state === 'TERMINATED') return undefined
+  if (parent.memoryOwnerPid !== parent.pid) return undefined
+
+  const start = parent.burstIndex % 2 === 0 ? parent.burstIndex : parent.burstIndex + 1
+  const inherited = parent.bursts.slice(start)
+  if (start === parent.burstIndex && inherited.length > 0 && parent.burstRemaining > 0) {
+    inherited[0] = parent.burstRemaining
+  }
+  const bursts = inherited.length > 0 ? inherited : generateBursts(parent.kind)
+
+  const child = createProcess(parent.name, parent.kind, bursts, parent.pid, { pageCount: parent.pageCount })
+  scheduler.spawn(child)
+  // Never allocateProcess() — the child's table is a duplicate of the
+  // parent's, not a fresh empty one.
+  memory.forkAddressSpace(parent.pid, child.pid)
+  simBus.emit('process:spawned', { pid: child.pid, name: child.name, kind: child.kind })
+  return child
+}
+
+/**
  * `pipe <writer> <reader>` — two real processes connected by a real pipe
  * (roadmap-v5.md §1.2). Both are ordinary scheduler processes with their
  * own bursts, own queue level and own row in `ps`/the Gantt chart; the
@@ -435,9 +478,13 @@ export function stepSimulation() {
     const page = Math.floor(Math.random() * running.pageCount)
     const isWrite = Math.random() < 0.3 // most memory references are reads
     const access = memory.access(running.memoryOwnerPid, page, isWrite)
+    // Outside the fault branch on purpose: a copy-on-write copy
+    // (roadmap-v5.md §1.3) reports `fault: false` — nothing was paged in
+    // — but still needs a frame for the private copy, and evicting one to
+    // get it produces victims that must reach swap like any other.
+    for (const victim of access.victims) swapOut(victim.pid, victim.page)
     if (access.fault) {
       simBus.emit('memory:page-fault', { pid: running.memoryOwnerPid, page, victimFrame: access.victimFrame })
-      if (access.victim) swapOut(access.victim.pid, access.victim.page)
       if (access.wasSwapped) swapIn(running.memoryOwnerPid, page)
     }
 

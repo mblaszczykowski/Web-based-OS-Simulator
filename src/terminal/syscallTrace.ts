@@ -56,6 +56,12 @@ export function syscallTraceFor(input: string, ok: boolean, cwd: string): string
       return [`fork() = <pid> (x${count})`, `execve("/bin/proc", [...], [...]) = 0 (x${count})`]
     }
 
+    case 'fork':
+      // roadmap-v5.md §1.3 — the one case in this file that is no longer
+      // fabricated at all: `fork` really does duplicate an address space
+      // copy-on-write, so this line describes something that happened.
+      return ok ? ['fork() = <pid>  /* child shares the parent\'s pages copy-on-write */'] : ['fork() = -1 ESRCH']
+
     case 'pipe': {
       // roadmap-v5.md §1.2. `pipe` with no arguments only lists what's
       // open — no channel is created and nothing is forked, so it gets no

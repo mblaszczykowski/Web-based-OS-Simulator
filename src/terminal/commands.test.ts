@@ -13,6 +13,7 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
       Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1, name: `${name}:t${i + 1}`, memoryOwnerPid: 1 })),
     spawnPipeline: (writerName, readerName) => [makeProcess({ pid: 1, name: writerName }), makeProcess({ pid: 2, name: readerName })],
     pipeStatus: () => [],
+    forkProcess: (pid) => makeProcess({ pid: pid + 100 }),
     killProcess: () => true,
     stopProcess: () => true,
     contProcess: () => true,
@@ -33,6 +34,8 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
       swappedPages: 0,
       tlbHitRatio: 0,
       thrashing: false,
+      cowFaults: 0,
+      sharedFrames: 0,
     }),
     fsList: () => ({ ok: true, entries: [] }),
     fsRead: () => ({ ok: false, error: 'not found' }),
@@ -515,6 +518,8 @@ describe('executeCommand', () => {
           swappedPages: 0,
           tlbHitRatio: 0.4,
           thrashing: false,
+          cowFaults: 0,
+          sharedFrames: 0,
         }),
       })
       const lines = texts('free', ctx)
@@ -534,6 +539,8 @@ describe('executeCommand', () => {
           swappedPages: 10,
           tlbHitRatio: 0.05,
           thrashing: true,
+          cowFaults: 0,
+          sharedFrames: 0,
         }),
       })
       expect(executeCommand('free', ctx).some((l) => l.text.includes('THRASHING'))).toBe(true)
@@ -757,5 +764,48 @@ describe('ps / top / iostat report what a process is blocked on (roadmap-v5.md �
 
   it('iostat says "none" rather than an empty list when the disk is not blocking anyone', () => {
     expect(executeCommand('iostat', makeContext())[2]!.text).toBe('Processes blocked on this disk: none')
+  })
+})
+
+describe('fork — copy-on-write duplication (roadmap-v5.md §1.3)', () => {
+  it('names both the parent and the new child', () => {
+    const forkProcess = vi.fn((pid: number) => makeProcess({ pid: pid + 10, name: 'compiler' }))
+    const [line] = executeCommand('fork 3', makeContext({ forkProcess }))
+    expect(forkProcess).toHaveBeenCalledWith(3)
+    expect(line!.text).toContain('P3 → P13')
+  })
+
+  it('reports a refusal rather than pretending a child was created', () => {
+    const ctx = makeContext({ forkProcess: () => undefined })
+    const [line] = executeCommand('fork 3', ctx)
+    expect(line!.isError).toBe(true)
+    expect(line!.text).toContain('No such process')
+  })
+
+  it('rejects a missing or non-numeric pid without calling the engine', () => {
+    const forkProcess = vi.fn()
+    const ctx = makeContext({ forkProcess })
+    expect(executeCommand('fork', ctx)[0]!.isError).toBe(true)
+    expect(executeCommand('fork abc', ctx)[0]!.isError).toBe(true)
+    expect(forkProcess).not.toHaveBeenCalled()
+  })
+
+  it('free reports shared frames and copy-on-write faults', () => {
+    const ctx = makeContext({
+      memoryMetrics: () => ({
+        pageFaults: 10,
+        accesses: 100,
+        hitRatio: 0.9,
+        externalFragmentation: 0,
+        frameCount: 24,
+        usedFrames: 8,
+        swappedPages: 0,
+        tlbHitRatio: 0.5,
+        thrashing: false,
+        cowFaults: 4,
+        sharedFrames: 3,
+      }),
+    })
+    expect(executeCommand('free', ctx)[2]!.text).toBe('Shared (COW) frames: 3  Copy-on-write faults: 4')
   })
 })

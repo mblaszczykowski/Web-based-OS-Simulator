@@ -22,6 +22,10 @@ export interface MemoryMetricsView {
   tlbHitRatio: number
   /** Recent-fault-rate thrashing indicator — roadmap-v4.md §2.2. See MemoryEngine.isThrashing()'s doc for exactly what this measures. */
   thrashing: boolean
+  /** Writes that had to copy a shared copy-on-write frame — roadmap-v5.md §1.3. */
+  cowFaults: number
+  /** Frames currently mapped by more than one address space. */
+  sharedFrames: number
 }
 
 export interface IoMetricsView {
@@ -78,6 +82,8 @@ export interface CommandContext {
   spawnThreads(name: string, n: number): Process[]
   /** Two processes joined by a real kernel pipe — roadmap-v5.md §1.2's `pipe <writer> <reader>`. */
   spawnPipeline(writerName: string, readerName: string): [Process, Process]
+  /** Duplicates a process with a copy-on-write address space — roadmap-v5.md §1.3's `fork <pid>`. */
+  forkProcess(pid: number): Process | undefined
   /** Open pipes and their buffer occupancy — backs `pipe` with no arguments and `lsof`. */
   pipeStatus(): PipeStatusView[]
   killProcess(pid: number): boolean
@@ -124,6 +130,7 @@ const HELP_TEXT = [
   '  run <name>          spawn a new process',
   '  run --threads=<n> <name>  spawn n (2-8) threads of one process, sharing one address space',
   '  stress [n]           spawn n (default 6) CPU-bound processes at once',
+  '  fork <pid>            duplicate a process, sharing its memory copy-on-write',
   '  kill <pid>          terminate a process',
   '  kill -STOP <pid>      pause a process (SIGSTOP) without terminating it',
   '  kill -CONT <pid>      resume a stopped process (SIGCONT)',
@@ -172,6 +179,7 @@ export const COMMAND_NAMES = [
   'top',
   'run',
   'stress',
+  'fork',
   'kill',
   'free',
   'cd',
@@ -209,6 +217,12 @@ const MAN_PAGES: Record<string, string[]> = {
   top: ['top - live scheduler summary', 'usage: top', 'CPU utilization, process counts by state, average waiting/turnaround, context switches.', 'example: top'],
   run: ['run - spawn a new process, or threads of one', 'usage: run [name] | run --threads=<n> [name]', '--threads spawns n (2-8) threads sharing one address space, each with its own scheduler entry. A random name is used if omitted.', 'example: run --threads=3 compiler'],
   stress: ['stress - spawn many CPU-bound processes at once', 'usage: stress [n]', 'Spawns n (default 6, capped at 20) processes to show MLFQ demotion and Clock evictions under load.', 'example: stress 12'],
+  fork: [
+    'fork - duplicate a process with a copy-on-write address space',
+    'usage: fork <pid>',
+    'The child shares every resident page of the parent read-only; the first write by either side copies that frame. `free` shows unchanged usage right after the fork and only climbs once they diverge.',
+    'example: fork 3',
+  ],
   kill: ['kill - terminate or pause/resume a process', 'usage: kill <pid> | kill -STOP <pid> | kill -CONT <pid>', '-STOP/-CONT send SIGSTOP/SIGCONT (pause/resume) instead of terminating.', 'example: kill -STOP 3'],
   free: ['free - memory usage summary', 'usage: free', 'Frames used, page faults, hit ratio, TLB hit ratio, external fragmentation, and a thrashing warning when the recent fault rate is high.', 'example: free'],
   cd: ['cd - change the working directory', 'usage: cd [dir]', 'No argument returns to /. Relative paths resolve against the current directory.', 'example: cd /home'],
@@ -489,6 +503,17 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       return out(...lines)
     }
 
+    case 'fork': {
+      const pid = Number(args[0])
+      if (!args[0] || Number.isNaN(pid)) return err('fork: usage: fork <pid>')
+      const child = ctx.forkProcess(pid)
+      if (!child) return err(`fork: (${pid}) - No such process, or it has no address space of its own to duplicate`)
+      return out(
+        `Forked P${pid} → P${child.pid} (${child.name}).`,
+        'Their pages are shared copy-on-write — run `free` now, then again after they have run for a while.',
+      )
+    }
+
     case 'kill': {
       if (args[0] === '-STOP' || args[0] === '-CONT') {
         const signal = args[0]
@@ -509,6 +534,7 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       const lines = [
         `Frames: ${m.usedFrames}/${m.frameCount} used  Swapped: ${m.swappedPages} page(s) (see /swap)`,
         `Page faults: ${m.pageFaults}  Accesses: ${m.accesses}  Hit ratio: ${pct(m.hitRatio)}  TLB hit ratio: ${pct(m.tlbHitRatio)}`,
+        `Shared (COW) frames: ${m.sharedFrames}  Copy-on-write faults: ${m.cowFaults}`,
         `External fragmentation (contiguous arena): ${pct(m.externalFragmentation)}`,
       ]
       if (m.thrashing) lines.push('⚠ THRASHING — recent fault rate is high enough that paging is crowding out real work.')

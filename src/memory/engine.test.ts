@@ -11,16 +11,16 @@ describe('MemoryEngine — Clock (Second-Chance) replacement', () => {
     const engine = new MemoryEngine({ frameCount: 3, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 5) // pages 0..4, all invalid to start
 
-    expect(engine.access(1, 0)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false, tlbHit: false })
-    expect(engine.access(1, 1)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false, tlbHit: false })
-    expect(engine.access(1, 2)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false, tlbHit: false })
+    expect(engine.access(1, 0)).toEqual({ fault: true, victimFrame: null, victims: [], wasSwapped: false, tlbHit: false, cowCopy: false })
+    expect(engine.access(1, 1)).toEqual({ fault: true, victimFrame: null, victims: [], wasSwapped: false, tlbHit: false, cowCopy: false })
+    expect(engine.access(1, 2)).toEqual({ fault: true, victimFrame: null, victims: [], wasSwapped: false, tlbHit: false, cowCopy: false })
     // hit, refreshes its ref bit — and a TLB hit too, since page 0's translation is still cached from its fault above
-    expect(engine.access(1, 0)).toEqual({ fault: false, victimFrame: null, victim: null, wasSwapped: false, tlbHit: true })
+    expect(engine.access(1, 0)).toEqual({ fault: false, victimFrame: null, victims: [], wasSwapped: false, tlbHit: true, cowCopy: false })
 
     const result = engine.access(1, 3)
     expect(result.fault).toBe(true)
     expect(result.victimFrame).toBe(0) // page 0 evicted, not 1 or 2
-    expect(result.victim).toEqual({ pid: 1, page: 0 })
+    expect(result.victims).toEqual([{ pid: 1, page: 0 }])
     expect(result.wasSwapped).toBe(false)
 
     const table = engine.getPageTable(1)!
@@ -87,7 +87,7 @@ describe('MemoryEngine — swap bookkeeping (roadmap.md §2.1)', () => {
     expect(engine.getMetrics().swappedPages).toBe(0)
 
     const evicting = engine.access(1, 1) // only 1 frame -> evicts page 0
-    expect(evicting.victim).toEqual({ pid: 1, page: 0 })
+    expect(evicting.victims).toEqual([{ pid: 1, page: 0 }])
     expect(engine.getPageTable(1)![0]!.swapped).toBe(true)
     expect(engine.getMetrics().swappedPages).toBe(1)
     expect(engine.getSwappedPages(1)).toEqual([0])
@@ -106,7 +106,7 @@ describe('MemoryEngine — swap bookkeeping (roadmap.md §2.1)', () => {
 
     for (let i = 0; i < 5; i++) {
       const result = engine.access(1, i)
-      expect(result.victim?.pid).not.toBe(0)
+      expect(result.victims.every((v) => v.pid !== 0)).toBe(true)
     }
   })
 
@@ -250,5 +250,190 @@ describe('MemoryEngine — thrashing indicator (roadmap-v4.md §2.2)', () => {
     // repeatedly re-accessing it is a hit every time, diluting the window.
     for (let i = 0; i < 20; i++) engine.access(1, 19)
     expect(engine.isThrashing()).toBe(false)
+  })
+})
+
+describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => {
+  /** A parent with `pages` resident pages, on an engine with plenty of frames. */
+  function parentWithResidentPages(engine: MemoryEngine, pid: number, pages: number) {
+    engine.allocateProcess(pid, pages)
+    for (let page = 0; page < pages; page++) engine.access(pid, page)
+  }
+
+  it('shares every resident frame instead of copying it — memory usage does not move on fork', () => {
+    const engine = new MemoryEngine({ frameCount: 10, contiguousSizeMb: 200 })
+    parentWithResidentPages(engine, 1, 3)
+    const usedBefore = engine.getFrames().filter((f) => f.owner !== null).length
+
+    expect(engine.forkAddressSpace(1, 2)).toBe(true)
+
+    expect(engine.getFrames().filter((f) => f.owner !== null).length).toBe(usedBefore)
+    expect(engine.getSharedFrameCount()).toBe(3)
+    // Both tables point at the same frames, and both sides are marked COW.
+    for (let page = 0; page < 3; page++) {
+      const parent = engine.getPageTable(1)![page]!
+      const child = engine.getPageTable(2)![page]!
+      expect(child.frame).toBe(parent.frame)
+      expect(parent.cow).toBe(true)
+      expect(child.cow).toBe(true)
+    }
+  })
+
+  it('a read by either side is an ordinary hit — nothing is copied until somebody writes', () => {
+    const engine = new MemoryEngine({ frameCount: 10, contiguousSizeMb: 200 })
+    parentWithResidentPages(engine, 1, 2)
+    engine.forkAddressSpace(1, 2)
+    const usedBefore = engine.getFrames().filter((f) => f.owner !== null).length
+
+    const read = engine.access(2, 0, false)
+    expect(read.cowCopy).toBe(false)
+    expect(read.fault).toBe(false)
+    expect(engine.getFrames().filter((f) => f.owner !== null).length).toBe(usedBefore)
+    expect(engine.getPageTable(2)![0]!.cow).toBe(true) // still shared
+  })
+
+  it('the first write copies the frame, and only for the process that wrote', () => {
+    const engine = new MemoryEngine({ frameCount: 10, contiguousSizeMb: 200 })
+    parentWithResidentPages(engine, 1, 2)
+    engine.forkAddressSpace(1, 2)
+    const sharedFrame = engine.getPageTable(1)![0]!.frame
+    const usedBefore = engine.getFrames().filter((f) => f.owner !== null).length
+
+    const write = engine.access(2, 0, true)
+
+    expect(write.cowCopy).toBe(true)
+    expect(engine.getFrames().filter((f) => f.owner !== null).length).toBe(usedBefore + 1) // one real copy
+    const child = engine.getPageTable(2)![0]!
+    expect(child.frame).not.toBe(sharedFrame) // moved to a private frame
+    expect(child.cow).toBe(false)
+    expect(child.modified).toBe(true)
+    // The parent keeps the original frame — and, with nobody left sharing
+    // it, no longer needs protecting.
+    expect(engine.getPageTable(1)![0]!.frame).toBe(sharedFrame)
+    expect(engine.getPageTable(1)![0]!.cow).toBe(false)
+    expect(engine.getMetrics().cowFaults).toBe(1)
+  })
+
+  it('a copy-on-write copy is not counted as a page fault — nothing was paged in', () => {
+    const engine = new MemoryEngine({ frameCount: 10, contiguousSizeMb: 200 })
+    parentWithResidentPages(engine, 1, 2)
+    engine.forkAddressSpace(1, 2)
+    const faultsBefore = engine.getMetrics().pageFaults
+
+    engine.access(2, 0, true)
+    expect(engine.getMetrics().pageFaults).toBe(faultsBefore)
+    expect(engine.getMetrics().cowFaults).toBe(1)
+  })
+
+  it('keeps the page protected while a third sharer still exists', () => {
+    const engine = new MemoryEngine({ frameCount: 12, contiguousSizeMb: 200 })
+    parentWithResidentPages(engine, 1, 1)
+    engine.forkAddressSpace(1, 2)
+    engine.forkAddressSpace(1, 3)
+
+    engine.access(2, 0, true) // P2 diverges
+    // P1 and P3 still share the original, so it stays copy-on-write.
+    expect(engine.getPageTable(1)![0]!.cow).toBe(true)
+    expect(engine.getPageTable(3)![0]!.cow).toBe(true)
+
+    engine.access(3, 0, true) // P3 diverges too — P1 is alone now
+    expect(engine.getPageTable(1)![0]!.cow).toBe(false)
+  })
+
+  it('evicting a shared frame invalidates every mapping of it, not just the owner’s', () => {
+    // Two frames total, one of them kernel-reserved, so the very next
+    // fault has no choice but to evict the shared frame.
+    const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 2)
+    engine.access(1, 0)
+    engine.access(1, 1)
+    engine.forkAddressSpace(1, 2)
+    const sharedFrame = engine.getPageTable(1)![0]!.frame!
+
+    // Force enough faults that the shared frame is swept up.
+    for (let i = 0; i < 6; i++) engine.access(1, i % 2)
+
+    const parentEntry = engine.getPageTable(1)![0]!
+    const childEntry = engine.getPageTable(2)![0]!
+    if (engine.getFrames()[sharedFrame]!.owner?.pid !== 1) {
+      // Whoever ended up holding the frame, the child's stale mapping must
+      // not still claim it — that would be one process reading another's
+      // memory, the one thing paging exists to prevent.
+      expect(childEntry.valid && childEntry.frame === sharedFrame && parentEntry.frame === sharedFrame).toBe(false)
+    }
+    for (const frame of engine.getFrames()) {
+      for (const mapping of [...(frame.owner ? [frame.owner] : []), ...frame.shares]) {
+        if (mapping.pid === 0) continue
+        const entry = engine.getPageTable(mapping.pid)?.[mapping.page]
+        expect(entry?.valid).toBe(true)
+        expect(entry?.frame).toBe(frame.index)
+      }
+    }
+  })
+
+  it('freeing one side of a fork never frees a frame the other side is still reading', () => {
+    const engine = new MemoryEngine({ frameCount: 10, contiguousSizeMb: 200 })
+    parentWithResidentPages(engine, 1, 3)
+    engine.forkAddressSpace(1, 2)
+    const sharedFrames = engine.getPageTable(1)!.map((e) => e.frame)
+
+    engine.freeProcess(1) // the parent exits first
+
+    for (const frameIndex of sharedFrames) {
+      const frame = engine.getFrames()[frameIndex!]!
+      expect(frame.owner).not.toBeNull() // still mapped by the child
+      expect(frame.owner!.pid).toBe(2)
+    }
+    // And the child, now alone, no longer carries a pointless COW flag.
+    expect(engine.getPageTable(2)!.every((e) => !e.cow)).toBe(true)
+    expect(engine.getSharedFrameCount()).toBe(0)
+  })
+
+  it('frees the frames once the last sharer exits', () => {
+    const engine = new MemoryEngine({ frameCount: 10, contiguousSizeMb: 200 })
+    parentWithResidentPages(engine, 1, 3)
+    engine.forkAddressSpace(1, 2)
+
+    engine.freeProcess(1)
+    engine.freeProcess(2)
+    expect(engine.getFrames().every((f) => f.owner === null)).toBe(true)
+  })
+
+  it('refuses to fork an address space that does not exist, or onto one that already does', () => {
+    const engine = new MemoryEngine({ frameCount: 10, contiguousSizeMb: 200 })
+    engine.allocateProcess(1, 2)
+    expect(engine.forkAddressSpace(99, 2)).toBe(false)
+    engine.allocateProcess(3, 2)
+    expect(engine.forkAddressSpace(1, 3)).toBe(false) // pid 3 already has one
+  })
+
+  it('gives the child a private, non-resident entry for a parent page that is not resident', () => {
+    const engine = new MemoryEngine({ frameCount: 10, contiguousSizeMb: 200 })
+    engine.allocateProcess(1, 3)
+    engine.access(1, 0) // only page 0 is ever touched
+    engine.forkAddressSpace(1, 2)
+
+    const child = engine.getPageTable(2)!
+    expect(child[0]!.cow).toBe(true)
+    // Pages 1 and 2 were never resident: the child faults its own copy in
+    // rather than sharing a page file keyed by the parent's pid.
+    expect(child[1]).toMatchObject({ valid: false, frame: null, cow: false, swapped: false })
+    expect(child[2]).toMatchObject({ valid: false, frame: null, cow: false, swapped: false })
+  })
+
+  it('the copy never lands on the frame it is copying from', () => {
+    // One usable frame beyond the kernel's: the Clock sweep's only
+    // candidate would be the shared source frame itself, which must be
+    // excluded or the copy would overwrite its own source.
+    const engine = new MemoryEngine({ frameCount: 3, contiguousSizeMb: 100 })
+    engine.reserveKernelFrames(1)
+    engine.allocateProcess(1, 1)
+    engine.access(1, 0)
+    engine.forkAddressSpace(1, 2)
+    const sourceFrame = engine.getPageTable(1)![0]!.frame!
+
+    engine.access(2, 0, true)
+    expect(engine.getPageTable(2)![0]!.frame).not.toBe(sourceFrame)
+    expect(engine.getPageTable(1)![0]!.frame).toBe(sourceFrame)
   })
 })

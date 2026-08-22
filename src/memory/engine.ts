@@ -15,8 +15,14 @@ export interface AccessResult {
   fault: boolean
   /** Frame that had to be evicted to service the fault, or null on a free-frame fill / a hit. */
   victimFrame: number | null
-  /** Whose page got evicted this access, if any — the coordinator in app/engines.ts uses this to swap it to disk. */
-  victim: { pid: number; page: number } | null
+  /**
+   * Every mapping evicted by this access — the coordinator in
+   * app/engines.ts swaps each to disk. Normally zero or one entry, but a
+   * copy-on-write frame (roadmap-v5.md §1.3) is mapped by several address
+   * spaces at once and evicting it invalidates all of them, so this is a
+   * list rather than a single victim.
+   */
+  victims: { pid: number; page: number }[]
   /** Whether the page just installed had previously been swapped out — the coordinator uses this to know to swap it back in. */
   wasSwapped: boolean
   /**
@@ -26,6 +32,16 @@ export interface AccessResult {
    * cached translation for it.
    */
   tlbHit: boolean
+  /**
+   * This access was a write to a copy-on-write page and therefore copied
+   * the frame (roadmap-v5.md §1.3). Deliberately reported separately from
+   * `fault`: a COW fault is a protection fault, resolved entirely in
+   * memory with no disk involved, whereas `fault` here means "the page
+   * wasn't resident". Folding the two together would inflate the fault
+   * rate that drives the thrashing indicator, which is specifically about
+   * paging pressure.
+   */
+  cowCopy: boolean
 }
 
 let blockIdCounter = 1
@@ -89,6 +105,8 @@ export class MemoryEngine {
   private pageFaultCount = 0
   private accessCount = 0
   private swappedCount = 0
+  /** Writes to a copy-on-write page that had to copy the frame — roadmap-v5.md §1.3. */
+  private cowFaultCount = 0
 
   // TLB (roadmap-v4.md §2.2) — a Map so an existing key can be
   // delete()+set() back in to move it to the most-recently-used end;
@@ -103,7 +121,7 @@ export class MemoryEngine {
   private recentFaultWindow: boolean[] = []
 
   constructor(config: MemoryConfig = DEFAULT_MEMORY_CONFIG) {
-    this.frames = Array.from({ length: config.frameCount }, (_, index) => ({ index, owner: null }))
+    this.frames = Array.from({ length: config.frameCount }, (_, index) => ({ index, owner: null, shares: [] }))
     this.frameRefBit = Array(config.frameCount).fill(false)
     this.blocks = [{ id: `b${blockIdCounter++}`, start: 0, size: config.contiguousSizeMb, owner: null }]
   }
@@ -111,7 +129,7 @@ export class MemoryEngine {
   /** Reserve frames 0..n for the "kernel" so the grid has a fixed, realistic-looking reserved region. */
   reserveKernelFrames(count: number): void {
     for (let i = 0; i < count && i < this.frames.length; i++) {
-      this.frames[i] = { index: i, owner: { pid: 0, page: 0 } }
+      this.frames[i] = { index: i, owner: { pid: 0, page: 0 }, shares: [] }
       this.frameRefBit[i] = true
     }
     this.clockHand = count % this.frames.length
@@ -128,6 +146,7 @@ export class MemoryEngine {
       referenced: false,
       modified: false,
       swapped: false,
+      cow: false,
     }))
     this.pageTables.set(pid, table)
 
@@ -135,13 +154,80 @@ export class MemoryEngine {
     this.firstFitAllocate(pid, size)
   }
 
+  /**
+   * Gives `childPid` a copy-on-write duplicate of `parentPid`'s address
+   * space — roadmap-v5.md §1.3, the memory half of fork(). Every resident
+   * page is *shared*, not copied: both tables point at the same frame,
+   * both entries are marked `cow`, and the frame records the extra
+   * mapping. Nothing is actually duplicated until somebody writes, which
+   * is the whole point — `free` shows unchanged usage right after a fork
+   * and only climbs once the two processes start diverging.
+   *
+   * A parent page that isn't resident (never touched, or swapped out) is
+   * given to the child as a plain non-resident entry rather than sharing
+   * the parent's swap slot: page files here are keyed by (pid, page) and
+   * owned by the swap coordinator, so two processes pointing at one would
+   * make cleanup ambiguous. The child simply faults its own copy in.
+   * Returns false if the parent has no address space, or the child
+   * already has one.
+   */
+  forkAddressSpace(parentPid: number, childPid: number): boolean {
+    const parentTable = this.pageTables.get(parentPid)
+    if (!parentTable || this.pageTables.has(childPid)) return false
+
+    const childTable: PageTableEntry[] = parentTable.map((parentEntry) => {
+      const resident = parentEntry.valid && parentEntry.frame !== null
+      if (!resident) {
+        return { page: parentEntry.page, frame: null, valid: false, referenced: false, modified: false, swapped: false, cow: false }
+      }
+      parentEntry.cow = true
+      this.frames[parentEntry.frame!]!.shares.push({ pid: childPid, page: parentEntry.page })
+      return {
+        page: parentEntry.page,
+        frame: parentEntry.frame,
+        valid: true,
+        referenced: false,
+        modified: false,
+        swapped: false,
+        cow: true,
+      }
+    })
+
+    this.pageTables.set(childPid, childTable)
+    const size = Math.min(80, Math.max(10, childTable.length * 10))
+    this.firstFitAllocate(childPid, size)
+    return true
+  }
+
+  /** How many frames are currently mapped by more than one address space — roadmap-v5.md §1.3. */
+  getSharedFrameCount(): number {
+    return this.frames.filter((f) => f.owner !== null && f.shares.length > 0).length
+  }
+
   freeProcess(pid: number): number[] {
     const freed: number[] = []
     for (const frame of this.frames) {
-      if (frame.owner?.pid === pid) {
+      // A frame this process shares copy-on-write with somebody else
+      // (roadmap-v5.md §1.3) must NOT be freed — the other side is still
+      // reading it. Dropping this mapping and handing ownership over is
+      // the whole job; only a frame with nothing left pointing at it
+      // actually becomes free.
+      const ownsIt = frame.owner?.pid === pid
+      const sharesIt = frame.shares.some((m) => m.pid === pid)
+      if (!ownsIt && !sharesIt) continue
+
+      if (ownsIt) {
+        frame.owner = frame.shares.shift() ?? null
+        frame.shares = frame.shares.filter((m) => m.pid !== pid)
+      } else {
+        frame.shares = frame.shares.filter((m) => m.pid !== pid)
+      }
+
+      if (frame.owner === null) {
         freed.push(frame.index)
-        frame.owner = null
         this.frameRefBit[frame.index] = false
+      } else {
+        this.clearCowIfUnshared(frame.index)
       }
     }
     // Any pages still swapped out never come back through installPage()'s
@@ -186,19 +272,26 @@ export class MemoryEngine {
   access(pid: number, page: number, isWrite = false): AccessResult {
     const table = this.pageTables.get(pid)
     if (!table || page < 0 || page >= table.length) {
-      return { fault: false, victimFrame: null, victim: null, wasSwapped: false, tlbHit: false }
+      return { fault: false, victimFrame: null, victims: [], wasSwapped: false, tlbHit: false, cowCopy: false }
     }
 
     this.accessCount++
     const entry = table[page]!
 
     if (entry.valid && entry.frame !== null) {
+      // A write to a copy-on-write page is the moment fork()'s shared
+      // frame stops being shareable (roadmap-v5.md §1.3). Handled before
+      // the ordinary-hit path below, because it isn't one: the mapping
+      // has to move to a private frame first, which can itself require an
+      // eviction.
+      if (isWrite && entry.cow) return this.copyOnWrite(pid, page, entry)
+
       entry.referenced = true
       this.frameRefBit[entry.frame] = true
       if (isWrite) entry.modified = true
       const tlbHit = this.touchTlb(pid, page, entry.frame)
       this.recordFaultOutcome(false)
-      return { fault: false, victimFrame: null, victim: null, wasSwapped: false, tlbHit }
+      return { fault: false, victimFrame: null, victims: [], wasSwapped: false, tlbHit, cowCopy: false }
     }
 
     this.pageFaultCount++
@@ -210,62 +303,156 @@ export class MemoryEngine {
     if (freeFrame) {
       this.installPage(freeFrame.index, pid, entry, isWrite)
       this.touchTlb(pid, page, freeFrame.index) // a page fault is never a TLB hit — see AccessResult.tlbHit's doc
-      return { fault: true, victimFrame: null, victim: null, wasSwapped, tlbHit: false }
+      return { fault: true, victimFrame: null, victims: [], wasSwapped, tlbHit: false, cowCopy: false }
     }
 
     // Clock sweep: give every frame a second chance before evicting it.
-    // Kernel-reserved frames (owner.pid === 0) are permanently exempt —
-    // nothing ever re-references them to keep their bit alive, so without
-    // this they'd eventually be swept up and evicted like any cold frame.
-    let victimIndex = this.clockHand
-    while (true) {
-      const candidate = this.frames[victimIndex]!
-      if (candidate.owner?.pid === 0) {
-        victimIndex = (victimIndex + 1) % this.frames.length
-        continue
-      }
-      if (!this.frameRefBit[victimIndex]) break
-      this.frameRefBit[victimIndex] = false
-      victimIndex = (victimIndex + 1) % this.frames.length
-    }
-    const victim = this.frames[victimIndex]!
-    const victimOwner = victim.owner
-    if (victimOwner) {
-      const victimTable = this.pageTables.get(victimOwner.pid)
-      const victimEntry = victimTable?.[victimOwner.page]
-      if (victimEntry) {
-        victimEntry.valid = false
-        victimEntry.frame = null
-        victimEntry.referenced = false
-        // Eviction pushes the page out to disk (see the class doc — the
-        // actual write happens one level up) rather than just discarding
-        // it; the copy that comes back in later is read back from there.
-        victimEntry.modified = false
-        victimEntry.swapped = true
-        this.swappedCount++
-        // The evicted mapping no longer points at a frame it actually
-        // owns — any cached TLB entry for it must go too, or a later
-        // access to this exact (pid, page) could be misreported as a TLB
-        // hit for a page that isn't even resident (found while
-        // implementing roadmap-v4.md §2.2).
-        this.invalidateTlb(victimOwner.pid, victimOwner.page)
-      }
-    }
+    const victimIndex = this.selectVictimFrame()
+    const victims = this.evictFrame(victimIndex)
 
     this.installPage(victimIndex, pid, entry, isWrite)
     this.touchTlb(pid, page, victimIndex) // a page fault is never a TLB hit — see AccessResult.tlbHit's doc
     this.clockHand = (victimIndex + 1) % this.frames.length
-    return {
-      fault: true,
-      victimFrame: victimIndex,
-      victim: victimOwner && victimOwner.pid !== 0 ? { pid: victimOwner.pid, page: victimOwner.page } : null,
-      wasSwapped,
-      tlbHit: false,
+    return { fault: true, victimFrame: victimIndex, victims, wasSwapped, tlbHit: false, cowCopy: false }
+  }
+
+  /**
+   * Invalidates every mapping of `frameIndex` and reports them, so the
+   * coordinator can write each one out to swap. A copy-on-write frame
+   * (roadmap-v5.md §1.3) is mapped by several address spaces at once, and
+   * evicting it has to invalidate all of them — leaving a sharer's entry
+   * pointing at a frame that now belongs to somebody else would let that
+   * process read another's memory, which is the one thing paging exists
+   * to prevent.
+   */
+  private evictFrame(frameIndex: number): { pid: number; page: number }[] {
+    const frame = this.frames[frameIndex]!
+    const mappings = [...(frame.owner ? [frame.owner] : []), ...frame.shares]
+    const evicted: { pid: number; page: number }[] = []
+
+    for (const mapping of mappings) {
+      const entry = this.pageTables.get(mapping.pid)?.[mapping.page]
+      if (!entry) continue
+      entry.valid = false
+      entry.frame = null
+      entry.referenced = false
+      // Eviction pushes the page out to disk (see the class doc — the
+      // actual write happens one level up) rather than just discarding
+      // it; the copy that comes back in later is read back from there.
+      entry.modified = false
+      entry.swapped = true
+      // Each sharer faults its own private copy back in, so the sharing
+      // ends here rather than being re-established on the way back.
+      entry.cow = false
+      this.swappedCount++
+      // The evicted mapping no longer points at a frame it actually owns
+      // — any cached TLB entry for it must go too, or a later access to
+      // this exact (pid, page) could be misreported as a TLB hit for a
+      // page that isn't even resident (found while implementing
+      // roadmap-v4.md §2.2).
+      this.invalidateTlb(mapping.pid, mapping.page)
+      // The kernel-reserved frames are never chosen as a victim (see the
+      // sweep above), so pid 0 can't appear here — but the swap
+      // coordinator still shouldn't be handed one if that ever changes.
+      if (mapping.pid !== 0) evicted.push({ ...mapping })
+    }
+    frame.shares = []
+    return evicted
+  }
+
+  /**
+   * The copy half of copy-on-write — roadmap-v5.md §1.3. The writer gets a
+   * private frame holding its own copy; everyone else keeps the original.
+   * If that leaves exactly one mapping on the original frame, its COW flag
+   * is cleared too: a page nobody else can see any more doesn't need
+   * protecting, and leaving the flag set would cost that process a
+   * pointless second copy on its own next write.
+   */
+  private copyOnWrite(pid: number, page: number, entry: PageTableEntry): AccessResult {
+    const sourceIndex = entry.frame!
+    this.cowFaultCount++
+    // Not counted as a page fault: nothing was paged in, and inflating
+    // the fault rate would distort the thrashing indicator — see
+    // AccessResult.cowCopy.
+    this.recordFaultOutcome(false)
+
+    this.detachMapping(sourceIndex, pid, page)
+
+    // The copy needs a frame of its own, which may mean evicting one —
+    // and the Clock sweep must not pick the very frame being copied from.
+    const free = this.frames.find((f) => f.owner === null)
+    let targetIndex: number
+    let victims: { pid: number; page: number }[] = []
+    if (free) {
+      targetIndex = free.index
+    } else {
+      targetIndex = this.selectVictimFrame(sourceIndex)
+      victims = this.evictFrame(targetIndex)
+      this.clockHand = (targetIndex + 1) % this.frames.length
+    }
+
+    entry.cow = false
+    this.installPage(targetIndex, pid, entry, true)
+    // The old translation pointed at the shared frame; this mapping lives
+    // somewhere else now.
+    this.invalidateTlb(pid, page)
+    this.touchTlb(pid, page, targetIndex)
+    return { fault: false, victimFrame: victims.length > 0 ? targetIndex : null, victims, wasSwapped: false, tlbHit: false, cowCopy: true }
+  }
+
+  /**
+   * Removes one (pid, page) mapping from a frame it shares, promoting a
+   * sharer to owner if the owner is the one leaving. Returns the mappings
+   * still on the frame afterwards.
+   */
+  private detachMapping(frameIndex: number, pid: number, page: number): void {
+    const frame = this.frames[frameIndex]!
+    if (frame.owner?.pid === pid && frame.owner.page === page) {
+      // The owner is leaving: someone still sharing the frame has to take
+      // over as its owner, or the frame would read as free while other
+      // page tables still point into it.
+      frame.owner = frame.shares.shift() ?? null
+      if (frame.owner === null) this.frameRefBit[frameIndex] = false
+    } else {
+      frame.shares = frame.shares.filter((m) => !(m.pid === pid && m.page === page))
+    }
+    this.clearCowIfUnshared(frameIndex)
+  }
+
+  /** A frame down to a single mapping has nobody left to protect the page from — see copyOnWrite(). */
+  private clearCowIfUnshared(frameIndex: number): void {
+    const frame = this.frames[frameIndex]!
+    if (frame.shares.length > 0 || !frame.owner) return
+    const entry = this.pageTables.get(frame.owner.pid)?.[frame.owner.page]
+    if (entry) entry.cow = false
+  }
+
+  /**
+   * One Clock sweep, returning the frame to evict. `exclude` is never
+   * chosen — copyOnWrite() needs a destination that isn't the frame it is
+   * copying *from*, which the sweep would otherwise be free to pick.
+   */
+  private selectVictimFrame(exclude?: number): number {
+    let index = this.clockHand
+    while (true) {
+      const candidate = this.frames[index]!
+      // Kernel-reserved frames (owner.pid === 0) are permanently exempt —
+      // nothing ever re-references them to keep their bit alive, so
+      // without this they'd eventually be swept up and evicted like any
+      // cold frame.
+      if (candidate.owner?.pid === 0 || index === exclude) {
+        index = (index + 1) % this.frames.length
+        continue
+      }
+      if (!this.frameRefBit[index]) return index
+      this.frameRefBit[index] = false
+      index = (index + 1) % this.frames.length
     }
   }
 
   private installPage(frameIndex: number, pid: number, entry: PageTableEntry, isWrite: boolean): void {
     this.frames[frameIndex]!.owner = { pid, page: entry.page }
+    this.frames[frameIndex]!.shares = []
     this.frameRefBit[frameIndex] = true
     entry.valid = true
     entry.frame = frameIndex
@@ -364,6 +551,8 @@ export class MemoryEngine {
       externalFragmentation,
       swappedPages: this.swappedCount,
       tlbHitRatio: this.tlbAccessCount > 0 ? this.tlbHitCount / this.tlbAccessCount : 0,
+      cowFaults: this.cowFaultCount,
+      sharedFrames: this.getSharedFrameCount(),
       thrashing: this.isThrashing(),
       recentFaultRate: this.getRecentFaultRate(),
     }

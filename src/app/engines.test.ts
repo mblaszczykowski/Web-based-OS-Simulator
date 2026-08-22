@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { SHELL_PID } from '../shared/types'
-import { memory, scheduler, filesystem, pipes, spawnProcess, spawnThreadGroup, spawnPipeline, killProcess, stepSimulation } from './engines'
+import { memory, scheduler, filesystem, pipes, spawnProcess, spawnThreadGroup, spawnPipeline, forkProcess, killProcess, stepSimulation } from './engines'
 
 // roadmap-v4.md §2.1 — lightweight threads: several independently-scheduled
 // Process entries sharing exactly one memory allocation. These exercise the
@@ -301,5 +301,125 @@ describe('kernel pipes — PipeEngine ↔ scheduler (roadmap-v5.md §1.2)', () =
 
     killProcess(writer.pid)
     killProcess(reader.pid)
+  })
+})
+
+// roadmap-v5.md §1.3 — fork() is the one place syscallTrace.ts used to
+// fabricate outright. These check the coordination this module owns:
+// scheduler gets a real child process, memory gets a copy-on-write
+// duplicate, and neither engine knows about the other.
+describe('fork — copy-on-write process duplication (roadmap-v5.md §1.3)', () => {
+  it('gives the child its own scheduler entry, nested under the parent', () => {
+    const parent = spawnProcess('compiler', 'cpu-bound', SHELL_PID)
+    const child = forkProcess(parent.pid)!
+
+    expect(child).toBeDefined()
+    expect(child.pid).not.toBe(parent.pid)
+    expect(child.parentPid).toBe(parent.pid) // shows nested in ProcessTree, for free
+    expect(child.memoryOwnerPid).toBe(child.pid) // its own address space, unlike a thread
+    expect(child.pageCount).toBe(parent.pageCount)
+
+    killProcess(parent.pid)
+    killProcess(child.pid)
+  })
+
+  it('costs no extra memory at the moment of the fork — the pages are shared, not copied', () => {
+    const parent = spawnProcess('compiler', 'cpu-bound', SHELL_PID)
+    // Make some of the parent's pages resident, so there is something to share.
+    for (let page = 0; page < parent.pageCount; page++) memory.access(parent.pid, page)
+    const usedBefore = memory.getFrames().filter((f) => f.owner !== null).length
+
+    const child = forkProcess(parent.pid)!
+    expect(memory.getFrames().filter((f) => f.owner !== null).length).toBe(usedBefore)
+    expect(memory.getSharedFrameCount()).toBeGreaterThan(0)
+
+    // ...and the child really does have its own page table pointing at
+    // the parent's frames.
+    const parentTable = memory.getPageTable(parent.pid)!
+    const childTable = memory.getPageTable(child.pid)!
+    expect(childTable).not.toBe(parentTable)
+    expect(childTable.map((e) => e.frame)).toEqual(parentTable.map((e) => e.frame))
+
+    killProcess(parent.pid)
+    killProcess(child.pid)
+  })
+
+  it('a write by the child copies the frame and leaves the parent’s alone', () => {
+    const parent = spawnProcess('compiler', 'cpu-bound', SHELL_PID)
+    memory.access(parent.pid, 0)
+    const child = forkProcess(parent.pid)!
+    const sharedFrame = memory.getPageTable(parent.pid)![0]!.frame
+
+    memory.access(child.pid, 0, true)
+
+    expect(memory.getPageTable(child.pid)![0]!.frame).not.toBe(sharedFrame)
+    expect(memory.getPageTable(parent.pid)![0]!.frame).toBe(sharedFrame)
+    expect(memory.getMetrics().cowFaults).toBeGreaterThan(0)
+
+    killProcess(parent.pid)
+    killProcess(child.pid)
+  })
+
+  it('the parent exiting first does not pull shared pages out from under the child', () => {
+    const parent = spawnProcess('compiler', 'cpu-bound', SHELL_PID)
+    for (let page = 0; page < parent.pageCount; page++) memory.access(parent.pid, page)
+    const child = forkProcess(parent.pid)!
+    const sharedFrames = memory.getPageTable(child.pid)!.map((e) => e.frame).filter((f): f is number => f !== null)
+    expect(sharedFrames.length).toBeGreaterThan(0)
+
+    killProcess(parent.pid)
+
+    expect(memory.getPageTable(child.pid)).toBeDefined()
+    for (const frameIndex of sharedFrames) {
+      expect(memory.getFrames()[frameIndex]!.owner?.pid).toBe(child.pid)
+    }
+    killProcess(child.pid)
+  })
+
+  it('hands the child the parent’s remaining work, always starting on a CPU burst', () => {
+    const parent = spawnProcess('compiler', 'cpu-bound', SHELL_PID)
+    parent.bursts = [5, 3, 4, 3, 6]
+    parent.burstIndex = 1 // mid-I/O-burst: the child must start from the next CPU burst
+    parent.burstRemaining = 2
+
+    const child = forkProcess(parent.pid)!
+    expect(child.bursts).toEqual([4, 3, 6])
+
+    killProcess(parent.pid)
+    killProcess(child.pid)
+  })
+
+  it('gives a child forked from a process on its last burst a fresh workload rather than an empty one', () => {
+    const parent = spawnProcess('compiler', 'cpu-bound', SHELL_PID)
+    parent.bursts = [5]
+    parent.burstIndex = 0
+    parent.burstRemaining = 5
+
+    const child = forkProcess(parent.pid)!
+    expect(child.bursts).toEqual([5]) // the remaining burst, inherited
+
+    parent.burstIndex = 1 // ran off the end — nothing left to hand over
+    const second = forkProcess(parent.pid)!
+    expect(second.bursts.length).toBeGreaterThan(0)
+
+    killProcess(parent.pid)
+    killProcess(child.pid)
+    killProcess(second.pid)
+  })
+
+  it('refuses to fork a thread, an unknown pid, or a dead process', () => {
+    expect(forkProcess(99999)).toBeUndefined()
+
+    const threads = spawnThreadGroup('worker', 2, SHELL_PID)
+    // A follower's address space belongs to its group leader — "fork this
+    // one thread" has no unambiguous meaning, so it is refused rather than
+    // silently interpreted.
+    expect(forkProcess(threads[1]!.pid)).toBeUndefined()
+
+    const dead = spawnProcess('gone', 'cpu-bound', SHELL_PID)
+    killProcess(dead.pid)
+    expect(forkProcess(dead.pid)).toBeUndefined()
+
+    for (const t of threads) killProcess(t.pid)
   })
 })

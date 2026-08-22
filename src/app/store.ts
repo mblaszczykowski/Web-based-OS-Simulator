@@ -10,6 +10,7 @@ import {
   spawnStressLoad,
   spawnThreadGroup,
   spawnPipeline,
+  forkProcess,
   pipes,
   killProcess,
   stopProcess,
@@ -274,6 +275,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
       spawnStress: (n) => spawnStressLoad(n),
       spawnThreads: (name, n) => spawnThreadGroup(name, n, SHELL_PID),
       spawnPipeline: (writerName, readerName) => spawnPipeline(writerName, readerName, SHELL_PID),
+      forkProcess: (pid) => forkProcess(pid),
       pipeStatus: () =>
         pipes.getPipes().map((p) => ({
           id: p.id,

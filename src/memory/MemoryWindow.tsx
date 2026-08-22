@@ -85,6 +85,21 @@ export function MemoryWindow() {
               {metrics.swappedPages} page(s)
             </span>
           </div>
+          {/* Only rendered once a fork has actually happened — an
+              always-visible "0 shared frames" row would be noise on the
+              overwhelming majority of sessions (roadmap-v5.md §1.3). */}
+          {(metrics.sharedFrames > 0 || metrics.cowFaults > 0) && (
+            <div className="stat-pair">
+              <div className="stat">
+                <span className="label">Shared (COW)</span>
+                <span className="stat-value">{metrics.sharedFrames}</span>
+              </div>
+              <div className="stat">
+                <span className="label">COW faults</span>
+                <span className="stat-value">{metrics.cowFaults}</span>
+              </div>
+            </div>
+          )}
           <div className="field">
             <span className="label">TLB ({tlbEntries.length}/{TLB_CAPACITY}) &mdash; hit ratio {pct(metrics.tlbHitRatio)}</span>
             <div className="ptable-wrap" style={{ maxHeight: 110 }}>
@@ -174,6 +189,9 @@ export function MemoryWindow() {
                   <span>Ref</span>
                   <span>M</span>
                   <span>Sw</span>
+                  {/* roadmap-v5.md §1.3 — a page shared read-only with another
+                      address space after fork(), until one side writes to it. */}
+                  <span title="Copy-on-write: shared read-only with another process">COW</span>
                 </div>
                 {!pageTable || pageTable.length === 0 ? (
                   <div className="ptable-row">
@@ -188,6 +206,7 @@ export function MemoryWindow() {
                       <span>{entry.referenced ? 1 : 0}</span>
                       <span>{entry.modified ? 1 : 0}</span>
                       <span className={entry.swapped ? 'swap-yes' : 'valid-no'}>{entry.swapped ? 'S' : '—'}</span>
+                      <span className={entry.cow ? 'swap-yes' : 'valid-no'}>{entry.cow ? 'C' : '—'}</span>
                     </div>
                   ))
                 )}

@@ -825,7 +825,7 @@ button {
 }
 .ptable-row {
   display: grid;
-  grid-template-columns: 42px 42px 42px 40px 26px 26px;
+  grid-template-columns: 42px 42px 42px 40px 26px 26px 30px;
   align-items: center;
   padding: 5px 10px;
   border-bottom: 1px solid var(--border-subtle);

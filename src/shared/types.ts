@@ -110,12 +110,29 @@ export interface PageTableEntry {
   modified: boolean
   /** Evicted and currently backed by a page file on disk (roadmap.md §2.1) rather than just discarded. */
   swapped: boolean
+  /**
+   * Copy-on-write (roadmap-v5.md §1.3): this page's frame is shared
+   * read-only with at least one other address space, and the first write
+   * to it must copy the frame before modifying it. Set on both the parent
+   * and the child by `fork()`, and cleared on whichever side does the
+   * copy — plus on the last remaining sharer, which no longer has anyone
+   * to protect the page from.
+   */
+  cow: boolean
 }
 
 export interface Frame {
   index: number
   /** null = free frame. */
   owner: { pid: number; page: number } | null
+  /**
+   * Extra address spaces mapping this same frame copy-on-write
+   * (roadmap-v5.md §1.3), on top of `owner`. Empty for every ordinary
+   * frame. The frame's true reference count is `1 + shares.length`, and
+   * evicting it has to invalidate every one of those mappings, not just
+   * the owner's.
+   */
+  shares: { pid: number; page: number }[]
 }
 
 export interface ContiguousBlock {
