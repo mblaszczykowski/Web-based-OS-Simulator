@@ -16,7 +16,7 @@ OS.SIM is not a playground for comparing scheduling algorithms against each othe
 
 - **Scheduler**: Multi-Level Feedback Queue (MLFQ) — the algorithm real general-purpose kernels approximate, chosen specifically because it adapts to interactive vs. batch workloads without manual tuning. Its window can export the current run's full Gantt history and metrics as a CSV.
 - **Memory**: Clock (Second-Chance) page replacement — the cheap, hardware-realistic approximation of LRU that production kernels actually run — plus a First-Fit contiguous allocator shown alongside it purely as a historical reference point. Evicted pages are actually swapped to a `/swap` file on the simulated disk (and read back on the next fault) — the one place two subsystems are wired together directly, coordinated from `app/engines.ts` rather than either engine depending on the other. An 8-entry TLB sits in front of the page table (own hit ratio, LRU-evicted, invalidated on every real eviction) so it's visible *why* paging is cheap despite the indirection; a sliding-window fault-rate indicator flags thrashing when paging starts crowding out real work (`stress <n>` for a large `n` is the easiest way to trigger it). A process's threads (`run --threads=<n>`) share one such address space while still being scheduled independently — each is its own row in `ps`/the Gantt chart.
-- **Filesystem**: a small inode-based filesystem with a write-ahead log, so a simulated crash mid-write can be replayed back to a consistent state on the next `fsck`.
+- **Filesystem**: a small inode-based filesystem with a write-ahead log, so a simulated crash mid-write can be replayed back to a consistent state on the next `fsck`. Every real block access queues an I/O request serviced by a SCAN (elevator) disk-head scheduler — one justified algorithm, no FCFS/C-SCAN picker — with its own head-sweep visualization next to the block grid and an `iostat` command for its metrics.
 - **Process sync**: a classic bounded-buffer producer/consumer, guarded by a counting semaphore pair and a mutex — the one correct, synchronized mechanism by default. A "show race condition" mode exists purely to demonstrate the bug the mutex prevents, the same before/after narrative as crash → `fsck`. A second tab extends this into **deadlock detection**: a scripted circular-wait scenario (two processes, two resources) drives a real wait-for-graph DFS cycle detector, with a resource-allocation graph and a "break the deadlock" resolution step. A third tab adds **deadlock avoidance** — Banker's Algorithm over Silberschatz's own 5-process/3-resource worked example, running the safety algorithm before granting any request instead of detecting trouble after the fact.
 - **Network**: two simulated hosts and a pure packet-flow visualisation — `ping`/`curl` in the terminal launch packets that animate across a fixed link over a few ticks. No real TCP/IP stack or sockets, by design (plan.md §3).
 
@@ -54,11 +54,12 @@ State management is deliberately thin: the Zustand store (`src/app/store.ts`) ho
 ps                    list processes
 top                   live scheduler summary
 run <name>            spawn a new process
+run --threads=<n> <name>  spawn n (2-8) threads of one process, sharing one address space
 stress [n]            spawn n (default 6) CPU-bound processes at once
 kill <pid>            terminate a process
 kill -STOP <pid>      pause a process (SIGSTOP) without terminating it
 kill -CONT <pid>      resume a stopped process (SIGCONT)
-free                  memory usage summary
+free                  memory usage summary (frames, page faults, TLB hit ratio, thrashing warning)
 cd [dir]              change working directory (no arg -> /)
 pwd                   print working directory
 ls [-l] [path]        list a directory (default: cwd), supports * wildcards
@@ -74,25 +75,29 @@ rm <file>             delete a file, supports * wildcards
 crash                 simulate a power loss mid-write
 fsck                  replay the journal and recover the filesystem
 reset-fs              wipe the disk (in memory and the persisted copy)
+iostat                I/O scheduler (SCAN) metrics — head position, queue depth, avg seek/wait
 sync                  bounded-buffer producer/consumer status
 race on|off           toggle the unsynchronized (racy) demo mode
 ping [host]           send simulated ICMP echo packets to a host
 curl [host]           simulate one HTTP request/response round trip
+export [KEY=VALUE]    set an environment variable, or list all if no argument
+echo [args...]        print arguments, after $VAR substitution
+man <command>         short usage + example for a command
 clear                 clear the screen
 help                  show this message
 ```
 
-Paths are relative to the current directory unless they start with `/`. Commands chain with `;` (always run the next), `&&` (only on success), and pipe through `|` (only `grep <pattern>` is a supported filter) — e.g. `ls | grep .log` or `mkdir /tmp && write /tmp/x.txt hi`. This is composition of existing commands, not a real shell scripting language (no variables, loops, or conditionals).
+Paths are relative to the current directory unless they start with `/`. Commands chain with `;` (always run the next), `&&` (only on success), and pipe through `|` (only `grep <pattern>` is a supported filter) — e.g. `ls | grep .log` or `mkdir /tmp && write /tmp/x.txt hi`. `$VAR`/`${VAR}` are substituted with an exported value (empty if unset), per-segment right before that segment runs — so `export X=1 && echo $X` sees the value just set. This is composition of existing commands plus a plain key-value store, not a real shell scripting language (no loops, conditionals, or functions).
 
 Every command also appends a line to the **syscall trace** window — a fictional but realistic `open()`/`read()`/`execve()`-style log, purely for flavour (no new domain logic — it's just a relabeling of what the command already did).
 
-Tab-completes commands and filesystem paths (relative to the current directory), and persists command history to `localStorage` across reloads — one of a small set of pieces of state that are *not* wiped on refresh (see [Model trwałości](plan.md#25-model-trwałości-i-restart) and "State & robustness" below).
+Tab-completes commands and filesystem paths (relative to the current directory), persists command history to `localStorage` across reloads, and supports bash/zsh-style reverse history search: **Ctrl+R** live-filters to the most recent matching entry as you type, a repeated Ctrl+R steps to the next older match, Enter runs it, Escape restores whatever you'd been typing before the search started. Command history is one of a small set of pieces of state that are *not* wiped on refresh (see [Model trwałości](plan.md#25-model-trwałości-i-restart) and "State & robustness" below).
 
 ## Tech stack
 
 React + TypeScript, Zustand, Vite, Vitest (+ React Testing Library/jsdom for component tests) — no D3/Recharts, no backend. All visualisations (Gantt chart, RAM/disk grids, allocation strip) are hand-built CSS/flex/grid. The filesystem's "disk" persists across reloads via IndexedDB — scheduler and memory still reset on refresh, deliberately (see `plan.md` §2.5).
 
-`npm run build`'s current output is the whole app in one JS chunk + one CSS file: **261.58 kB JS / 80.28 kB gzipped**, **20.48 kB CSS / 4.35 kB gzipped** — no charting library, no UI framework, no icon font is why that number stays small as the simulator grows (roadmap-v4.md §2.5). Re-run `npm run build` yourself to see the current number for the actual code in this tree.
+`npm run build`'s current output is the whole app in one JS chunk + one CSS file: **266.73 kB JS / 81.79 kB gzipped**, **20.63 kB CSS / 4.37 kB gzipped** — no charting library, no UI framework, no icon font is why that number stays small as the simulator grows (roadmap-v4.md §2.5). Re-run `npm run build` yourself to see the current number for the actual code in this tree.
 
 ## State & robustness
 
