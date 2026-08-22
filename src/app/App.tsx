@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { Desktop } from './Desktop'
 import { useSimStore } from './store'
-import { hydrateAndBootstrap } from './engines'
+import { hydrateAndBootstrap, resetSync } from './engines'
 import { BootScreen, BOOT_DURATION_MS } from './BootScreen'
 import { SmallScreenNotice } from './SmallScreenNotice'
 import { useIsNarrowViewport, SMALL_SCREEN_BREAKPOINT_PX } from './useIsNarrowViewport'
+import { readSharedSessionState } from './urlState'
 
 const TICK_INTERVAL_MS = 450
 
@@ -42,6 +43,14 @@ export function App() {
         console.error('Boot sequence failed unexpectedly; continuing with default state.', error)
       })
       .then(() => {
+        // A shared session link (roadmap-v4.md §3.1) can ask to boot
+        // straight into the unsafe/race-condition sync demo — applied
+        // once here, before the first tick, the same restart resetSync()
+        // already does for the `race on|off` terminal command. Which
+        // SyncWindow tab to open is read directly by that component
+        // itself (it has no other boot-order dependency), not here.
+        const shared = readSharedSessionState()
+        if (shared.raceOn !== null) resetSync(shared.raceOn)
         // Without this, the desktop would render empty for one full tick
         // interval before the bootstrapped processes/files ever show up.
         stepOnce()

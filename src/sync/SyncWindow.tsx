@@ -5,6 +5,7 @@ import { useSimStore } from '../app/store'
 import { BoundedBufferPanel } from './BoundedBufferPanel'
 import { DeadlockPanel } from './DeadlockPanel'
 import { BankerPanel } from './BankerPanel'
+import { readSharedSessionState, writeSharedSessionState } from '../app/urlState'
 
 type Tab = 'buffer' | 'deadlock' | 'banker'
 
@@ -21,7 +22,8 @@ const TABPANEL_STYLE = { flexGrow: 1, display: 'flex', minHeight: 0 } as const
 
 export function SyncWindow() {
   useSimStore((s) => s.version) // subscribed purely so this window re-renders on every tick/command
-  const [tab, setTab] = useState<Tab>('buffer')
+  // Opens directly to whatever tab a shared session link named — roadmap-v4.md §3.1.
+  const [tab, setTab] = useState<Tab>(() => readSharedSessionState().syncTab ?? 'buffer')
   const bufferTabRef = useRef<HTMLButtonElement>(null)
   const deadlockTabRef = useRef<HTMLButtonElement>(null)
   const bankerTabRef = useRef<HTMLButtonElement>(null)
@@ -43,13 +45,19 @@ export function SyncWindow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab])
 
+  /** Every tab change routes through here so the shared session link (roadmap-v4.md §3.1) always reflects what's actually showing. */
+  function changeTab(next: Tab) {
+    setTab(next)
+    writeSharedSessionState({ syncTab: next })
+  }
+
   function handleTabsKeyDown(e: React.KeyboardEvent) {
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
     e.preventDefault()
     const index = TABS.findIndex((t) => t.id === tab)
     const nextIndex = e.key === 'ArrowRight' ? (index + 1) % TABS.length : (index - 1 + TABS.length) % TABS.length
     shouldFocusTab.current = true
-    setTab(TABS[nextIndex]!.id)
+    changeTab(TABS[nextIndex]!.id)
   }
 
   return (
@@ -70,7 +78,7 @@ export function SyncWindow() {
           aria-controls="sync-panel-buffer"
           tabIndex={tab === 'buffer' ? 0 : -1}
           className={`win-tab${tab === 'buffer' ? ' active' : ''}`}
-          onClick={() => setTab('buffer')}
+          onClick={() => changeTab('buffer')}
         >
           Bounded buffer
         </button>
@@ -83,7 +91,7 @@ export function SyncWindow() {
           aria-controls="sync-panel-deadlock"
           tabIndex={tab === 'deadlock' ? 0 : -1}
           className={`win-tab${tab === 'deadlock' ? ' active' : ''}`}
-          onClick={() => setTab('deadlock')}
+          onClick={() => changeTab('deadlock')}
         >
           Deadlock detection
         </button>
@@ -96,7 +104,7 @@ export function SyncWindow() {
           aria-controls="sync-panel-banker"
           tabIndex={tab === 'banker' ? 0 : -1}
           className={`win-tab${tab === 'banker' ? ' active' : ''}`}
-          onClick={() => setTab('banker')}
+          onClick={() => changeTab('banker')}
         >
           Banker&rsquo;s Algorithm
         </button>

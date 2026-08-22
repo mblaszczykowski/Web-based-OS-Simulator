@@ -19,6 +19,7 @@ import {
 import { runCommandLine, type CommandContext } from '../terminal/commands'
 import { syscallTraceFor } from '../terminal/syscallTrace'
 import { simBus } from '../shared/eventBus'
+import { writeSharedSessionState } from './urlState'
 import { SYNC_BUFFER_CAPACITY } from '../sync/engine'
 
 export type WindowId = 'scheduler' | 'memory' | 'filesystem' | 'terminal' | 'syscalls' | 'sync' | 'network'
@@ -326,7 +327,14 @@ export const useSimStore = create<SimStore>((set, get) => ({
           unsafe: sync.unsafe,
         }
       },
-      syncSetUnsafe: (unsafe) => resetSync(unsafe),
+      syncSetUnsafe: (unsafe) => {
+        resetSync(unsafe)
+        // Keeps the shared session link (roadmap-v4.md §3.1) in sync
+        // however race mode got toggled — `race on|off` is the only path
+        // today, but this is the single choke point every future one
+        // would go through too.
+        writeSharedSessionState({ raceOn: unsafe })
+      },
       networkPing: (host) => network.ping(host),
       networkCurl: (host) => network.curl(host),
     }
