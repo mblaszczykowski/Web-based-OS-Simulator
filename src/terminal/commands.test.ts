@@ -13,6 +13,7 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
       Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1, name: `${name}:t${i + 1}`, memoryOwnerPid: 1 })),
     spawnPipeline: (writerName, readerName) => [makeProcess({ pid: 1, name: writerName }), makeProcess({ pid: 2, name: readerName })],
     pipeStatus: () => [],
+    openFiles: () => [],
     forkProcess: (pid) => makeProcess({ pid: pid + 100 }),
     killProcess: () => true,
     stopProcess: () => true,
@@ -807,5 +808,25 @@ describe('fork — copy-on-write duplication (roadmap-v5.md §1.3)', () => {
       }),
     })
     expect(executeCommand('free', ctx)[2]!.text).toBe('Shared (COW) frames: 3  Copy-on-write faults: 4')
+  })
+})
+
+describe('lsof — open file descriptors (roadmap-v5.md §2.2)', () => {
+  it('lists each process’s descriptors with what they refer to', () => {
+    const ctx = makeContext({
+      openFiles: () => [
+        { pid: 7, processName: 'producer', fd: 0, kind: 'stdin', target: '/dev/tty' },
+        { pid: 7, processName: 'producer', fd: 3, kind: 'pipe-write', target: 'pipe:[1]' },
+      ],
+    })
+    const lines = executeCommand('lsof', ctx).map((l) => l.text)
+    expect(lines[0]).toContain('FD')
+    expect(lines[1]).toContain('stdin')
+    expect(lines[2]).toContain('pipe-write')
+    expect(lines[2]).toContain('pipe:[1]')
+  })
+
+  it('says there are no live processes rather than printing a bare header', () => {
+    expect(executeCommand('lsof', makeContext())[0]!.text).toBe('No live processes.')
   })
 })

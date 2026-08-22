@@ -22,6 +22,7 @@ import { DeadlockEngine } from '../sync/deadlock'
 import { BankerEngine } from '../sync/banker'
 import { NetworkEngine } from '../network/engine'
 import { PipeEngine } from '../ipc/pipe'
+import { FdTable } from '../kernel/fdTable'
 import { simBus } from '../shared/eventBus'
 
 export const scheduler = new SchedulerEngine()
@@ -41,6 +42,11 @@ export const banker = new BankerEngine()
 // engine. Owns the channels only; who blocks on them is the scheduler's
 // business, coordinated below.
 export const pipes = new PipeEngine()
+// Open file descriptors (roadmap-v5.md §2.2) — kernel-side bookkeeping
+// about processes, deliberately not a field on Process itself, so
+// SchedulerEngine stays about scheduling. Backs `lsof` and supplies the
+// real fd numbers the syscall trace reports.
+export const fdTable = new FdTable()
 
 // Reassignable (not const) because "show race condition" / "reset" restart
 // this module from scratch rather than mutating it in place — a mode
@@ -190,6 +196,10 @@ function clearSwapFiles(): void {
 // lets both halves of a pipeline actually terminate.
 simBus.on('process:terminated', ({ pid }) => {
   for (const waiter of pipes.closeEndpoint(pid)) scheduler.wake(waiter, 'pipe')
+  // Everything a process still holds is released when it exits, exactly
+  // like a real one — otherwise `lsof` accumulates descriptors belonging
+  // to processes that no longer exist.
+  fdTable.closeAll(pid)
 })
 
 simBus.on('process:terminated', ({ memoryOwnerPid }) => {
@@ -440,7 +450,11 @@ export function forkProcess(pid: number): Process | undefined {
 export function spawnPipeline(writerName: string, readerName: string, parentPid: number = SHELL_PID): [Process, Process] {
   const writer = spawnProcess(writerName, 'interactive', parentPid)
   const reader = spawnProcess(readerName, 'interactive', writer.pid)
-  pipes.create(writer.pid, reader.pid)
+  const pipe = pipes.create(writer.pid, reader.pid)
+  // Each end is a real open descriptor for its process, visible in `lsof`
+  // for as long as that process lives (roadmap-v5.md §2.2).
+  fdTable.open(writer.pid, 'pipe-write', `pipe:[${pipe.id}]`)
+  fdTable.open(reader.pid, 'pipe-read', `pipe:[${pipe.id}]`)
   return [writer, reader]
 }
 

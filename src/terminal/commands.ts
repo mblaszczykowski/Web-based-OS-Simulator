@@ -37,6 +37,16 @@ export interface IoMetricsView {
   avgWaitTicks: number
 }
 
+/** One row of `lsof` — roadmap-v5.md §2.2. */
+export interface OpenFileView {
+  pid: number
+  processName: string
+  fd: number
+  /** stdin/stdout/stderr, or the kind of descriptor a process actually opened. */
+  kind: string
+  target: string
+}
+
 /** One open pipe, as the terminal renders it. */
 export interface PipeStatusView {
   id: number
@@ -84,8 +94,10 @@ export interface CommandContext {
   spawnPipeline(writerName: string, readerName: string): [Process, Process]
   /** Duplicates a process with a copy-on-write address space — roadmap-v5.md §1.3's `fork <pid>`. */
   forkProcess(pid: number): Process | undefined
-  /** Open pipes and their buffer occupancy — backs `pipe` with no arguments and `lsof`. */
+  /** Open pipes and their buffer occupancy — backs `pipe` with no arguments. */
   pipeStatus(): PipeStatusView[]
+  /** Open file descriptors per live process — roadmap-v5.md §2.2's `lsof`. */
+  openFiles(): OpenFileView[]
   killProcess(pid: number): boolean
   /** SIGSTOP / SIGCONT — roadmap-v3.md §2.2. */
   stopProcess(pid: number): boolean
@@ -154,6 +166,7 @@ const HELP_TEXT = [
   '  iostat               disk I/O scheduler status (SCAN head position, queue, seek/wait)',
   '  pipe <w> <r>          spawn two processes joined by a real kernel pipe',
   '  pipe                  list open pipes and their buffer occupancy',
+  '  lsof                  list open file descriptors, per process',
   '  sync                bounded-buffer producer/consumer status',
   '  race on|off          toggle the unsynchronized (racy) demo mode',
   '  ping [host]           send simulated ICMP echo packets to a host',
@@ -200,6 +213,7 @@ export const COMMAND_NAMES = [
   'reset-fs',
   'iostat',
   'pipe',
+  'lsof',
   'sync',
   'race',
   'ping',
@@ -253,6 +267,12 @@ const MAN_PAGES: Record<string, string[]> = {
     'Spawns both processes and joins them with a bounded buffer: the writer blocks when it fills, the reader when it empties, and each wakes the other. With no arguments, lists open pipes.',
     "This is NOT the shell's |, which is a filter over one command's rendered output and involves no processes at all.",
     'example: pipe producer consumer',
+  ],
+  lsof: [
+    'lsof - list open file descriptors',
+    'usage: lsof',
+    'Every live process holds stdin/stdout/stderr; a pipe endpoint also holds its end of the channel. The shell opens and closes a file within a single command, so ordinary files are not listed between commands — watch the syscall trace for those.',
+    'example: lsof',
   ],
   sync: ['sync - bounded-buffer producer/consumer status', 'usage: sync', 'Buffer occupancy, mutex state, and produced/consumed/corruption counters.', 'example: sync'],
   race: ['race - toggle the unsynchronized sync demo', 'usage: race on|off', 'on restarts the producer/consumer demo without its mutex, to show the corruption it normally prevents.', 'example: race on'],
@@ -748,6 +768,23 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       )
     }
 
+    case 'lsof': {
+      const open = ctx.openFiles()
+      if (open.length === 0) return out('No live processes.')
+      return out(
+        'PID   COMMAND       FD   TYPE        NAME',
+        ...open.map((f) =>
+          [
+            String(f.pid).padEnd(6),
+            f.processName.slice(0, 12).padEnd(14),
+            String(f.fd).padEnd(5),
+            f.kind.padEnd(12),
+            f.target,
+          ].join(''),
+        ),
+      )
+    }
+
     case 'sync': {
       const s = ctx.syncStatus()
       return out(
@@ -881,31 +918,13 @@ function splitSequence(input: string): { text: string; connector: Connector | nu
   return segments
 }
 
-/** One atomic command actually executed (a pipeline stage or a bare command), for syscall tracing. */
-export interface RanCommand {
-  text: string
-  ok: boolean
-  /** cwd in effect when this stage ran — resolving its own trace path needs the cwd *at that point*, which can change mid-line (`cd x && cat y`). */
-  cwd: string
-}
-
-export interface CommandLineResult {
-  lines: CommandOutputLine[]
-  ran: RanCommand[]
-}
-
-function runPipeline(text: string, ctx: CommandContext, ran: RanCommand[]): CommandOutputLine[] {
+function runPipeline(text: string, ctx: CommandContext): CommandOutputLine[] {
   const stages = splitPipeline(text)
   if (stages.length === 0) return []
 
-  const firstCwd = ctx.getCwd()
   let lines = runStage(stages[0]!, ctx, stages.length > 1)
-  ran.push({ text: stages[0]!, ok: lines.every((l) => !l.isError), cwd: firstCwd })
-
   for (let i = 1; i < stages.length; i++) {
-    const cwd = ctx.getCwd()
     lines = applyFilter(stages[i]!, lines)
-    ran.push({ text: stages[i]!, ok: lines.every((l) => !l.isError), cwd })
   }
   return lines
 }
@@ -914,29 +933,31 @@ function runPipeline(text: string, ctx: CommandContext, ran: RanCommand[]): Comm
  * Top-level entry point: parses `;`/`&&`/`|` (roadmap-v3.md §1.2) and runs
  * every resulting stage against `ctx`, in order. `&&` short-circuits (skips
  * the next segment, without running it) if the previous one produced any
- * error line; `;` always runs regardless. Returns both the combined output
- * (for the terminal) and the list of atomic commands that actually ran
- * (for the syscall trace window, one entry per real command — not per
- * `;`/`&&`-joined line).
+ * error line; `;` always runs regardless.
+ *
+ * This used to also return the list of atomic commands that ran, purely so
+ * syscallTrace.ts could re-derive from the command text what each one had
+ * done. Nothing needs that any more: the trace is produced by the kernel
+ * boundary itself (kernel/syscalls.ts wraps `ctx`), so it sees the real
+ * calls rather than reconstructing them — roadmap-v5.md §2.1.
  */
-export function runCommandLine(input: string, ctx: CommandContext): CommandLineResult {
+export function runCommandLine(input: string, ctx: CommandContext): CommandOutputLine[] {
   const segments = splitSequence(input)
   const lines: CommandOutputLine[] = []
-  const ran: RanCommand[] = []
   let lastFailed = false
 
   for (const segment of segments) {
     if (segment.connector === '&&' && lastFailed) continue
     const resolvedText = substituteEnvVars(segment.text, ctx.getEnv)
-    const segmentLines = runPipeline(resolvedText, ctx, ran)
+    const segmentLines = runPipeline(resolvedText, ctx)
     lines.push(...segmentLines)
     lastFailed = segmentLines.some((l) => l.isError)
   }
 
-  return { lines, ran }
+  return lines
 }
 
-/** Convenience wrapper over runCommandLine() for callers that only need the rendered output (e.g. tests). */
+/** Alias kept for the many call sites (tests included) that read better as "execute this command". */
 export function executeCommand(input: string, ctx: CommandContext): CommandOutputLine[] {
-  return runCommandLine(input, ctx).lines
+  return runCommandLine(input, ctx)
 }

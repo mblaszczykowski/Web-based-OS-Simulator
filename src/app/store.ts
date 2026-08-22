@@ -12,6 +12,7 @@ import {
   spawnPipeline,
   forkProcess,
   pipes,
+  fdTable,
   killProcess,
   stopProcess,
   continueProcess,
@@ -20,7 +21,8 @@ import {
   resetFilesystem,
 } from './engines'
 import { runCommandLine, type CommandContext } from '../terminal/commands'
-import { syscallTraceFor } from '../terminal/syscallTrace'
+import { traceSyscalls } from '../kernel/syscalls'
+import { STANDARD_STREAMS } from '../kernel/fdTable'
 import { simBus } from '../shared/eventBus'
 import { writeSharedSessionState } from './urlState'
 import { SYNC_BUFFER_CAPACITY } from '../sync/engine'
@@ -276,6 +278,23 @@ export const useSimStore = create<SimStore>((set, get) => ({
       spawnThreads: (name, n) => spawnThreadGroup(name, n, SHELL_PID),
       spawnPipeline: (writerName, readerName) => spawnPipeline(writerName, readerName, SHELL_PID),
       forkProcess: (pid) => forkProcess(pid),
+      openFiles: () => {
+        // stdin/stdout/stderr are synthesised per live process rather than
+        // stored (see kernel/fdTable.ts) — nothing here can close or
+        // redirect them, so keeping three rows per process in the table
+        // would be bookkeeping with no state to track.
+        const rows: { pid: number; processName: string; fd: number; kind: string; target: string }[] = []
+        for (const process of scheduler.getProcesses()) {
+          if (process.state === 'TERMINATED') continue
+          for (const stream of STANDARD_STREAMS) {
+            rows.push({ pid: process.pid, processName: process.name, fd: stream.fd, kind: stream.name, target: '/dev/tty' })
+          }
+          for (const descriptor of fdTable.forPid(process.pid)) {
+            rows.push({ pid: process.pid, processName: process.name, fd: descriptor.fd, kind: descriptor.kind, target: descriptor.target })
+          }
+        }
+        return rows.sort((a, b) => a.pid - b.pid || a.fd - b.fd)
+      },
       pipeStatus: () =>
         pipes.getPipes().map((p) => ({
           id: p.id,
@@ -356,10 +375,13 @@ export const useSimStore = create<SimStore>((set, get) => ({
       networkCurl: (host) => network.curl(host),
     }
 
-    const { lines: output, ran } = runCommandLine(trimmed, ctx)
-    const trace = ran
-      .flatMap(({ text, ok, cwd }) => syscallTraceFor(text, ok, cwd))
-      .map((text) => ({ id: syscallLineId++, text }))
+    // The syscall trace is a log of the real kernel boundary being
+    // crossed, not a second description of the command written alongside
+    // it (roadmap-v5.md §2.1) — so the command runs against a wrapped
+    // context and the trace falls out of what it actually called.
+    const tracer = traceSyscalls(ctx, fdTable)
+    const output = runCommandLine(trimmed, tracer.ctx)
+    const trace = tracer.drain().map((text) => ({ id: syscallLineId++, text }))
 
     // `clear` (roadmap-v4.md §1.2's sibling `case 'clear'` in commands.ts)
     // marks its output line with `clearScreen` instead of touching
