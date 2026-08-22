@@ -17,7 +17,13 @@ export function MemoryWindow() {
 
   const processes = scheduler.getProcesses()
   const focusProcess = scheduler.getRunning() ?? processes.find((p) => p.state !== 'TERMINATED')
-  const pageTable = focusProcess ? memory.getPageTable(focusProcess.pid) : undefined
+  // A thread (roadmap-v4.md §2.1) has no page table of its own — its
+  // group's shared one lives under memoryOwnerPid, which equals its own
+  // pid for every ordinary process (found while double-checking this
+  // window against the memoryOwnerPid change: this used focusProcess.pid
+  // directly, so focusing a follower thread would have shown an empty
+  // page table instead of the one it actually shares with its leader).
+  const pageTable = focusProcess ? memory.getPageTable(focusProcess.memoryOwnerPid) : undefined
 
   const totalArena = blocks.reduce((sum, b) => sum + b.size, 0)
 
@@ -146,7 +152,14 @@ export function MemoryWindow() {
 
           <div className="split-row">
             <div className="split-col">
-              <span className="label">Page table {focusProcess ? `— P${focusProcess.pid}` : ''}</span>
+              <span className="label">
+                Page table{' '}
+                {focusProcess
+                  ? focusProcess.memoryOwnerPid === focusProcess.pid
+                    ? `— P${focusProcess.pid}`
+                    : `— P${focusProcess.memoryOwnerPid} (shared with thread P${focusProcess.pid})`
+                  : ''}
+              </span>
               <div className="ptable-wrap">
                 <div className="ptable-row head">
                   <span>Page</span>
