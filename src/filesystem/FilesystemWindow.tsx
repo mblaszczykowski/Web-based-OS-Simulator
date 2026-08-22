@@ -1,4 +1,4 @@
-import type { DirEntry } from '../shared/types'
+import type { DirEntry, DiskBlock } from '../shared/types'
 import { WindowFrame } from '../app/WindowFrame'
 import { FilesystemIcon, FolderIcon, FileIcon, WarningIcon } from '../app/icons'
 import { useSimStore } from '../app/store'
@@ -26,6 +26,35 @@ function TreeNode({ entry, depth }: { entry: DirEntry; depth: number }) {
       ))}
     </>
   )
+}
+
+type IoCellKind = 'head' | 'pending' | 'owned' | 'free'
+
+/**
+ * A block can hold real file data with no I/O request in flight for it
+ * right now — that's not the same as never having been allocated at all
+ * (found by code review: both used to render as an identical "free" cell
+ * here, even though the disk-blocks grid directly above already shows this
+ * same block as owned). Priority order (head > pending > owned > free)
+ * lives in exactly this one place, instead of being repeated across
+ * separate class/title/glyph ternary chains that could silently drift
+ * apart from each other.
+ */
+function ioCellKind(block: DiskBlock, headPosition: number, pendingBlocks: Set<number>): IoCellKind {
+  if (block.index === headPosition) return 'head'
+  if (pendingBlocks.has(block.index)) return 'pending'
+  if (block.owner !== null) return 'owned'
+  return 'free'
+}
+
+const IO_CELL_STYLE: Record<
+  IoCellKind,
+  { className: string; glyph: (b: DiskBlock) => string; title: (b: DiskBlock) => string }
+> = {
+  head: { className: 'io-head', glyph: () => 'H', title: () => 'disk head' },
+  pending: { className: 'io-pending', glyph: () => '•', title: () => 'pending I/O request' },
+  owned: { className: 'io-owned', glyph: () => 'o', title: (b) => `inode ${b.owner} (idle)` },
+  free: { className: 'free', glyph: () => '·', title: () => 'idle' },
 }
 
 export function FilesystemWindow() {
@@ -137,30 +166,20 @@ export function FilesystemWindow() {
               </div>
             </div>
             <div className="disk-grid" style={{ marginTop: 8 }}>
-              {blocks.map((b) => {
-                const isHead = b.index === ioState.headPosition
-                const isPending = ioState.pending.some((r) => r.blockIndex === b.index)
-                // A block can hold real file data with no I/O request in
-                // flight for it right now — that's not the same as never
-                // having been allocated at all (found by code review: both
-                // rendered as an identical "free" cell here, even though
-                // the disk-blocks grid directly above already shows this
-                // same block as owned).
-                const isOwned = b.owner !== null
-                const stateClass = isHead ? 'io-head' : isPending ? 'io-pending' : isOwned ? 'io-owned' : 'free'
-                const title = isHead
-                  ? 'disk head'
-                  : isPending
-                    ? 'pending I/O request'
-                    : isOwned
-                      ? `inode ${b.owner} (idle)`
-                      : 'idle'
-                return (
-                  <div key={b.index} className={`cell ${stateClass}`} title={title}>
-                    {isHead ? 'H' : isPending ? '•' : isOwned ? 'o' : '·'}
-                  </div>
-                )
-              })}
+              {(() => {
+                // One Set built once per render, not one `.some()` scan of
+                // the whole pending queue per block (found by code review:
+                // that made this O(blocks × pending) every ~450ms tick).
+                const pendingBlocks = new Set(ioState.pending.map((r) => r.blockIndex))
+                return blocks.map((b) => {
+                  const kind = ioCellKind(b, ioState.headPosition, pendingBlocks)
+                  return (
+                    <div key={b.index} className={`cell ${IO_CELL_STYLE[kind].className}`} title={IO_CELL_STYLE[kind].title(b)}>
+                      {IO_CELL_STYLE[kind].glyph(b)}
+                    </div>
+                  )
+                })
+              })()}
             </div>
             <div className="algo-desc" style={{ marginTop: 6 }}>
               Avg seek: {ioMetrics.avgSeekDistance.toFixed(1)} cylinders &middot; Avg wait: {ioMetrics.avgWaitTicks.toFixed(1)}{' '}

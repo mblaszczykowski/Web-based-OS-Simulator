@@ -6,36 +6,14 @@
 // later ages out of SchedulerEngine's bounded terminated-process history
 // while its followers are still running, the followers used to become
 // permanently unreachable in this tree (nothing ever recursed into the
-// vanished leader's pid). See ProcessTree.tsx's orphanedParentPids logic.
+// vanished leader's pid). See ProcessTree.tsx's memoryOwnerPid-grouping logic.
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ProcessTree } from './ProcessTree'
-import { INIT_PID, SHELL_PID, type Process } from '../shared/types'
-
-function makeProcess(overrides: Partial<Process> = {}): Process {
-  return {
-    pid: 1,
-    name: 'test',
-    kind: 'cpu-bound',
-    state: 'READY',
-    queueLevel: 0,
-    parentPid: SHELL_PID,
-    memoryOwnerPid: 1,
-    arrivalTick: 0,
-    finishTick: null,
-    bursts: [5],
-    burstIndex: 0,
-    burstRemaining: 5,
-    sliceRemaining: 4,
-    totalWaitingTicks: 0,
-    totalBurstTicks: 0,
-    contextSwitches: 0,
-    pageCount: 2,
-    ...overrides,
-  }
-}
+import { INIT_PID, SHELL_PID } from '../shared/types'
+import { makeProcess } from './testHelpers'
 
 afterEach(() => {
   cleanup()
@@ -59,10 +37,12 @@ describe('ProcessTree', () => {
 
   it('still shows a thread-group follower when its leader has aged out of `processes` entirely', async () => {
     // No Process with pid 10 exists at all — only its two followers, whose
-    // parentPid still points at it (exactly what happens once the leader
-    // itself terminates and is later pruned from the bounded history).
-    const follower1 = makeProcess({ pid: 11, name: 'worker:t2', parentPid: 10 })
-    const follower2 = makeProcess({ pid: 12, name: 'worker:t3', parentPid: 10 })
+    // parentPid AND memoryOwnerPid still point at it (exactly what happens
+    // once the leader itself terminates and is later pruned from the
+    // bounded history — spawnThreadGroup() stamps every follower's
+    // memoryOwnerPid with the leader's pid, roadmap-v4.md §2.1).
+    const follower1 = makeProcess({ pid: 11, name: 'worker:t2', parentPid: 10, memoryOwnerPid: 10 })
+    const follower2 = makeProcess({ pid: 12, name: 'worker:t3', parentPid: 10, memoryOwnerPid: 10 })
     render(<ProcessTree processes={[follower1, follower2]} />)
     await open()
 

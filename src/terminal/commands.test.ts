@@ -1,29 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { COMMAND_NAMES, executeCommand, type CommandContext } from './commands'
-import { SHELL_PID, type Process } from '../shared/types'
-
-function makeProcess(overrides: Partial<Process> = {}): Process {
-  return {
-    pid: 1,
-    name: 'test',
-    kind: 'cpu-bound',
-    state: 'READY',
-    queueLevel: 0,
-    parentPid: SHELL_PID,
-    memoryOwnerPid: 1,
-    arrivalTick: 0,
-    finishTick: null,
-    bursts: [5],
-    burstIndex: 0,
-    burstRemaining: 5,
-    sliceRemaining: 4,
-    totalWaitingTicks: 0,
-    totalBurstTicks: 0,
-    contextSwitches: 0,
-    pageCount: 2,
-    ...overrides,
-  }
-}
+import { makeProcess } from '../scheduler/testHelpers'
 
 function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
   let cwd = '/'

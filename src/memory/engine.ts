@@ -43,7 +43,7 @@ interface TlbEntry {
  * *why* it helps despite the indirection (roadmap-v4.md §2.2), rather than
  * just mirroring the page table 1:1.
  */
-const TLB_CAPACITY = 8
+export const TLB_CAPACITY = 8
 
 /** Sliding window of the most recent accesses' fault/hit outcomes, used by isThrashing() below. */
 const THRASHING_WINDOW = 20

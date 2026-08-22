@@ -3,6 +3,12 @@ import { MemoryIcon } from '../app/icons'
 import { useSimStore } from '../app/store'
 import { memory, scheduler } from '../app/engines'
 import { colorForPid, labelColorForPid } from '../app/colors'
+import { TLB_CAPACITY } from './engine'
+
+/** Renders a 0-1 ratio as a whole-number percentage — this file's own single formatting rule (found by code review: five separate call sites each inlined `Math.round(x * 100)}%`). */
+function pct(ratio: number): string {
+  return `${Math.round(ratio * 100)}%`
+}
 
 export function MemoryWindow() {
   useSimStore((s) => s.version) // subscribed purely so this window re-renders on every tick/command
@@ -52,7 +58,7 @@ export function MemoryWindow() {
             </span>
           </div>
           <div className="field">
-            <span className="label">Fragmentation &mdash; {Math.round(metrics.externalFragmentation * 100)}%</span>
+            <span className="label">Fragmentation &mdash; {pct(metrics.externalFragmentation)}</span>
             <div className="frag-bar">
               <div className="frag-external" style={{ width: `${metrics.externalFragmentation * 100}%` }} />
             </div>
@@ -70,7 +76,7 @@ export function MemoryWindow() {
             </div>
             <div className="stat">
               <span className="label">Hit ratio</span>
-              <span className="stat-value">{Math.round(metrics.hitRatio * 100)}%</span>
+              <span className="stat-value">{pct(metrics.hitRatio)}</span>
             </div>
           </div>
           <div className="field">
@@ -80,7 +86,7 @@ export function MemoryWindow() {
             </span>
           </div>
           <div className="field">
-            <span className="label">TLB ({tlbEntries.length}/8) &mdash; hit ratio {Math.round(metrics.tlbHitRatio * 100)}%</span>
+            <span className="label">TLB ({tlbEntries.length}/{TLB_CAPACITY}) &mdash; hit ratio {pct(metrics.tlbHitRatio)}</span>
             <div className="ptable-wrap" style={{ maxHeight: 110 }}>
               <div className="ptable-row head" style={{ gridTemplateColumns: '40px 44px 44px' }}>
                 <span>PID</span>
@@ -104,7 +110,7 @@ export function MemoryWindow() {
           </div>
           <div className="field">
             <span className="label">
-              Recent fault rate (last 20) &mdash; {Math.round(metrics.recentFaultRate * 100)}%
+              Recent fault rate (last 20) &mdash; {pct(metrics.recentFaultRate)}
             </span>
             {metrics.thrashing && (
               <span className="stat-value" style={{ color: 'var(--warning)', fontSize: 13 }}>
@@ -211,7 +217,7 @@ export function MemoryWindow() {
                 </div>
                 <span className="alloc-caption">
                   {blocks.filter((b) => b.owner === null).length} free block(s) &middot;{' '}
-                  {Math.round(metrics.externalFragmentation * 100)}% fragmented
+                  {pct(metrics.externalFragmentation)} fragmented
                 </span>
               </div>
             </div>

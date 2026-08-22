@@ -148,6 +148,19 @@ function clearSwapFiles(): void {
 // just its own pid and no other process ever shares it, so this reduces to
 // exactly the old immediate-free behavior.
 simBus.on('process:terminated', ({ memoryOwnerPid }) => {
+  // A tempting-looking optimization here would be to skip this scan
+  // whenever `memoryOwnerPid === pid`, on the theory that only a thread
+  // FOLLOWER ever has `memoryOwnerPid !== own pid`, so anything with
+  // `memoryOwnerPid === pid` "can't have a living sibling." That's wrong:
+  // a thread group's LEADER also has `memoryOwnerPid === own pid` (it's
+  // the group's original member, so it defaults to owning its own
+  // allocation — see spawnThreadGroup() below) while its followers are
+  // very much still alive and pointing their own memoryOwnerPid at it.
+  // Considered and rejected during code review — verified by running
+  // engines.test.ts's "order of termination does not matter" case, which
+  // fails the moment the leader is killed before its followers if this
+  // scan is skipped for it. The scan is cheap relative to that risk: this
+  // simulator never has more than a handful of live processes at once.
   const groupStillAlive = scheduler
     .getProcesses()
     .some((p) => p.memoryOwnerPid === memoryOwnerPid && p.state !== 'TERMINATED')
