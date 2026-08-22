@@ -424,7 +424,7 @@ export class FilesystemEngine {
       return { ok: false, error: `${op}: ${path}: Not a directory` }
     }
     if (op === 'delete') {
-      if (this.findDirEntry(path)) return { ok: false, error: `rm: ${path}: Is a directory` }
+      if (this.findDirEntry(path) || this.findSymlinkEntry(path)) return { ok: false, error: `rm: ${path}: Is a directory` }
       if (!this.findFileEntry(path)) return { ok: false, error: `rm: ${path}: No such file or directory` }
     }
     if (op === 'create' && this.findFileEntry(path)) {

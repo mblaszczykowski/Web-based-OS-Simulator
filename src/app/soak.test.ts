@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
+import type { DirEntry } from '../shared/types'
 import { scheduler, memory, filesystem, pipes, fdTable, stepSimulation } from './engines'
 import { useSimStore } from './store'
 
@@ -61,6 +62,28 @@ describe('soak: the integrated simulator survives a long, busy run', () => {
           expect(entry?.valid).toBe(true)
           expect(entry?.frame).toBe(frame.index)
         }
+      }
+
+      // --- filesystem: no directory ever holds two entries of the same
+      //     name. Every way of corrupting the tree that has actually been
+      //     found so far (a replayed `write` landing on a path that is
+      //     really a directory, or a symlink — see applyCreate) shows up
+      //     as exactly this. Worth asserting continuously even though the
+      //     known cases have their own targeted tests, because the
+      //     dangerous property of that class of bug is that nothing else
+      //     notices: the tree keeps working, one entry just becomes
+      //     permanently unreachable.
+      //
+      //     Note this soak run does NOT reproduce the ln -s case on its
+      //     own — swap writes reset lastTouchedPath constantly, so by the
+      //     time `crash` runs it points at a /swap file. Checked by
+      //     reverting the fix and confirming this still passes.
+      const dirs: DirEntry[] = [filesystem.getTree()]
+      while (dirs.length > 0) {
+        const dir = dirs.pop()!
+        const names = (dir.children ?? []).map((c) => c.name)
+        expect(new Set(names).size).toBe(names.length)
+        for (const child of dir.children ?? []) if (child.type === 'dir') dirs.push(child)
       }
 
       // --- filesystem: the bitmap and the block owners never disagree ---
