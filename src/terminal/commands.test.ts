@@ -52,6 +52,8 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
       frameCount: 24,
       usedFrames: 0,
       swappedPages: 0,
+      tlbHitRatio: 0,
+      thrashing: false,
     }),
     fsList: () => ({ ok: true, entries: [] }),
     fsRead: () => ({ ok: false, error: 'not found' }),
@@ -501,6 +503,44 @@ describe('executeCommand', () => {
       expect(executeCommand('run --threads=9 worker', makeContext())[0]).toMatchObject({ isError: true })
       expect(executeCommand('run --threads=abc worker', makeContext())[0]).toMatchObject({ isError: true })
       expect(executeCommand('run --threads=2.5 worker', makeContext())[0]).toMatchObject({ isError: true })
+    })
+  })
+
+  describe('free — TLB hit ratio and thrashing (roadmap-v4.md §2.2)', () => {
+    it('reports the TLB hit ratio alongside the page-table hit ratio', () => {
+      const ctx = makeContext({
+        memoryMetrics: () => ({
+          pageFaults: 3,
+          accesses: 10,
+          hitRatio: 0.7,
+          externalFragmentation: 0,
+          frameCount: 24,
+          usedFrames: 5,
+          swappedPages: 0,
+          tlbHitRatio: 0.4,
+          thrashing: false,
+        }),
+      })
+      const lines = texts('free', ctx)
+      expect(lines[1]).toContain('TLB hit ratio: 40%')
+      expect(lines.some((l) => l.includes('THRASHING'))).toBe(false)
+    })
+
+    it('adds a thrashing warning line when the engine reports it', () => {
+      const ctx = makeContext({
+        memoryMetrics: () => ({
+          pageFaults: 18,
+          accesses: 20,
+          hitRatio: 0.1,
+          externalFragmentation: 0,
+          frameCount: 24,
+          usedFrames: 24,
+          swappedPages: 10,
+          tlbHitRatio: 0.05,
+          thrashing: true,
+        }),
+      })
+      expect(executeCommand('free', ctx).some((l) => l.text.includes('THRASHING'))).toBe(true)
     })
   })
 

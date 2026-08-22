@@ -17,6 +17,10 @@ export interface MemoryMetricsView {
   frameCount: number
   usedFrames: number
   swappedPages: number
+  /** TLB hit ratio — roadmap-v4.md §2.2. */
+  tlbHitRatio: number
+  /** Recent-fault-rate thrashing indicator — roadmap-v4.md §2.2. See MemoryEngine.isThrashing()'s doc for exactly what this measures. */
+  thrashing: boolean
 }
 
 export interface IoMetricsView {
@@ -182,7 +186,7 @@ const MAN_PAGES: Record<string, string[]> = {
   run: ['run - spawn a new process, or threads of one', 'usage: run [name] | run --threads=<n> [name]', '--threads spawns n (2-8) threads sharing one address space, each with its own scheduler entry. A random name is used if omitted.', 'example: run --threads=3 compiler'],
   stress: ['stress - spawn many CPU-bound processes at once', 'usage: stress [n]', 'Spawns n (default 6, capped at 20) processes to show MLFQ demotion and Clock evictions under load.', 'example: stress 12'],
   kill: ['kill - terminate or pause/resume a process', 'usage: kill <pid> | kill -STOP <pid> | kill -CONT <pid>', '-STOP/-CONT send SIGSTOP/SIGCONT (pause/resume) instead of terminating.', 'example: kill -STOP 3'],
-  free: ['free - memory usage summary', 'usage: free', 'Frames used, page faults, hit ratio, and external fragmentation.', 'example: free'],
+  free: ['free - memory usage summary', 'usage: free', 'Frames used, page faults, hit ratio, TLB hit ratio, external fragmentation, and a thrashing warning when the recent fault rate is high.', 'example: free'],
   cd: ['cd - change the working directory', 'usage: cd [dir]', 'No argument returns to /. Relative paths resolve against the current directory.', 'example: cd /home'],
   pwd: ['pwd - print the working directory', 'usage: pwd', 'example: pwd'],
   ls: ['ls - list a directory', 'usage: ls [-l] [path]', 'Defaults to the current directory; supports * wildcards. -l shows permissions and size.', 'example: ls -l /home'],
@@ -413,11 +417,13 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
 
     case 'free': {
       const m = ctx.memoryMetrics()
-      return out(
+      const lines = [
         `Frames: ${m.usedFrames}/${m.frameCount} used  Swapped: ${m.swappedPages} page(s) (see /swap)`,
-        `Page faults: ${m.pageFaults}  Accesses: ${m.accesses}  Hit ratio: ${pct(m.hitRatio)}`,
+        `Page faults: ${m.pageFaults}  Accesses: ${m.accesses}  Hit ratio: ${pct(m.hitRatio)}  TLB hit ratio: ${pct(m.tlbHitRatio)}`,
         `External fragmentation (contiguous arena): ${pct(m.externalFragmentation)}`,
-      )
+      ]
+      if (m.thrashing) lines.push('⚠ THRASHING — recent fault rate is high enough that paging is crowding out real work.')
+      return out(...lines)
     }
 
     case 'cd': {
