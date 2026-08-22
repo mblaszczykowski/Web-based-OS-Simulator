@@ -87,6 +87,15 @@ describe('IoScheduler — SCAN disk-head scheduling', () => {
     expect(io.getState().pending).toHaveLength(0)
   })
 
+  it('services a request immediately on a 1-cylinder disk instead of walking onto a nonexistent cylinder (found by code review)', () => {
+    const io = new IoScheduler(1)
+    io.enqueue(0, 'write', 0)
+    io.step(1)
+    expect(io.getMetrics().completedCount).toBe(1)
+    expect(io.getState().headPosition).toBe(0) // never left the only cylinder that exists
+    expect(io.getMetrics().totalSeekDistance).toBe(0)
+  })
+
   it('reset() clears the queue, history, head position, and metrics', () => {
     const io = new IoScheduler(8)
     io.enqueue(3, 'write', 0)

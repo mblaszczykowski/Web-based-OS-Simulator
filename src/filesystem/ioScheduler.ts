@@ -80,11 +80,18 @@ export class IoScheduler {
   step(currentTick: number): void {
     if (this.pending.length === 0) return
 
-    if (this.headPosition <= 0) this.direction = 1
-    else if (this.headPosition >= this.cylinderCount - 1) this.direction = -1
+    // A 1-cylinder disk has nowhere to sweep to — cylinder 0 is
+    // simultaneously "both ends", so the two branches below would
+    // otherwise fire in sequence and walk the head onto the nonexistent
+    // cylinder 1 before bouncing back (found by code review). Every
+    // request already sits under the head; just service it in place.
+    if (this.cylinderCount > 1) {
+      if (this.headPosition <= 0) this.direction = 1
+      else if (this.headPosition >= this.cylinderCount - 1) this.direction = -1
 
-    this.headPosition += this.direction
-    this.totalSeekDistance += 1
+      this.headPosition += this.direction
+      this.totalSeekDistance += 1
+    }
 
     const [serviced, stillPending] = partition(this.pending, (r) => r.blockIndex === this.headPosition)
     this.pending = stillPending

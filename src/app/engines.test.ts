@@ -65,6 +65,11 @@ describe('spawnThreadGroup — lightweight processes (roadmap-v4.md §2.1)', () 
     killProcess(threads[1]!.pid)
     expect(memory.getPageTable(leader.pid)).toBeUndefined()
   })
+
+  it('returns an empty array for a non-positive count instead of crashing on a nonexistent leader (found by code review)', () => {
+    expect(spawnThreadGroup('worker', 0, SHELL_PID)).toEqual([])
+    expect(spawnThreadGroup('worker', -1, SHELL_PID)).toEqual([])
+  })
 })
 
 describe('spawnProcess — ordinary (non-thread) process, unaffected by thread-group logic', () => {

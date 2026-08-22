@@ -278,7 +278,7 @@ button {
 }
 .dock-item.focused .dock-dot.on {
   background: var(--accent);
-  box-shadow: 0 0 4px rgba(94, 106, 210, 0.8);
+  box-shadow: 0 0 4px rgba(114, 124, 216, 0.8);
 }
 
 /* Windows ------------------------------------------------------------ */
@@ -606,7 +606,8 @@ button {
   color: var(--accent);
 }
 .pill--ready {
-  color: var(--text-muted);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
 }
 .pill--waiting {
   color: var(--warning);
@@ -795,6 +796,11 @@ button {
   background: color-mix(in srgb, var(--warning) 35%, var(--bg-panel));
   border: 1px solid var(--warning);
   color: var(--text-primary);
+}
+.cell.io-owned {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
 }
 .split-row {
   display: flex;

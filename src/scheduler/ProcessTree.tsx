@@ -42,6 +42,23 @@ export function ProcessTree({ processes }: { processes: Process[] }) {
     byParent.set(p.parentPid, list)
   }
 
+  // A thread group's followers (roadmap-v4.md §2.1) point parentPid at
+  // their leader's pid, not at SHELL_PID directly. If the leader itself
+  // later terminates and ages out of SchedulerEngine's bounded terminated
+  // history (MAX_TERMINATED_HISTORY), its pid disappears from `processes`
+  // entirely — it's still a key in byParent (its still-running followers
+  // reference it), but nothing ever recurses INTO that key, since only an
+  // actual node's own pid ever gets passed to <TreeChildren>. Without this,
+  // those followers become permanently unreachable here even though `ps`/
+  // the Gantt chart still show them. Every thread group is spawned via the
+  // terminal (SHELL_PID-rooted), so surfacing an orphaned branch under
+  // "shell" — with no row for the vanished leader, since there's no
+  // Process left to render one from — is the correct fallback.
+  const knownPids = new Set(processes.map((p) => p.pid))
+  const orphanedParentPids = [...byParent.keys()].filter(
+    (pid) => pid !== INIT_PID && pid !== SHELL_PID && !knownPids.has(pid),
+  )
+
   return (
     <div className="field">
       <button type="button" className="tree-toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
@@ -53,6 +70,9 @@ export function ProcessTree({ processes }: { processes: Process[] }) {
           <TreeChildren pid={INIT_PID} byParent={byParent} depth={1} />
           <div className="tree-row folder">shell</div>
           <TreeChildren pid={SHELL_PID} byParent={byParent} depth={1} />
+          {orphanedParentPids.map((pid) => (
+            <TreeChildren key={pid} pid={pid} byParent={byParent} depth={1} />
+          ))}
         </div>
       )}
     </div>

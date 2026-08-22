@@ -299,6 +299,11 @@ export function spawnStressLoad(count: number): Process[] {
  * instead of as SHELL_PID's direct siblings.
  */
 export function spawnThreadGroup(name: string, count: number, parentPid: number = SHELL_PID): Process[] {
+  // The terminal's `run --threads=<n>` already enforces 2-8 (commands.ts),
+  // but this is an exported engine function any caller (tests included)
+  // can reach directly — count < 1 has no leader to allocate memory
+  // against and previously crashed on `threads[0]!` (found by code review).
+  if (count < 1) return []
   const kind = randomKind()
   const sharedPageCount = 2 + Math.floor(Math.random() * 5)
 

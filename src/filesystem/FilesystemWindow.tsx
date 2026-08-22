@@ -130,19 +130,34 @@ export function FilesystemWindow() {
                   <span className="swatch cell io-pending" />
                   pending
                 </span>
+                <span className="legend-item">
+                  <span className="swatch cell io-owned" />
+                  owned, idle
+                </span>
               </div>
             </div>
             <div className="disk-grid" style={{ marginTop: 8 }}>
               {blocks.map((b) => {
                 const isHead = b.index === ioState.headPosition
                 const isPending = ioState.pending.some((r) => r.blockIndex === b.index)
+                // A block can hold real file data with no I/O request in
+                // flight for it right now — that's not the same as never
+                // having been allocated at all (found by code review: both
+                // rendered as an identical "free" cell here, even though
+                // the disk-blocks grid directly above already shows this
+                // same block as owned).
+                const isOwned = b.owner !== null
+                const stateClass = isHead ? 'io-head' : isPending ? 'io-pending' : isOwned ? 'io-owned' : 'free'
+                const title = isHead
+                  ? 'disk head'
+                  : isPending
+                    ? 'pending I/O request'
+                    : isOwned
+                      ? `inode ${b.owner} (idle)`
+                      : 'idle'
                 return (
-                  <div
-                    key={b.index}
-                    className={`cell${isHead ? ' io-head' : isPending ? ' io-pending' : ' free'}`}
-                    title={isHead ? 'disk head' : isPending ? 'pending I/O request' : 'idle'}
-                  >
-                    {isHead ? 'H' : isPending ? '•' : '·'}
+                  <div key={b.index} className={`cell ${stateClass}`} title={title}>
+                    {isHead ? 'H' : isPending ? '•' : isOwned ? 'o' : '·'}
                   </div>
                 )
               })}
