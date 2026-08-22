@@ -16,7 +16,7 @@ import {
   resetSync,
   resetFilesystem,
 } from './engines'
-import { runCommandLine, substituteEnvVars, type CommandContext } from '../terminal/commands'
+import { runCommandLine, type CommandContext } from '../terminal/commands'
 import { syscallTraceFor } from '../terminal/syscallTrace'
 import { simBus } from '../shared/eventBus'
 import { writeSharedSessionState } from './urlState'
@@ -265,15 +265,6 @@ export const useSimStore = create<SimStore>((set, get) => ({
     const trimmed = input.trim()
     if (!trimmed) return
 
-    // $VAR substitution (roadmap-v4.md §1.2) runs "before a line runs" —
-    // resolve it here too, or `export X=clear` then typing `$X` would fall
-    // through to commands.ts's own inert `clear` case instead of actually
-    // clearing (found by code review).
-    if (substituteEnvVars(trimmed, (name) => get().env[name]) === 'clear') {
-      set((s) => ({ terminalLines: [], lastAnnouncement: 'screen cleared', version: s.version + 1 }))
-      return
-    }
-
     const cwdAtPrompt = get().cwd
     const ctx: CommandContext = {
       listProcesses: () => scheduler.getProcesses(),
@@ -316,7 +307,12 @@ export const useSimStore = create<SimStore>((set, get) => ({
       },
       getCwd: () => get().cwd,
       setCwd: (path) => set({ cwd: path }),
-      getEnv: (name) => get().env[name],
+      // Object.hasOwn guards against a name that shadows an inherited
+      // Object.prototype member (e.g. `echo $constructor`, never exported)
+      // resolving to that builtin instead of undefined — `env` is a plain
+      // object, and a plain `env[name]` lookup walks the prototype chain
+      // (found by code review).
+      getEnv: (name) => (Object.hasOwn(get().env, name) ? get().env[name] : undefined),
       setEnv: (name, value) => set((s) => ({ env: { ...s.env, [name]: value } })),
       listEnv: () => get().env,
       syncStatus: () => {
@@ -347,18 +343,41 @@ export const useSimStore = create<SimStore>((set, get) => ({
     const trace = ran
       .flatMap(({ text, ok, cwd }) => syscallTraceFor(text, ok, cwd))
       .map((text) => ({ id: syscallLineId++, text }))
+
+    // `clear` (roadmap-v4.md §1.2's sibling `case 'clear'` in commands.ts)
+    // marks its output line with `clearScreen` instead of touching
+    // terminalLines itself, since that module has no access to this store's
+    // state — this is the only place that actually holds it. Runs through
+    // the exact same substitution/segment pipeline as every other command
+    // (found by code review: a previous store-level fast path guessed at
+    // this by string-matching the raw, unsubstituted line against 'clear'
+    // BEFORE running it, so a line like `export X=clear && $X` never
+    // matched and silently never cleared the screen). Everything up to and
+    // including the LAST clear in the line — this line's own prompt
+    // included — is dropped, matching a real terminal wiping its scrollback
+    // rather than showing the command that triggered it; anything after
+    // that last clear still renders normally.
+    const lastClearIndex = output.reduce((acc, line, i) => (line.clearScreen ? i : acc), -1)
+    const visible = lastClearIndex === -1 ? output : output.slice(lastClearIndex + 1)
+
     set((s) => ({
-      terminalLines: [
-        ...s.terminalLines,
-        makeLine('prompt', trimmed, cwdAtPrompt),
-        ...output.map((line) => makeLine(line.isError ? 'error' : 'output', line.text)),
-      ],
+      terminalLines:
+        lastClearIndex === -1
+          ? [
+              ...s.terminalLines,
+              makeLine('prompt', trimmed, cwdAtPrompt),
+              ...visible.map((line) => makeLine(line.isError ? 'error' : 'output', line.text)),
+            ]
+          : visible.map((line) => makeLine(line.isError ? 'error' : 'output', line.text)),
       syscallLines: [...s.syscallLines, ...trace].slice(-SYSCALL_LOG_LIMIT),
       // The terminal's aria-live region reads this, not individual
       // lines — a screen-reader user needs the *whole* result of a
       // command like `ps`/`fsck` (many lines), not just whichever line
       // happened to render last.
-      lastAnnouncement: [trimmed, ...output.map((line) => line.text)].join('. '),
+      lastAnnouncement:
+        lastClearIndex === -1
+          ? [trimmed, ...output.map((line) => line.text)].join('. ')
+          : (visible.length > 0 ? visible.map((line) => line.text).join('. ') : 'screen cleared'),
       version: s.version + 1,
     }))
   },

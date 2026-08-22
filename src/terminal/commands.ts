@@ -45,6 +45,8 @@ export interface SyncStatusView {
 export interface CommandOutputLine {
   text: string
   isError?: boolean
+  /** Set only by `clear` — a signal for store.ts's runCommand to actually wipe terminalLines, since this module has no access to that state itself. */
+  clearScreen?: boolean
 }
 
 /**
@@ -220,8 +222,34 @@ const DEFAULT_STRESS_COUNT = 6
 const MAX_STRESS_COUNT = 20
 
 /** roadmap-v4.md §2.1 — below 2 there's no second thread to share memory with (that's just `run`); above 8 the Gantt chart/ps table stop being legible. */
-const MIN_THREADS = 2
-const MAX_THREADS = 8
+export const MIN_THREADS = 2
+export const MAX_THREADS = 8
+
+export interface RunFlags {
+  /** Parsed `--threads=<n>` count, or null if the flag was absent, or if present but invalid (see threadsInvalid). */
+  threadCount: number | null
+  /** True if a `--threads=` flag was present but failed validation (non-integer, or outside MIN_THREADS..MAX_THREADS). */
+  threadsInvalid: boolean
+  /** `args` with the `--threads=<n>` token (if any) removed — still needs the caller's own empty-name fallback. */
+  nameArgs: string[]
+}
+
+/**
+ * Shared `run --threads=<n>` flag parsing (roadmap-v4.md §2.1) — used by
+ * both this dispatcher and syscallTrace.ts's `run` case, so the two can't
+ * silently drift apart on what counts as a valid flag (found by code
+ * review: syscallTrace.ts used to re-derive this from scratch and never
+ * checked validity at all, so a rejected `run --threads=99 foo` still got a
+ * fabricated successful fork()/execve() trace).
+ */
+export function parseRunFlags(args: string[]): RunFlags {
+  const threadsArg = args.find((a) => a.startsWith('--threads='))
+  const nameArgs = args.filter((a) => a !== threadsArg)
+  if (!threadsArg) return { threadCount: null, threadsInvalid: false, nameArgs }
+  const n = Number(threadsArg.slice('--threads='.length))
+  const valid = Number.isInteger(n) && n >= MIN_THREADS && n <= MAX_THREADS
+  return { threadCount: valid ? n : null, threadsInvalid: !valid, nameArgs }
+}
 
 /** Collapses `.`/`..` segments in an already-absolute path. `/a/../b` -> `/b`, `/a/./b` -> `/a/b`. */
 function collapseDots(path: string): string {
@@ -296,13 +324,9 @@ const VAR_REF = /\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)/g
  * passes through unchanged, and there's no way to prevent substitution
  * inside a value that happens to contain one.
  *
- * Takes `getEnv` directly rather than a full `CommandContext` so callers
- * that only have env access — store.ts's `clear`-command fast path, which
- * runs before a full CommandContext exists — can resolve a line without
- * fabricating one (found by code review: that fast path compared the raw,
- * unsubstituted line against `'clear'`, so e.g. `export X=clear` then
- * typing `$X` silently fell through to commands.ts's own inert `clear`
- * case instead of actually clearing the screen).
+ * Takes `getEnv` directly rather than a full `CommandContext` — the only
+ * thing this needs from it — rather than threading a whole `CommandContext`
+ * through for one lookup.
  */
 function substituteEnvVars(input: string, getEnv: (name: string) => string | undefined): string {
   return input.replace(VAR_REF, (_match, braced: string | undefined, bare: string | undefined) => {
@@ -388,19 +412,15 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
     }
 
     case 'run': {
-      const threadsArg = args.find((a) => a.startsWith('--threads='))
-      if (threadsArg) {
-        const n = Number(threadsArg.slice('--threads='.length))
-        if (!Number.isInteger(n) || n < MIN_THREADS || n > MAX_THREADS) {
-          return err(`run: --threads=<n> must be an integer from ${MIN_THREADS} to ${MAX_THREADS}`)
-        }
-        const name = args.filter((a) => a !== threadsArg).join(' ') || `proc${Math.floor(Math.random() * 1000)}`
-        const threads = ctx.spawnThreads(name, n)
+      const { threadCount, threadsInvalid, nameArgs } = parseRunFlags(args)
+      if (threadsInvalid) return err(`run: --threads=<n> must be an integer from ${MIN_THREADS} to ${MAX_THREADS}`)
+      const name = nameArgs.join(' ') || `proc${Math.floor(Math.random() * 1000)}`
+      if (threadCount !== null) {
+        const threads = ctx.spawnThreads(name, threadCount)
         return out(
           `Started ${threads.length} threads of ${name}, sharing one address space: ${threads.map((t) => `P${t.pid}`).join(', ')}.`,
         )
       }
-      const name = args.join(' ') || `proc${Math.floor(Math.random() * 1000)}`
       const process = ctx.spawnProcess(name)
       return out(`Started process ${process.pid} (${process.name}).`)
     }
@@ -658,7 +678,12 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       const eq = args[0]!.indexOf('=')
       if (eq === -1) return err('export: usage: export [KEY=VALUE]')
       const key = args[0]!.slice(0, eq)
-      const value = args[0]!.slice(eq + 1)
+      // No quoting support in this shell (roadmap-v4.md §1.2's stated scope) —
+      // a bare space in the value has nowhere else to go, so the remaining
+      // whitespace-separated args are rejoined into the value instead of
+      // being silently dropped (found by code review: `export G=hello world`
+      // used to set G to just "hello" with no indication "world" went missing).
+      const value = [args[0]!.slice(eq + 1), ...args.slice(1)].join(' ')
       if (!/^[A-Za-z_]\w*$/.test(key)) return err(`export: not a valid identifier: ${key}`)
       ctx.setEnv(key, value)
       return []
@@ -669,13 +694,24 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
 
     case 'man': {
       if (!args[0]) return err('man: usage: man <command>')
-      const page = MAN_PAGES[args[0]]
+      // Object.hasOwn guards against a name that shadows an inherited
+      // Object.prototype member (e.g. `man constructor`) resolving truthy
+      // via the prototype chain instead of hitting the "no entry" error
+      // below (found by code review).
+      const page = Object.hasOwn(MAN_PAGES, args[0]) ? MAN_PAGES[args[0]] : undefined
       if (!page) return err(`No manual entry for ${args[0]}`)
       return out(...page)
     }
 
     case 'clear':
-      return []
+      // The marker is picked up by store.ts's runCommand, which is the only
+      // place that actually holds terminalLines — this dispatcher has no
+      // state to clear itself (found by code review: a store-level fast
+      // path used to guess at this by string-matching the raw line against
+      // 'clear' BEFORE running it through the real substitution/segment
+      // pipeline, so a line like `export X=clear && $X` never matched and
+      // silently never cleared the screen).
+      return [{ text: '', clearScreen: true }]
 
     default:
       return err(`command not found: ${cmd}`)
@@ -792,9 +828,6 @@ export function runCommandLine(input: string, ctx: CommandContext): CommandLineR
 
   return { lines, ran }
 }
-
-/** Exported for store.ts's `clear`-command fast path — see substituteEnvVars()'s doc comment. */
-export { substituteEnvVars }
 
 /** Convenience wrapper over runCommandLine() for callers that only need the rendered output (e.g. tests). */
 export function executeCommand(input: string, ctx: CommandContext): CommandOutputLine[] {

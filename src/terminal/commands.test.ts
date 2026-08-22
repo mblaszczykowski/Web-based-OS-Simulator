@@ -597,6 +597,14 @@ describe('executeCommand', () => {
       expect(executeCommand('export FOO', makeContext())[0]).toMatchObject({ isError: true })
     })
 
+    it('a value containing a space is not silently truncated at the first word', () => {
+      // Found by code review: `export GREETING=hello world` used to set
+      // GREETING to just "hello", dropping "world" with no indication.
+      const ctx = makeContext()
+      executeCommand('export GREETING=hello world', ctx)
+      expect(texts('echo $GREETING', ctx)).toEqual(['hello world'])
+    })
+
     it('a later segment on the same chained line sees a variable set earlier on that line, not its stale value', () => {
       const ctx = makeContext()
       expect(texts('export A=1 && echo $A', ctx)).toEqual(['1'])
@@ -639,6 +647,19 @@ describe('executeCommand', () => {
       for (const name of COMMAND_NAMES) {
         expect(executeCommand(`man ${name}`, makeContext())[0]).not.toMatchObject({ isError: true })
       }
+    })
+
+    it('a name colliding with an inherited Object.prototype member errors instead of crashing', () => {
+      // Found by code review: MAN_PAGES is a plain object literal, so
+      // `MAN_PAGES['constructor']`/`MAN_PAGES['toString']` used to resolve
+      // via the prototype chain to a builtin function instead of undefined,
+      // skip the "no entry" guard, and throw on the spread below it.
+      expect(executeCommand('man constructor', makeContext())[0]).toMatchObject({
+        isError: true,
+        text: 'No manual entry for constructor',
+      })
+      expect(executeCommand('man toString', makeContext())[0]).toMatchObject({ isError: true })
+      expect(executeCommand('man hasOwnProperty', makeContext())[0]).toMatchObject({ isError: true })
     })
   })
 

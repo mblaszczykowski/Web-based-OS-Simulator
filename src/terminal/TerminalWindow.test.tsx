@@ -167,4 +167,64 @@ describe('TerminalWindow', () => {
     fireEvent.keyDown(input, { key: 'ArrowUp' })
     expect(input).toHaveValue('ccc') // most recent again, not resuming from the stale mid-history position
   })
+
+  it('narrowing the query after stepping to an older match does not jump forward to a newer one', async () => {
+    const user = userEvent.setup()
+    render(<TerminalWindow />)
+    const input = getInput()
+
+    await user.type(input, 'cat notes.txt')
+    await user.keyboard('{Enter}')
+    await user.type(input, 'ls -la home')
+    await user.keyboard('{Enter}')
+    await user.type(input, 'man ls')
+    await user.keyboard('{Enter}')
+
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true })
+    fireEvent.keyDown(input, { key: 'l' })
+    expect(input).toHaveValue('man ls') // newest entry containing 'l'
+
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true }) // step to the next older match
+    expect(input).toHaveValue('ls -la home')
+
+    fireEvent.keyDown(input, { key: 's' }) // narrow the query to 'ls' — found by code review: this used
+    // to always re-search from the newest entry, silently jumping back to 'man ls' and discarding the
+    // user's explicit older-match navigation, instead of continuing from where the search already was.
+    expect(input).toHaveValue('ls -la home')
+  })
+
+  it('echo $VAR for a name never exported, that collides with an inherited Object.prototype member, substitutes to empty', async () => {
+    // Found by code review: the env store is a plain object, and a plain
+    // `env[name]` lookup at the real store (not this test's own mock
+    // context) resolves `$constructor` to Object's constructor function
+    // instead of undefined, printing its source text.
+    const user = userEvent.setup()
+    render(<TerminalWindow />)
+    const input = getInput()
+
+    await user.type(input, 'echo $constructor')
+    await user.keyboard('{Enter}')
+
+    expect(screen.queryByText(/native code/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/function Object/)).not.toBeInTheDocument()
+  })
+
+  it('clear reached via a chained $VAR substitution actually clears the screen', async () => {
+    // Found by code review: a previous store-level fast path string-matched
+    // the RAW, unsubstituted line against 'clear' before running it, so
+    // `export X=clear && $X` never matched and silently never cleared.
+    const user = userEvent.setup()
+    render(<TerminalWindow />)
+    const input = getInput()
+
+    await user.type(input, 'pwd')
+    await user.keyboard('{Enter}')
+    expect(screen.getByText('pwd')).toBeInTheDocument() // sanity check: something is on screen first
+
+    await user.type(input, 'export X=clear && $X')
+    await user.keyboard('{Enter}')
+
+    expect(screen.queryByText('pwd')).not.toBeInTheDocument()
+    expect(screen.queryByText('export X=clear && $X')).not.toBeInTheDocument()
+  })
 })

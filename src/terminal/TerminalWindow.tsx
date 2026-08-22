@@ -166,9 +166,20 @@ export function TerminalWindow() {
       setSearch(null)
       submit()
     } else if (e.key === 'Backspace') {
-      updateSearch(current.query.slice(0, -1), history.length - 1)
+      // Continues from the currently displayed match, not always the
+      // newest entry — real bash doesn't fully "undo" a step on Backspace
+      // either, and re-searching from the current position (rather than
+      // restarting from the top) is the closer approximation of the two
+      // (found by code review, alongside the identical bug in the
+      // character-typed branch below).
+      updateSearch(current.query.slice(0, -1), current.matchIndex ?? history.length - 1)
     } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
-      updateSearch(current.query + e.key, history.length - 1)
+      // Same fix: narrowing the query from an older match must not silently
+      // jump the display forward to a newer, unrelated command (found by
+      // code review: this used to always restart from `history.length - 1`,
+      // the newest entry, on every keystroke regardless of where the
+      // search currently was).
+      updateSearch(current.query + e.key, current.matchIndex ?? history.length - 1)
     }
     // Any other key (Shift, arrows, etc.) while searching is swallowed — see the unconditional preventDefault above.
   }

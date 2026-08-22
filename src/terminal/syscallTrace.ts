@@ -2,7 +2,7 @@
 // (fictional) syscalls — roadmap.md §1.6. No new domain logic: this just
 // re-describes what a command already did in libc/kernel-call vocabulary.
 
-import { resolvePath } from './commands'
+import { parseRunFlags, resolvePath } from './commands'
 
 let fdCounter = 3
 function nextFd(): number {
@@ -31,16 +31,20 @@ export function syscallTraceFor(input: string, ok: boolean, cwd: string): string
     case 'run': {
       // run --threads=<n> (roadmap-v4.md §2.1) spawns n separate scheduler
       // entries sharing one address space — n forks, not one, and the flag
-      // itself isn't part of the program name (found by code review: this
-      // case predates §2.1 and didn't know about the flag, so it used to
-      // fold it straight into the traced execve() path).
-      const threadsArg = args.find((a) => a.startsWith('--threads='))
-      const name = args.filter((a) => a !== threadsArg).join(' ') || 'proc'
-      if (threadsArg) {
-        const count = threadsArg.slice('--threads='.length)
-        return [`fork() = <pid> (x${count})`, `execve("/bin/${name}", [...], [...]) = 0 (x${count})`]
+      // itself isn't part of the program name. Parsed with the same
+      // parseRunFlags() commands.ts uses, so this can't silently drift from
+      // what the real dispatcher considers valid (found by code review:
+      // this case used to re-derive the flag from scratch and never
+      // checked validity at all, so a rejected `run --threads=99 foo` —
+      // zero forks actually attempted — still got a fabricated successful
+      // fork()/execve() trace).
+      const { threadCount, threadsInvalid, nameArgs } = parseRunFlags(args)
+      if (threadsInvalid) return [] // commands.ts rejected it before ever calling spawnThreads — nothing was forked
+      const name = nameArgs.join(' ') || 'proc'
+      if (threadCount !== null) {
+        return [`fork() = <pid> (x${threadCount})`, `execve("/bin/${name}", [...], [...]) = 0 (x${threadCount})`]
       }
-      return ['fork() = <pid>', `execve("/bin/${name}", [...], [...]) = 0`]
+      return ok ? ['fork() = <pid>', `execve("/bin/${name}", [...], [...]) = 0`] : []
     }
 
     case 'stress': {
