@@ -56,6 +56,21 @@ export function syscallTraceFor(input: string, ok: boolean, cwd: string): string
       return [`fork() = <pid> (x${count})`, `execve("/bin/proc", [...], [...]) = 0 (x${count})`]
     }
 
+    case 'pipe': {
+      // roadmap-v5.md §1.2. `pipe` with no arguments only lists what's
+      // open — no channel is created and nothing is forked, so it gets no
+      // trace at all rather than a fabricated one.
+      if (args.length !== 2 || !ok) return []
+      const readFd = nextFd()
+      const writeFd = nextFd()
+      return [
+        `pipe2([${readFd}, ${writeFd}], 0) = 0`,
+        `fork() = <pid> (x2)`,
+        `execve("/bin/${args[0]}", [...], [...]) = 0`,
+        `execve("/bin/${args[1]}", [...], [...]) = 0`,
+      ]
+    }
+
     case 'kill': {
       if (args[0] === '-STOP' || args[0] === '-CONT') {
         const signal = args[0] === '-STOP' ? 'SIGSTOP' : 'SIGCONT'

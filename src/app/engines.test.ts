@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { SHELL_PID } from '../shared/types'
-import { memory, scheduler, filesystem, spawnProcess, spawnThreadGroup, killProcess, stepSimulation } from './engines'
+import { memory, scheduler, filesystem, pipes, spawnProcess, spawnThreadGroup, spawnPipeline, killProcess, stepSimulation } from './engines'
 
 // roadmap-v4.md §2.1 — lightweight threads: several independently-scheduled
 // Process entries sharing exactly one memory allocation. These exercise the
@@ -89,38 +89,69 @@ describe('spawnProcess — ordinary (non-thread) process, unaffected by thread-g
 // the behavior under test is the coordination in this module: neither
 // SchedulerEngine nor FilesystemEngine knows the other exists.
 describe('real I/O blocking — scheduler ↔ SCAN disk (roadmap-v5.md §1.1)', () => {
-  it('parks a process on the disk queue when it blocks, and wakes it when the head services its request', () => {
-    const process = spawnProcess('ioer', 'interactive', SHELL_PID)
-    // A hand-picked burst sequence: one CPU tick, then I/O. The randomised
-    // generator would work too, but this makes the tick count exact.
-    process.bursts = [1, 4, 1]
-    process.burstRemaining = 1
+  /**
+   * Several short CPU bursts separated by I/O. The many I/O bursts are
+   * load-bearing, not decoration: stepSimulation() advances the disk in
+   * the same call that a process submits its request, so a request landing
+   * on a cylinder the head is about to cross is serviced immediately and
+   * the process is back to READY before the test can ever observe it in
+   * WAITING. That is correct behaviour (a zero-seek hit is a real thing),
+   * but it means a single I/O burst gives the assertion below only one
+   * chance, which it misses whenever the randomly-chosen cylinder happens
+   * to fall within this tick's sweep. Several bursts make that a
+   * vanishingly unlikely coincidence instead of a periodic flake.
+   */
+  const IO_HEAVY_BURSTS = [1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1]
 
-    let blockedAtTick = -1
-    for (let i = 0; i < 60 && blockedAtTick === -1; i++) {
-      stepSimulation()
-      if (process.blockedOn === 'device') blockedAtTick = i
+  /**
+   * These run against the live singletons, which means the ambient
+   * auto-spawned workload (stepSimulation()'s AUTO_SPAWN_INTERVAL) and
+   * whatever earlier tests left behind are competing for the CPU. Pausing
+   * everything already running, and giving the subject a hand-picked burst
+   * sequence, is what keeps "how many ticks until it blocks" a bounded
+   * number rather than a coin flip — the same reason every scheduler test
+   * states its bursts explicitly.
+   */
+  function spawnIsolated(bursts: number[]) {
+    for (const other of scheduler.getProcesses()) {
+      if (other.state !== 'TERMINATED') scheduler.stop(other.pid)
     }
-    expect(blockedAtTick).toBeGreaterThanOrEqual(0)
+    const process = spawnProcess('ioer', 'interactive', SHELL_PID)
+    process.bursts = [...bursts]
+    process.burstIndex = 0
+    process.burstRemaining = bursts[0]!
+    return process
+  }
+
+  /** Steps until `done()` or the budget runs out; returns whether it got there. */
+  function runUntil(done: () => boolean, maxTicks = 300): boolean {
+    for (let i = 0; i < maxTicks; i++) {
+      if (done()) return true
+      stepSimulation()
+    }
+    return done()
+  }
+
+  it('parks a process on the disk queue when it blocks, and wakes it when the head services its request', () => {
+    const process = spawnIsolated(IO_HEAVY_BURSTS)
+
+    expect(runUntil(() => process.blockedOn === 'device')).toBe(true)
     expect(process.state).toBe('WAITING')
     // The wait is real: there is a queued request with this pid on it.
     expect(filesystem.getIoState().pending.some((r) => r.waiterPid === process.pid)).toBe(true)
 
     // The head sweeps at most a full disk-width to reach it, whichever
     // cylinder it happened to land on.
-    for (let i = 0; i < 200 && process.blockedOn === 'device'; i++) stepSimulation()
-    expect(process.blockedOn).not.toBe('device')
-    expect(process.burstIndex).toBeGreaterThanOrEqual(2) // returned past its I/O burst
+    const blockedAtIndex = process.burstIndex
+    expect(runUntil(() => process.blockedOn !== 'device')).toBe(true)
+    expect(process.burstIndex).toBeGreaterThan(blockedAtIndex) // returned past its I/O burst
 
     killProcess(process.pid)
   })
 
   it('never leaves a process blocked on a request the disk threw away (reset-fs, cross-tab import)', () => {
-    const process = spawnProcess('ioer', 'interactive', SHELL_PID)
-    process.bursts = [1, 4, 1]
-    process.burstRemaining = 1
-    for (let i = 0; i < 60 && process.blockedOn !== 'device'; i++) stepSimulation()
-    expect(process.blockedOn).toBe('device')
+    const process = spawnIsolated(IO_HEAVY_BURSTS)
+    expect(runUntil(() => process.blockedOn === 'device')).toBe(true)
 
     // Wipes the disk — and with it the pending queue holding the only
     // event that could ever have released this process.
@@ -128,8 +159,11 @@ describe('real I/O blocking — scheduler ↔ SCAN disk (roadmap-v5.md §1.1)', 
     expect(filesystem.getIoState().pending).toHaveLength(0)
 
     stepSimulation()
+    // Asserted about this process specifically, not the global blocked
+    // count: stepSimulation() runs scheduler.tick() before draining the
+    // abandoned waiters, so an unrelated process is free to block on a
+    // fresh request during the very same tick.
     expect(process.blockedOn).not.toBe('device')
-    expect(scheduler.getBlockedCounts().device).toBe(0)
 
     killProcess(process.pid)
   })
@@ -137,14 +171,135 @@ describe('real I/O blocking — scheduler ↔ SCAN disk (roadmap-v5.md §1.1)', 
   it('falls back to a self-timed wait while the disk is crashed, rather than freezing every process until fsck', () => {
     filesystem.crash()
     try {
-      const process = spawnProcess('ioer', 'interactive', SHELL_PID)
-      process.bursts = [1, 4, 1]
-      process.burstRemaining = 1
-      for (let i = 0; i < 60 && process.blockedOn === null; i++) stepSimulation()
+      const process = spawnIsolated(IO_HEAVY_BURSTS)
+      expect(runUntil(() => process.blockedOn !== null)).toBe(true)
       expect(process.blockedOn).toBe('io-burst')
       killProcess(process.pid)
     } finally {
       filesystem.fsck()
     }
+  })
+})
+
+// roadmap-v5.md §1.2 — the pipe engine decides who should block and who
+// should wake; the scheduler is what actually does it. Only this module
+// knows both, so only here can the pair be tested end to end.
+describe('kernel pipes — PipeEngine ↔ scheduler (roadmap-v5.md §1.2)', () => {
+  /** Runs the simulation until `done()` or the budget runs out; returns whether it got there. */
+  function runUntil(done: () => boolean, maxTicks = 400): boolean {
+    for (let i = 0; i < maxTicks; i++) {
+      if (done()) return true
+      stepSimulation()
+    }
+    return done()
+  }
+
+  /**
+   * spawnPipeline() uses the randomised generateBursts(), which is right
+   * for the real thing but useless here: an `interactive` process can be
+   * handed as few as four CPU ticks in total, which is exactly the number
+   * it takes to fill a PIPE_CAPACITY buffer — so it would sometimes
+   * terminate on the very tick it was supposed to block on. These tests
+   * assert *which* state a process reaches, so their bursts are stated
+   * explicitly, like every other hand-traced test in this repo.
+   */
+  function pipelineWithBursts(writerBursts: number[], readerBursts: number[]) {
+    const [writer, reader] = spawnPipeline('producer', 'consumer', SHELL_PID)
+    for (const [process, bursts] of [
+      [writer, writerBursts],
+      [reader, readerBursts],
+    ] as const) {
+      process.bursts = [...bursts]
+      process.burstIndex = 0
+      process.burstRemaining = bursts[0]!
+    }
+    return [writer, reader] as const
+  }
+
+  it('really blocks an endpoint: the writer ends up parked on the pipe, in WAITING(pipe)', () => {
+    const [writer, reader] = pipelineWithBursts([60], [60])
+    // Starve the reader so only the writer ever runs — it must fill the
+    // buffer and then block, rather than writing forever into a buffer
+    // that has a bound.
+    scheduler.stop(reader.pid)
+
+    expect(runUntil(() => writer.blockedOn === 'pipe')).toBe(true)
+    expect(writer.state).toBe('WAITING')
+    const pipe = pipes.getPipes().find((p) => p.writerPid === writer.pid)!
+    expect(pipe.buffer.length).toBe(pipe.capacity)
+
+    scheduler.cont(reader.pid)
+    // The reader draining a slot is what releases the writer — nothing
+    // polls, and the writer can't retry on its own while blocked.
+    expect(runUntil(() => writer.blockedOn !== 'pipe')).toBe(true)
+
+    killProcess(writer.pid)
+    killProcess(reader.pid)
+  })
+
+  it('blocks the reader on an empty pipe until the writer produces', () => {
+    const [writer, reader] = pipelineWithBursts([60], [60])
+    scheduler.stop(writer.pid)
+
+    expect(runUntil(() => reader.blockedOn === 'pipe')).toBe(true)
+    scheduler.cont(writer.pid)
+    expect(runUntil(() => reader.blockedOn !== 'pipe')).toBe(true)
+
+    killProcess(writer.pid)
+    killProcess(reader.pid)
+  })
+
+  it('a terminating writer releases a reader parked on the empty pipe, so a pipeline can actually finish', () => {
+    const [writer, reader] = pipelineWithBursts([60], [60])
+    scheduler.stop(writer.pid)
+    expect(runUntil(() => reader.blockedOn === 'pipe')).toBe(true)
+
+    // Without the close-releases-the-counterpart wiring this reader would
+    // sit in WAITING forever, waiting for data that can never arrive.
+    killProcess(writer.pid)
+    expect(reader.blockedOn).toBeNull()
+    expect(reader.state).toBe('READY')
+    expect(pipes.getPipes().some((p) => p.readerPid === reader.pid && p.writerOpen)).toBe(false)
+
+    killProcess(reader.pid)
+  })
+
+  it('a terminating reader releases a writer blocked on the full pipe', () => {
+    const [writer, reader] = pipelineWithBursts([60], [60])
+    scheduler.stop(reader.pid)
+    expect(runUntil(() => writer.blockedOn === 'pipe')).toBe(true)
+
+    killProcess(reader.pid)
+    expect(writer.blockedOn).toBeNull()
+    killProcess(writer.pid)
+  })
+
+  it('items actually flow end to end when both processes are left to run', () => {
+    const [writer, reader] = pipelineWithBursts([60], [60])
+    const pipeId = pipes.getPipes().find((p) => p.writerPid === writer.pid)!.id
+    const readTotal = () => pipes.getPipes().find((p) => p.id === pipeId)?.readTotal ?? 0
+
+    expect(runUntil(() => readTotal() >= 3)).toBe(true)
+
+    killProcess(writer.pid)
+    killProcess(reader.pid)
+  })
+
+  it('a pipe wake never resolves an unrelated disk wait on the counterpart', () => {
+    // The counterpart may well be blocked on the SCAN head rather than the
+    // pipe. Waking it as if the pipe had released it would advance it past
+    // its I/O burst, silently corrupting its burst sequence — wake() is
+    // reason-checked precisely so this can't happen.
+    // Short CPU bursts separated by I/O, so the reader reaches a device
+    // wait quickly and repeatedly.
+    const [writer, reader] = pipelineWithBursts([60], [1, 2, 1, 2, 1, 2, 1])
+    expect(runUntil(() => reader.blockedOn === 'device', 600)).toBe(true)
+    const burstIndexOnDisk = reader.burstIndex
+
+    stepSimulation()
+    if (reader.blockedOn === 'device') expect(reader.burstIndex).toBe(burstIndexOnDisk)
+
+    killProcess(writer.pid)
+    killProcess(reader.pid)
   })
 })

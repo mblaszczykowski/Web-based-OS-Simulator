@@ -1,18 +1,29 @@
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import { useEffect, useRef, createRef, type RefObject } from 'react'
+import { useState } from 'react'
 import { WindowFrame } from '../app/WindowFrame'
 import { SyncIcon } from '../app/icons'
 import { useSimStore } from '../app/store'
 import { BoundedBufferPanel } from './BoundedBufferPanel'
 import { DeadlockPanel } from './DeadlockPanel'
 import { BankerPanel } from './BankerPanel'
-import { readSharedSessionState, writeSharedSessionState } from '../app/urlState'
+import { PipePanel } from './PipePanel'
+import { readSharedSessionState, writeSharedSessionState, type SharedSyncTab } from '../app/urlState'
 
-type Tab = 'buffer' | 'deadlock' | 'banker'
+type Tab = SharedSyncTab
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: 'buffer', label: 'Bounded buffer' },
-  { id: 'deadlock', label: 'Deadlock detection' },
-  { id: 'banker', label: "Banker's Algorithm" },
+/**
+ * The tab bar is generated from this list rather than written out button
+ * by button. It was four near-identical 12-line JSX blocks plus a parallel
+ * hand-maintained `tabRefs` record before the IPC tab (roadmap-v5.md §1.2)
+ * made it five — at which point the duplication was the thing most likely
+ * to go wrong (an id, an aria-controls and a tabIndex all have to agree per
+ * tab, in three separate places).
+ */
+const TABS: { id: Tab; label: string; subtitle: string; Panel: () => JSX.Element }[] = [
+  { id: 'buffer', label: 'Bounded buffer', subtitle: 'bounded buffer', Panel: BoundedBufferPanel },
+  { id: 'ipc', label: 'Pipes (IPC)', subtitle: 'anonymous pipes', Panel: PipePanel },
+  { id: 'deadlock', label: 'Deadlock detection', subtitle: 'deadlock detection', Panel: DeadlockPanel },
+  { id: 'banker', label: "Banker's Algorithm", subtitle: "banker's algorithm", Panel: BankerPanel },
 ]
 
 // Fills the remaining vertical space below the tab bar exactly like the
@@ -24,25 +35,23 @@ export function SyncWindow() {
   useSimStore((s) => s.version) // subscribed purely so this window re-renders on every tick/command
   // Opens directly to whatever tab a shared session link named — roadmap-v4.md §3.1.
   const [tab, setTab] = useState<Tab>(() => readSharedSessionState().syncTab ?? 'buffer')
-  const bufferTabRef = useRef<HTMLButtonElement>(null)
-  const deadlockTabRef = useRef<HTMLButtonElement>(null)
-  const bankerTabRef = useRef<HTMLButtonElement>(null)
+  // Created once and keyed by tab id, so the refs stay stable across
+  // renders the way the four separate useRef() calls they replace did.
+  const tabRefs = useRef<Record<Tab, RefObject<HTMLButtonElement>>>()
+  if (!tabRefs.current) {
+    tabRefs.current = Object.fromEntries(TABS.map((t) => [t.id, createRef<HTMLButtonElement>()])) as Record<
+      Tab,
+      RefObject<HTMLButtonElement>
+    >
+  }
   // Only true when a tab change originated from arrow-key navigation (not
   // a click, which already focuses the button it hits) — see the effect below.
   const shouldFocusTab = useRef(false)
 
-  const tabRefs: Record<Tab, RefObject<HTMLButtonElement>> = {
-    buffer: bufferTabRef,
-    deadlock: deadlockTabRef,
-    banker: bankerTabRef,
-  }
-
   useEffect(() => {
     if (!shouldFocusTab.current) return
     shouldFocusTab.current = false
-    tabRefs[tab].current?.focus()
-    // tabRefs is a fresh object every render but its contents (the refs) are stable — only `tab` should retrigger this.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    tabRefs.current?.[tab].current?.focus()
   }, [tab])
 
   /** Every tab change routes through here so the shared session link (roadmap-v4.md §3.1) always reflects what's actually showing. */
@@ -64,78 +73,40 @@ export function SyncWindow() {
     <WindowFrame
       id="sync"
       title="Process sync"
-      subtitle={tab === 'buffer' ? 'bounded buffer' : tab === 'deadlock' ? 'deadlock detection' : "banker's algorithm"}
+      subtitle={TABS.find((t) => t.id === tab)?.subtitle ?? ''}
       accent="var(--accent)"
       icon={<SyncIcon />}
     >
       <div className="win-tabs" role="tablist" aria-label="Sync module demo" onKeyDown={handleTabsKeyDown}>
-        <button
-          ref={bufferTabRef}
-          type="button"
-          id="sync-tab-buffer"
-          role="tab"
-          aria-selected={tab === 'buffer'}
-          aria-controls="sync-panel-buffer"
-          tabIndex={tab === 'buffer' ? 0 : -1}
-          className={`win-tab${tab === 'buffer' ? ' active' : ''}`}
-          onClick={() => changeTab('buffer')}
+        {TABS.map(({ id, label }) => (
+          <button
+            key={id}
+            ref={tabRefs.current![id]}
+            type="button"
+            id={`sync-tab-${id}`}
+            role="tab"
+            aria-selected={tab === id}
+            aria-controls={`sync-panel-${id}`}
+            tabIndex={tab === id ? 0 : -1}
+            className={`win-tab${tab === id ? ' active' : ''}`}
+            onClick={() => changeTab(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {TABS.map(({ id, Panel }) => (
+        <div
+          key={id}
+          id={`sync-panel-${id}`}
+          role="tabpanel"
+          aria-labelledby={`sync-tab-${id}`}
+          hidden={tab !== id}
+          style={TABPANEL_STYLE}
         >
-          Bounded buffer
-        </button>
-        <button
-          ref={deadlockTabRef}
-          type="button"
-          id="sync-tab-deadlock"
-          role="tab"
-          aria-selected={tab === 'deadlock'}
-          aria-controls="sync-panel-deadlock"
-          tabIndex={tab === 'deadlock' ? 0 : -1}
-          className={`win-tab${tab === 'deadlock' ? ' active' : ''}`}
-          onClick={() => changeTab('deadlock')}
-        >
-          Deadlock detection
-        </button>
-        <button
-          ref={bankerTabRef}
-          type="button"
-          id="sync-tab-banker"
-          role="tab"
-          aria-selected={tab === 'banker'}
-          aria-controls="sync-panel-banker"
-          tabIndex={tab === 'banker' ? 0 : -1}
-          className={`win-tab${tab === 'banker' ? ' active' : ''}`}
-          onClick={() => changeTab('banker')}
-        >
-          Banker&rsquo;s Algorithm
-        </button>
-      </div>
-      <div
-        id="sync-panel-buffer"
-        role="tabpanel"
-        aria-labelledby="sync-tab-buffer"
-        hidden={tab !== 'buffer'}
-        style={TABPANEL_STYLE}
-      >
-        {tab === 'buffer' && <BoundedBufferPanel />}
-      </div>
-      <div
-        id="sync-panel-deadlock"
-        role="tabpanel"
-        aria-labelledby="sync-tab-deadlock"
-        hidden={tab !== 'deadlock'}
-        style={TABPANEL_STYLE}
-      >
-        {tab === 'deadlock' && <DeadlockPanel />}
-      </div>
-      <div
-        id="sync-panel-banker"
-        role="tabpanel"
-        aria-labelledby="sync-tab-banker"
-        hidden={tab !== 'banker'}
-        style={TABPANEL_STYLE}
-      >
-        {tab === 'banker' && <BankerPanel />}
-      </div>
+          {tab === id && <Panel />}
+        </div>
+      ))}
     </WindowFrame>
   )
 }

@@ -320,12 +320,19 @@ export class SchedulerEngine {
    * advanced, but SIGSTOP still means stopped until a SIGCONT arrives.
    * Dropping the wake instead would leave that process permanently
    * blocked on a request nobody will ever complete a second time.
+   *
+   * `reason` must match what the process is actually blocked on. Callers
+   * always know which wait they are ending, and requiring the match is
+   * what stops one subsystem from resolving another's: a pipe reader
+   * telling the scheduler "the writer produced something" must not
+   * accidentally complete an unrelated disk request the counterpart
+   * happens to be parked on — which, since a device wake advances the
+   * process past its I/O burst, would silently corrupt its burst sequence.
    */
-  wake(pid: number): boolean {
+  wake(pid: number, reason: Exclude<BlockReason, 'io-burst'>): boolean {
     const process = this.processes.get(pid)
     if (!process || process.state === 'TERMINATED') return false
-    const reason = process.blockedOn
-    if (reason === null || reason === 'io-burst') return false
+    if (process.blockedOn !== reason) return false
 
     process.blockedOn = null
     this.waiting.delete(pid)

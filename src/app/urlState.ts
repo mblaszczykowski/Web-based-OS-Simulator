@@ -15,8 +15,8 @@
 // (see store.ts) as UI chrome, not "the session" someone would want to
 // send a link to.
 
-export type SharedSyncTab = 'buffer' | 'deadlock' | 'banker'
-const VALID_SYNC_TABS: readonly SharedSyncTab[] = ['buffer', 'deadlock', 'banker']
+export type SharedSyncTab = 'buffer' | 'ipc' | 'deadlock' | 'banker'
+const VALID_SYNC_TABS: readonly SharedSyncTab[] = ['buffer', 'ipc', 'deadlock', 'banker']
 
 export interface SharedSessionState {
   /** Which SyncWindow tab to open with, or null if the URL doesn't specify one (or specifies something unrecognized). */

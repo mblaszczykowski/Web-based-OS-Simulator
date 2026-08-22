@@ -200,6 +200,36 @@ export interface SyncLogEntry {
 }
 
 // ---------------------------------------------------------------------------
+// IPC (anonymous pipes)
+// ---------------------------------------------------------------------------
+
+/**
+ * One anonymous pipe connecting two real processes — roadmap-v5.md §1.2.
+ * `writerOpen`/`readerOpen` go false when that end's process terminates:
+ * a closed writer is EOF for the reader, a closed reader breaks the pipe
+ * for the writer.
+ */
+export interface PipeState {
+  id: number
+  writerPid: number
+  readerPid: number
+  /** Item sequence numbers currently buffered, oldest first. */
+  buffer: number[]
+  capacity: number
+  writtenTotal: number
+  readTotal: number
+  writerOpen: boolean
+  readerOpen: boolean
+}
+
+export interface PipeLogEntry {
+  id: number
+  pipeId: number
+  text: string
+  kind: 'info' | 'block' | 'warning'
+}
+
+// ---------------------------------------------------------------------------
 // Terminal
 // ---------------------------------------------------------------------------
 

@@ -11,6 +11,8 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     spawnStress: (n) => Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1, kind: 'cpu-bound' })),
     spawnThreads: (name, n) =>
       Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1, name: `${name}:t${i + 1}`, memoryOwnerPid: 1 })),
+    spawnPipeline: (writerName, readerName) => [makeProcess({ pid: 1, name: writerName }), makeProcess({ pid: 2, name: readerName })],
+    pipeStatus: () => [],
     killProcess: () => true,
     stopProcess: () => true,
     contProcess: () => true,
@@ -661,5 +663,99 @@ describe('executeCommand', () => {
       const lines = texts('man iostat', makeContext())
       expect(lines[0]).toMatch(/^iostat -/)
     })
+  })
+})
+
+describe('pipe — kernel pipes between two processes (roadmap-v5.md §1.2)', () => {
+  it('spawns both endpoints and names them in the output', () => {
+    const spawnPipeline = vi.fn(
+      (w: string, r: string) => [makeProcess({ pid: 7, name: w }), makeProcess({ pid: 8, name: r })] as [ReturnType<typeof makeProcess>, ReturnType<typeof makeProcess>],
+    )
+    const ctx = makeContext({ spawnPipeline })
+    const [line] = executeCommand('pipe producer consumer', ctx)
+
+    expect(spawnPipeline).toHaveBeenCalledWith('producer', 'consumer')
+    expect(line!.text).toContain('P7 (producer)')
+    expect(line!.text).toContain('P8 (consumer)')
+  })
+
+  it('rejects anything other than exactly two names, rather than guessing', () => {
+    const spawnPipeline = vi.fn()
+    const ctx = makeContext({ spawnPipeline })
+    expect(executeCommand('pipe producer', ctx)[0]!.isError).toBe(true)
+    expect(executeCommand('pipe a b c', ctx)[0]!.isError).toBe(true)
+    expect(spawnPipeline).not.toHaveBeenCalled()
+  })
+
+  it('with no arguments, lists open pipes instead of creating one', () => {
+    const spawnPipeline = vi.fn()
+    const ctx = makeContext({
+      spawnPipeline,
+      pipeStatus: () => [
+        { id: 1, writerPid: 7, readerPid: 8, occupancy: 3, capacity: 4, writtenTotal: 9, readTotal: 6, writerOpen: true, readerOpen: true },
+      ],
+    })
+    const lines = executeCommand('pipe', ctx)
+
+    expect(spawnPipeline).not.toHaveBeenCalled()
+    expect(lines[0]!.text).toContain('WRITER')
+    expect(lines[1]!.text).toContain('P7')
+    expect(lines[1]!.text).toContain('3/4')
+  })
+
+  it('says so plainly when nothing is open, rather than printing a bare header', () => {
+    const lines = executeCommand('pipe', makeContext())
+    expect(lines[0]!.text).toContain('No open pipes')
+  })
+
+  it('marks a half-closed pipe, so a finished pipeline reads correctly', () => {
+    const ctx = makeContext({
+      pipeStatus: () => [
+        { id: 1, writerPid: 7, readerPid: 8, occupancy: 0, capacity: 4, writtenTotal: 9, readTotal: 9, writerOpen: false, readerOpen: true },
+      ],
+    })
+    expect(executeCommand('pipe', ctx)[1]!.text).toContain('P7 (closed)')
+  })
+})
+
+describe('ps / top / iostat report what a process is blocked on (roadmap-v5.md §1.1)', () => {
+  it('ps distinguishes a disk wait from a pipe wait instead of showing a bare WAITING', () => {
+    const ctx = makeContext({
+      listProcesses: () => [
+        makeProcess({ pid: 1, name: 'reader', state: 'WAITING', blockedOn: 'pipe' }),
+        makeProcess({ pid: 2, name: 'compiler', state: 'WAITING', blockedOn: 'device' }),
+        makeProcess({ pid: 3, name: 'idle', state: 'READY' }),
+      ],
+    })
+    const lines = executeCommand('ps', ctx).map((l) => l.text)
+    expect(lines[1]).toContain('WAITING(pipe)')
+    expect(lines[2]).toContain('WAITING(disk)')
+    expect(lines[3]).toContain('READY')
+  })
+
+  it('top breaks the blocked processes down by reason', () => {
+    const ctx = makeContext({
+      listProcesses: () => [
+        makeProcess({ pid: 1, state: 'WAITING', blockedOn: 'device' }),
+        makeProcess({ pid: 2, state: 'WAITING', blockedOn: 'device' }),
+        makeProcess({ pid: 3, state: 'WAITING', blockedOn: 'pipe' }),
+        makeProcess({ pid: 4, state: 'WAITING', blockedOn: 'io-burst' }),
+      ],
+    })
+    expect(executeCommand('top', ctx)[1]!.text).toBe('Blocked: 2 on disk, 1 on a pipe, 1 on a self-timed I/O burst')
+  })
+
+  it('iostat names the processes actually parked on the head — the point of the integration', () => {
+    const ctx = makeContext({
+      listProcesses: () => [
+        makeProcess({ pid: 5, state: 'WAITING', blockedOn: 'device' }),
+        makeProcess({ pid: 6, state: 'WAITING', blockedOn: 'pipe' }),
+      ],
+    })
+    expect(executeCommand('iostat', ctx)[2]!.text).toBe('Processes blocked on this disk: P5')
+  })
+
+  it('iostat says "none" rather than an empty list when the disk is not blocking anyone', () => {
+    expect(executeCommand('iostat', makeContext())[2]!.text).toBe('Processes blocked on this disk: none')
   })
 })

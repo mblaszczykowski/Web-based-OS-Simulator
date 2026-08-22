@@ -21,6 +21,7 @@ import { SyncEngine } from '../sync/engine'
 import { DeadlockEngine } from '../sync/deadlock'
 import { BankerEngine } from '../sync/banker'
 import { NetworkEngine } from '../network/engine'
+import { PipeEngine } from '../ipc/pipe'
 import { simBus } from '../shared/eventBus'
 
 export const scheduler = new SchedulerEngine()
@@ -36,6 +37,10 @@ export const deadlock = new DeadlockEngine()
 // (detection) as a second, independent extension of the sync module, same
 // singleton-per-module pattern as every other engine here.
 export const banker = new BankerEngine()
+// Anonymous pipes (roadmap-v5.md §1.2) — a singleton like every other
+// engine. Owns the channels only; who blocks on them is the scheduler's
+// business, coordinated below.
+export const pipes = new PipeEngine()
 
 // Reassignable (not const) because "show race condition" / "reset" restart
 // this module from scratch rather than mutating it in place — a mode
@@ -178,6 +183,15 @@ function clearSwapFiles(): void {
 // its still-running siblings. For an ordinary process, memoryOwnerPid is
 // just its own pid and no other process ever shares it, so this reduces to
 // exactly the old immediate-free behavior.
+// A process going away closes whichever end of a pipe it held, and
+// releases whoever was parked on the other end (roadmap-v5.md §1.2) — a
+// reader blocked on an empty pipe whose writer just exited would
+// otherwise wait forever for data that can never arrive. This is what
+// lets both halves of a pipeline actually terminate.
+simBus.on('process:terminated', ({ pid }) => {
+  for (const waiter of pipes.closeEndpoint(pid)) scheduler.wake(waiter, 'pipe')
+})
+
 simBus.on('process:terminated', ({ memoryOwnerPid }) => {
   // A tempting-looking optimization here would be to skip this scan
   // whenever `memoryOwnerPid === pid`, on the theory that only a thread
@@ -367,6 +381,26 @@ export function spawnThreadGroup(name: string, count: number, parentPid: number 
   return threads
 }
 
+/**
+ * `pipe <writer> <reader>` — two real processes connected by a real pipe
+ * (roadmap-v5.md §1.2). Both are ordinary scheduler processes with their
+ * own bursts, own queue level and own row in `ps`/the Gantt chart; the
+ * only thing that distinguishes them is that one end of a bounded buffer
+ * belongs to each, and the buffer filling or emptying genuinely blocks
+ * them.
+ *
+ * They're spawned as `interactive`: a process that spends its life handing
+ * items to another one *is* I/O-bound, and giving it CPU-bound bursts
+ * would mean it holds the CPU for 8-20 ticks between pipe operations,
+ * hiding the blocking this command exists to show.
+ */
+export function spawnPipeline(writerName: string, readerName: string, parentPid: number = SHELL_PID): [Process, Process] {
+  const writer = spawnProcess(writerName, 'interactive', parentPid)
+  const reader = spawnProcess(readerName, 'interactive', writer.pid)
+  pipes.create(writer.pid, reader.pid)
+  return [writer, reader]
+}
+
 const AUTO_SPAWN_INTERVAL = 23
 const AUTO_SPAWN_CAP = 7
 
@@ -379,13 +413,13 @@ export function stepSimulation() {
   // is already queued, so a head that happens to land on it this very tick
   // wakes it immediately rather than a tick late.
   for (const completed of filesystem.advanceTick()) {
-    if (completed.waiterPid !== undefined) scheduler.wake(completed.waiterPid)
+    if (completed.waiterPid !== undefined) scheduler.wake(completed.waiterPid, 'device')
   }
   // A `reset-fs` (or a cross-tab import) throws the pending queue away.
   // Anything that was blocked on a discarded request would otherwise wait
   // forever for a completion that no longer exists, so it's released here
   // instead — the I/O failed, but the process still runs.
-  for (const pid of filesystem.drainAbandonedIoWaiters()) scheduler.wake(pid)
+  for (const pid of filesystem.drainAbandonedIoWaiters()) scheduler.wake(pid, 'device')
 
   sync.tick()
   network.tick()
@@ -406,6 +440,24 @@ export function stepSimulation() {
       if (access.victim) swapOut(access.victim.pid, access.victim.page)
       if (access.wasSwapped) swapIn(running.memoryOwnerPid, page)
     }
+
+    // ...and, if it holds one end of a pipe, drives that end too
+    // (roadmap-v5.md §1.2). Deliberately after the memory access above:
+    // this process really did run a CPU tick, so its page reference
+    // belongs to this tick whether or not the pipe operation then blocks
+    // it. Doing it the other way round would silently drop that reference
+    // every time an endpoint blocks — and a pipe pair blocks constantly,
+    // which would quietly skew the page-fault and TLB statistics.
+    //
+    // A process only touches a pipe while it is actually on the CPU,
+    // which is exactly why a blocked endpoint can't retry by itself and
+    // has to be woken by the other side.
+    const outcome = pipes.stepEndpoint(running.pid)
+    if (outcome.kind === 'block') scheduler.blockOn(running.pid, 'pipe')
+    else if (outcome.kind === 'transferred') scheduler.wake(outcome.wakeCounterpart, 'pipe')
+    // 'eof' and 'broken' deliberately do nothing to the process itself:
+    // the stream is over, so it runs out its remaining CPU bursts and
+    // exits normally rather than being killed off by the IPC layer.
   }
 
   // Automatic, self-sustaining workload — see plan.md §2.1. Caps out so a

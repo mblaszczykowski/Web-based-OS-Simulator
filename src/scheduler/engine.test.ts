@@ -470,7 +470,7 @@ describe('SchedulerEngine — device-owned I/O waits (roadmap-v5.md §1.1)', () 
     expect(p1.state).toBe('WAITING')
     expect(p1.blockedOn).toBe('device')
 
-    expect(engine.wake(p1.pid)).toBe(true)
+    expect(engine.wake(p1.pid, 'device')).toBe(true)
     expect(p1.state).toBe('READY')
     expect(p1.blockedOn).toBeNull()
     expect(p1.burstIndex).toBe(2) // returning from the device advances past the I/O burst
@@ -503,7 +503,7 @@ describe('SchedulerEngine — device-owned I/O waits (roadmap-v5.md §1.1)', () 
     expect(p1.queueLevel).toBe(1)
     expect(p1.state).toBe('WAITING')
 
-    engine.wake(p1.pid)
+    engine.wake(p1.pid, 'device')
     expect(p1.queueLevel).toBe(1) // unchanged, and given a full Q1 slice
     expect(p1.sliceRemaining).toBe(8)
   })
@@ -513,12 +513,30 @@ describe('SchedulerEngine — device-owned I/O waits (roadmap-v5.md §1.1)', () 
     const p1 = createProcess('a', 'interactive', [1, 5, 1])
     engine.spawn(p1)
     engine.tick()
-    expect(engine.wake(p1.pid)).toBe(false) // RUNNING, not blocked
+    expect(engine.wake(p1.pid, 'device')).toBe(false) // RUNNING, not blocked
     engine.tick()
     expect(p1.blockedOn).toBe('io-burst') // no port installed
-    expect(engine.wake(p1.pid)).toBe(false) // the scheduler owns this one
+    expect(engine.wake(p1.pid, 'device')).toBe(false) // the scheduler owns this one
     expect(p1.state).toBe('WAITING')
-    expect(engine.wake(999)).toBe(false)
+    expect(engine.wake(999, 'device')).toBe(false)
+  })
+
+  it('wake() refuses to resolve a wait it is not the owner of', () => {
+    // A pipe telling the scheduler "your counterpart can run again" must
+    // never complete an unrelated disk request the process happens to be
+    // parked on — a device wake advances past the I/O burst, so getting
+    // this wrong silently corrupts the burst sequence.
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    engine.setIoPort({ submit: () => true })
+    const p1 = createProcess('a', 'interactive', [1, 5, 2])
+    engine.spawn(p1)
+    engine.tick()
+    engine.tick()
+    expect(p1.blockedOn).toBe('device')
+
+    expect(engine.wake(p1.pid, 'pipe')).toBe(false)
+    expect(p1.blockedOn).toBe('device') // untouched
+    expect(p1.burstIndex).toBe(1) // and crucially, not advanced
   })
 
   it('a device completion arriving while the process is STOPPED is honoured, but SIGSTOP still holds it', () => {
@@ -531,7 +549,7 @@ describe('SchedulerEngine — device-owned I/O waits (roadmap-v5.md §1.1)', () 
     expect(p1.blockedOn).toBe('device')
 
     engine.stop(p1.pid)
-    expect(engine.wake(p1.pid)).toBe(true)
+    expect(engine.wake(p1.pid, 'device')).toBe(true)
     expect(p1.state).toBe('STOPPED') // the wake doesn't override the signal
     expect(p1.blockedOn).toBeNull() // ...but the I/O really did complete
     expect(p1.burstIndex).toBe(2)
@@ -556,7 +574,7 @@ describe('SchedulerEngine — device-owned I/O waits (roadmap-v5.md §1.1)', () 
     expect(engine.getRunning()).toBeUndefined()
     expect(p1.burstRemaining).toBe(9) // no burst consumed while blocked
 
-    expect(engine.wake(p1.pid)).toBe(true)
+    expect(engine.wake(p1.pid, 'pipe')).toBe(true)
     expect(p1.state).toBe('READY')
     expect(p1.burstIndex).toBe(0) // a pipe wait is not an I/O burst — no burst is advanced
   })
@@ -586,7 +604,7 @@ describe('SchedulerEngine — device-owned I/O waits (roadmap-v5.md §1.1)', () 
 
     engine.kill(p1.pid)
     expect(p1.blockedOn).toBeNull()
-    expect(engine.wake(p1.pid)).toBe(false) // a late completion for a dead process is harmless
+    expect(engine.wake(p1.pid, 'device')).toBe(false) // a late completion for a dead process is harmless
     expect(engine.getBlockedCounts()).toEqual({ 'io-burst': 0, device: 0, pipe: 0 })
   })
 

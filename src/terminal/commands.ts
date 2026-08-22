@@ -1,5 +1,6 @@
 import type { JournalEntry, Process } from '../shared/types'
 import { rwxTriplet } from '../filesystem/engine'
+import { PIPE_CAPACITY } from '../ipc/pipe'
 
 export interface SchedulerMetricsView {
   completed: number
@@ -32,6 +33,19 @@ export interface IoMetricsView {
   avgWaitTicks: number
 }
 
+/** One open pipe, as the terminal renders it. */
+export interface PipeStatusView {
+  id: number
+  writerPid: number
+  readerPid: number
+  occupancy: number
+  capacity: number
+  writtenTotal: number
+  readTotal: number
+  writerOpen: boolean
+  readerOpen: boolean
+}
+
 export interface SyncStatusView {
   capacity: number
   occupancy: number
@@ -62,6 +76,10 @@ export interface CommandContext {
   spawnStress(n: number): Process[]
   /** `n` threads of one process, sharing a single address space — roadmap-v4.md §2.1's `run --threads=n`. */
   spawnThreads(name: string, n: number): Process[]
+  /** Two processes joined by a real kernel pipe — roadmap-v5.md §1.2's `pipe <writer> <reader>`. */
+  spawnPipeline(writerName: string, readerName: string): [Process, Process]
+  /** Open pipes and their buffer occupancy — backs `pipe` with no arguments and `lsof`. */
+  pipeStatus(): PipeStatusView[]
   killProcess(pid: number): boolean
   /** SIGSTOP / SIGCONT — roadmap-v3.md §2.2. */
   stopProcess(pid: number): boolean
@@ -127,6 +145,8 @@ const HELP_TEXT = [
   '  fsck                replay the journal and recover the filesystem',
   '  reset-fs             wipe the disk (in memory and the persisted copy)',
   '  iostat               disk I/O scheduler status (SCAN head position, queue, seek/wait)',
+  '  pipe <w> <r>          spawn two processes joined by a real kernel pipe',
+  '  pipe                  list open pipes and their buffer occupancy',
   '  sync                bounded-buffer producer/consumer status',
   '  race on|off          toggle the unsynchronized (racy) demo mode',
   '  ping [host]           send simulated ICMP echo packets to a host',
@@ -139,10 +159,11 @@ const HELP_TEXT = [
   '',
   'Paths are relative to the current directory unless they start with /.',
   'Chain commands with ; (always run next), && (run next only on success),',
-  'or pipe output through a filter with | (only `grep <pattern>` is supported), e.g.:',
+  'or filter output with | (a shell-level filter; only `grep <pattern>` is supported), e.g.:',
   '  ls | grep .log',
   '  mkdir /tmp && write /tmp/x.txt hi',
   '$VAR and ${VAR} are substituted with an exported value (empty if unset) before a line runs.',
+  'Note | is a shell filter over rendered output, not a kernel pipe — see `man pipe`.',
 ]
 
 /** All command names — exported so the terminal UI can tab-complete against them. */
@@ -170,6 +191,7 @@ export const COMMAND_NAMES = [
   'fsck',
   'reset-fs',
   'iostat',
+  'pipe',
   'sync',
   'race',
   'ping',
@@ -201,11 +223,23 @@ const MAN_PAGES: Record<string, string[]> = {
   ln: ['ln - create a hard link', 'usage: ln <target> <link>', 'The link shares content with target; editing one is visible through the other.', 'example: ln /notes.txt /home/notes-link.txt'],
   chmod: ['chmod - change file permissions', 'usage: chmod <mode> <file>', 'mode is 1-3 octal digits (e.g. 644 or 6); only the owner digit is meaningful here.', 'example: chmod 644 /notes.txt'],
   rm: ['rm - delete a file', 'usage: rm <file>', 'Supports * wildcards.', 'example: rm *.tmp'],
-  grep: ['grep - filter piped output by substring', 'usage: <command> | grep <pattern>', 'Only works as a pipe target; a plain substring match, not a regex engine.', 'example: ls | grep .log'],
+  grep: [
+    'grep - filter piped output by substring',
+    'usage: <command> | grep <pattern>',
+    "Only works as a filter target; a plain substring match, not a regex engine. The shell's | is not a kernel pipe — see `man pipe`.",
+    'example: ls | grep .log',
+  ],
   crash: ['crash - simulate a power loss mid-write', 'usage: crash', 'Leaves a pending write in the journal; recover with fsck.', 'example: crash'],
   fsck: ['fsck - replay the journal and recover the filesystem', 'usage: fsck', 'example: fsck'],
   'reset-fs': ['reset-fs - wipe the disk', 'usage: reset-fs', 'Clears both the in-memory and persisted filesystem back to a fresh, empty disk.', 'example: reset-fs'],
   iostat: ['iostat - disk I/O scheduler status', 'usage: iostat', 'SCAN head position/direction, pending queue depth, average seek distance and wait, requests completed.', 'example: iostat'],
+  pipe: [
+    'pipe - connect two processes with a real kernel pipe',
+    'usage: pipe <writer> <reader> | pipe',
+    'Spawns both processes and joins them with a bounded buffer: the writer blocks when it fills, the reader when it empties, and each wakes the other. With no arguments, lists open pipes.',
+    "This is NOT the shell's |, which is a filter over one command's rendered output and involves no processes at all.",
+    'example: pipe producer consumer',
+  ],
   sync: ['sync - bounded-buffer producer/consumer status', 'usage: sync', 'Buffer occupancy, mutex state, and produced/consumed/corruption counters.', 'example: sync'],
   race: ['race - toggle the unsynchronized sync demo', 'usage: race on|off', 'on restarts the producer/consumer demo without its mutex, to show the corruption it normally prevents.', 'example: race on'],
   ping: ['ping - send simulated ICMP echo packets', 'usage: ping [host]', 'Watch the Network window for the replies.', 'example: ping server'],
@@ -658,6 +692,33 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
         blocked.length === 0
           ? 'Processes blocked on this disk: none'
           : `Processes blocked on this disk: ${blocked.map((p) => `P${p.pid}`).join(', ')}`,
+      )
+    }
+
+    case 'pipe': {
+      if (args.length === 0) {
+        const open = ctx.pipeStatus()
+        if (open.length === 0) return out('No open pipes. Create one with: pipe <writer> <reader>')
+        return out(
+          'ID  WRITER  READER  BUFFER  WRITTEN  READ',
+          ...open.map((p) =>
+            [
+              String(p.id).padEnd(4),
+              `P${p.writerPid}${p.writerOpen ? '' : ' (closed)'}`.padEnd(8),
+              `P${p.readerPid}${p.readerOpen ? '' : ' (closed)'}`.padEnd(8),
+              `${p.occupancy}/${p.capacity}`.padEnd(8),
+              String(p.writtenTotal).padEnd(9),
+              String(p.readTotal),
+            ].join(''),
+          ),
+        )
+      }
+      if (args.length !== 2) return err('pipe: usage: pipe <writer> <reader>  (or `pipe` alone to list open pipes)')
+      const [writerName, readerName] = args as [string, string]
+      const [writer, reader] = ctx.spawnPipeline(writerName, readerName)
+      return out(
+        `Started P${writer.pid} (${writer.name}) → P${reader.pid} (${reader.name}) over a ${PIPE_CAPACITY}-slot pipe.`,
+        'Watch the Sync window\'s IPC tab: the writer blocks when the buffer fills, the reader when it empties.',
       )
     }
 
