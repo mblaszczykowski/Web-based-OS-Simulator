@@ -94,6 +94,33 @@ describe('PipeEngine — anonymous pipes as kernel objects', () => {
     expect(pipes.closeEndpoint(1)).toEqual([])
   })
 
+  it('regression: a half-closed pipe reports the dead end once, not once per tick (found by code review)', () => {
+    // The surviving endpoint keeps matching this pipe for as long as its
+    // process lives, and `broken` is a no-op for the process — so the same
+    // line used to be logged every tick it was scheduled, flushing the
+    // whole created/wrote/blocked history out of the capped log within a
+    // couple of dozen ticks. That is the log the IPC panel exists to show.
+    const pipes = new PipeEngine()
+    pipes.create(1, 2)
+    pipes.stepEndpoint(1) // something worth keeping in the history
+    pipes.closeEndpoint(2)
+
+    for (let i = 0; i < 50; i++) expect(pipes.stepEndpoint(1)).toEqual({ kind: 'broken' })
+
+    const log = pipes.getLog()
+    expect(log.filter((e) => e.text.includes('SIGPIPE'))).toHaveLength(1)
+    expect(log.some((e) => e.text.includes('created'))).toBe(true) // history survived
+    expect(log.some((e) => e.text.includes('wrote'))).toBe(true)
+  })
+
+  it('regression: the same holds for a reader repeatedly hitting end of stream', () => {
+    const pipes = new PipeEngine()
+    pipes.create(1, 2)
+    pipes.closeEndpoint(1)
+    for (let i = 0; i < 50; i++) expect(pipes.stepEndpoint(2)).toEqual({ kind: 'eof' })
+    expect(pipes.getLog().filter((e) => e.text.includes('end of stream'))).toHaveLength(1)
+  })
+
   it('a pid that holds no pipe does nothing at all', () => {
     const pipes = new PipeEngine()
     pipes.create(1, 2)

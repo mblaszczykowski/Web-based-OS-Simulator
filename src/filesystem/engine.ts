@@ -604,14 +604,21 @@ export class FilesystemEngine {
 
   private applyCreate(path: string): void {
     if (this.findFileEntry(path)) return
-    // Guards against a stale 'write'/'create' replay whose target now
-    // resolves to a directory instead — e.g. `mkdir /d` sets
+    // Guards against a stale 'write'/'create' replay whose target is
+    // actually something other than a file — e.g. `mkdir /d` sets
     // lastTouchedPath to '/d', and crash()'s fabricated journal entry is
     // always op:'write' regardless of what lastTouchedPath actually is.
     // Without this, fsck() replaying that entry via applyWrite ->
     // applyCreate would push a second, same-named file entry alongside
-    // the existing directory — two siblings named 'd', tree corrupted.
-    if (this.findDirEntry(path)) return
+    // the existing one — two siblings named 'd', tree corrupted.
+    //
+    // The symlink half of this was missed when links were added
+    // (roadmap-v5.md §2.2) and is reachable the same way: `ln -s`, and
+    // `mv` of a link, both set lastTouchedPath to the link, so
+    // `ln -s /notes.txt /link; crash; fsck` produced a phantom '/link'
+    // file beside the real symlink — holding an inode and disk blocks
+    // nothing could ever reach again (found by code review).
+    if (this.findDirEntry(path) || this.findSymlinkEntry(path)) return
     const segments = this.splitPath(path)
     const name = segments.pop()
     if (!name) return

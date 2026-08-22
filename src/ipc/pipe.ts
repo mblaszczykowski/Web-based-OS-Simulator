@@ -26,6 +26,16 @@ export type PipeStepOutcome =
 
 interface InternalPipe extends PipeState {
   buffer: number[]
+  /**
+   * Whether the surviving end has already been told the other one is
+   * gone. A half-closed pipe keeps matching its remaining endpoint for as
+   * long as that process lives, and `broken`/`eof` are deliberately
+   * no-ops for the process itself — so without this it re-logs the same
+   * line every tick it is scheduled and, within a couple of dozen ticks,
+   * pushes the whole created/wrote/blocked history out of the capped
+   * event log the IPC panel exists to show (found by code review).
+   */
+  endNotified: boolean
 }
 
 /**
@@ -75,6 +85,7 @@ export class PipeEngine {
       readTotal: 0,
       writerOpen: true,
       readerOpen: true,
+      endNotified: false,
     }
     this.pipes.push(pipe)
     this.pushLog(pipe.id, `pipe(${writerPid} → ${readerPid}) created`)
@@ -107,7 +118,10 @@ export class PipeEngine {
 
     if (role === 'writer') {
       if (!pipe.readerOpen) {
-        this.pushLog(pipe.id, `W${pid}: reader gone — write fails (SIGPIPE)`, 'warning')
+        if (!pipe.endNotified) {
+          pipe.endNotified = true
+          this.pushLog(pipe.id, `W${pid}: reader gone — write fails (SIGPIPE)`, 'warning')
+        }
         return { kind: 'broken' }
       }
       if (pipe.buffer.length >= pipe.capacity) {
@@ -123,7 +137,10 @@ export class PipeEngine {
 
     if (pipe.buffer.length === 0) {
       if (!pipe.writerOpen) {
-        this.pushLog(pipe.id, `R${pid}: end of stream (writer closed)`)
+        if (!pipe.endNotified) {
+          pipe.endNotified = true
+          this.pushLog(pipe.id, `R${pid}: end of stream (writer closed)`)
+        }
         return { kind: 'eof' }
       }
       this.pushLog(pipe.id, `R${pid} blocked — pipe empty`, 'block')
@@ -172,13 +189,24 @@ export class PipeEngine {
     return this.log
   }
 
-  /** Open descriptors, for `lsof` — see roadmap-v5.md §2.2. */
+  /**
+   * Totals across every open pipe.
+   *
+   * Deliberately does NOT report how many endpoints are blocked: this
+   * engine decides who *should* block but never learns who actually is —
+   * that lives in the scheduler (`getBlockedCounts().pipe`), which is the
+   * only place that knows. An earlier version guessed it from buffer
+   * occupancy and got it wrong in both directions: a freshly created pipe
+   * with an empty buffer and both ends runnable counted as blocked, while
+   * a pipe with a blocked writer *and* a blocked reader counted as one
+   * (found by code review). A metric that can't be computed correctly
+   * here is better absent than approximated.
+   */
   getMetrics() {
     return {
       openPipes: this.pipes.length,
       writtenTotal: this.pipes.reduce((sum, p) => sum + p.writtenTotal, 0),
       readTotal: this.pipes.reduce((sum, p) => sum + p.readTotal, 0),
-      blockedEndpoints: this.pipes.filter((p) => p.buffer.length === 0 || p.buffer.length >= p.capacity).length,
     }
   }
 }

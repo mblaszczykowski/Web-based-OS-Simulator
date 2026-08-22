@@ -879,6 +879,36 @@ describe('ln -s / df — symbolic links and free-space reporting (roadmap-v5.md 
     expect(long[1]).toContain('link -> /notes.txt')
   })
 
+  it('regression: rm with a wildcard removes symlinks too, like rm on one by name does (found by code review)', () => {
+    const deleted: string[] = []
+    const ctx = makeContext({
+      fsList: () => ({
+        ok: true,
+        entries: [
+          { name: 'a.txt', type: 'file' },
+          { name: 'a.link', type: 'symlink', target: '/a.txt' },
+          { name: 'sub', type: 'dir' },
+        ],
+      }),
+      fsDelete: (path) => {
+        deleted.push(path)
+        return { ok: true }
+      },
+    })
+
+    executeCommand('rm /*', ctx)
+    // Filtering to type 'file' silently skipped every link in the
+    // directory; directories are still correctly left alone.
+    expect(deleted).toEqual(['/a.txt', '/a.link'])
+  })
+
+  it('regression: a pattern matching only symlinks is not reported as matching nothing', () => {
+    const ctx = makeContext({
+      fsList: () => ({ ok: true, entries: [{ name: 'a.link', type: 'symlink', target: '/a.txt' }] }),
+    })
+    expect(executeCommand('rm /*.link', ctx)[0]!.isError).toBeUndefined()
+  })
+
   it('df reports blocks used and free', () => {
     const ctx = makeContext({
       fsUsage: () => ({ totalBlocks: 64, usedBlocks: 16, freeBlocks: 48, blockSizeBytes: 64, bitmap: Array(64).fill(false) }),

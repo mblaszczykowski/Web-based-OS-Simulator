@@ -630,6 +630,37 @@ describe('FilesystemEngine — symbolic links (roadmap-v5.md §2.2)', () => {
     expect(fs.getInodes()).toHaveLength(0)
   })
 
+  it('regression: crash + fsck after ln -s does not grow a phantom file beside the link (found by code review)', () => {
+    // `ln -s` sets lastTouchedPath to the link, and crash() always
+    // fabricates a generic `write` against whatever that is. Replaying it
+    // used to run applyCreate, which checked only for an existing file or
+    // directory — so it pushed a second entry with the same name, of type
+    // 'file', holding an inode and blocks nothing could ever reach again.
+    const fs = fresh()
+    fs.write('/notes.txt', 'hello')
+    fs.symlink('/notes.txt', '/link')
+    fs.crash()
+    fs.fsck()
+
+    const named = fs.getTree().children!.filter((c) => c.name === 'link')
+    expect(named).toHaveLength(1)
+    expect(named[0]!.type).toBe('symlink')
+    expect(fs.read('/link')).toEqual({ ok: true, content: 'hello' })
+    expect(fs.getInodes()).toHaveLength(1) // no orphaned inode
+  })
+
+  it('regression: the same holds after mv of a link, which sets lastTouchedPath the same way', () => {
+    const fs = fresh()
+    fs.write('/notes.txt', 'hello')
+    fs.symlink('/notes.txt', '/link')
+    fs.move('/link', '/moved')
+    fs.crash()
+    fs.fsck()
+
+    expect(fs.getTree().children!.filter((c) => c.name === 'moved')).toHaveLength(1)
+    expect(fs.getInodes()).toHaveLength(1)
+  })
+
   it('survives an export/import round trip', () => {
     const fs = fresh()
     fs.write('/notes.txt', 'hello')

@@ -683,7 +683,11 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
         const listResult = ctx.fsList(dir)
         if (!listResult.ok) return err(listResult.error)
         const re = globToRegExp(pattern)
-        const matches = listResult.entries.filter((e) => e.type === 'file' && re.test(e.name))
+        // Symlinks count: `rm link` removes one, so `rm *` must too.
+        // Filtering to type 'file' silently skipped every symbolic link in
+        // the directory, and made `rm *.link` report "no files matched"
+        // for a pattern that matches several (found by code review).
+        const matches = listResult.entries.filter((e) => e.type !== 'dir' && re.test(e.name))
         if (matches.length === 0) return err(`rm: no files matched '${args[0]}'`)
         return matches.flatMap((m) => {
           const fullPath = dir === '/' ? `/${m.name}` : `${dir}/${m.name}`
