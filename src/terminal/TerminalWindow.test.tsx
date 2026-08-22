@@ -115,4 +115,56 @@ describe('TerminalWindow', () => {
     expect(screen.getByLabelText('Terminal input')).toBe(input)
     expect(input).toHaveValue('')
   })
+
+  it('stepping past the oldest match keeps it displayed instead of blanking the input', async () => {
+    const user = userEvent.setup()
+    render(<TerminalWindow />)
+    const input = getInput()
+
+    await user.type(input, 'pwd')
+    await user.keyboard('{Enter}')
+
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true })
+    fireEvent.keyDown(input, { key: 'p' })
+    expect(input).toHaveValue('pwd')
+
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true }) // no older match than 'pwd' — should stay put, not clear
+    expect(input).toHaveValue('pwd')
+    expect(screen.getByText("(failed reverse-i-search)`p':")).toBeInTheDocument()
+  })
+
+  it('Escape restores the not-yet-submitted draft that was showing before Ctrl+R', async () => {
+    const user = userEvent.setup()
+    render(<TerminalWindow />)
+    const input = getInput()
+
+    await user.type(input, 'unsaved-draft')
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true })
+    fireEvent.keyDown(input, { key: 'Escape' })
+
+    expect(input).toHaveValue('unsaved-draft')
+  })
+
+  it('Escape resets history navigation, so a later ArrowUp starts from the most recent entry again', async () => {
+    const user = userEvent.setup()
+    render(<TerminalWindow />)
+    const input = getInput()
+
+    await user.type(input, 'aaa')
+    await user.keyboard('{Enter}')
+    await user.type(input, 'bbb')
+    await user.keyboard('{Enter}')
+    await user.type(input, 'ccc')
+    await user.keyboard('{Enter}')
+
+    fireEvent.keyDown(input, { key: 'ArrowUp' })
+    fireEvent.keyDown(input, { key: 'ArrowUp' })
+    expect(input).toHaveValue('bbb') // two steps back from the end
+
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true })
+    fireEvent.keyDown(input, { key: 'Escape' })
+
+    fireEvent.keyDown(input, { key: 'ArrowUp' })
+    expect(input).toHaveValue('ccc') // most recent again, not resuming from the stale mid-history position
+  })
 })

@@ -16,7 +16,7 @@ import {
   resetSync,
   resetFilesystem,
 } from './engines'
-import { runCommandLine, type CommandContext } from '../terminal/commands'
+import { runCommandLine, substituteEnvVars, type CommandContext } from '../terminal/commands'
 import { syscallTraceFor } from '../terminal/syscallTrace'
 import { simBus } from '../shared/eventBus'
 import { writeSharedSessionState } from './urlState'
@@ -265,7 +265,11 @@ export const useSimStore = create<SimStore>((set, get) => ({
     const trimmed = input.trim()
     if (!trimmed) return
 
-    if (trimmed === 'clear') {
+    // $VAR substitution (roadmap-v4.md §1.2) runs "before a line runs" —
+    // resolve it here too, or `export X=clear` then typing `$X` would fall
+    // through to commands.ts's own inert `clear` case instead of actually
+    // clearing (found by code review).
+    if (substituteEnvVars(trimmed, (name) => get().env[name]) === 'clear') {
       set((s) => ({ terminalLines: [], lastAnnouncement: 'screen cleared', version: s.version + 1 }))
       return
     }

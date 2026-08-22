@@ -344,6 +344,23 @@ describe('executeCommand', () => {
     expect(out).toEqual([{ text: 'Removed /a.txt.' }, { text: 'Removed /b.txt.' }])
   })
 
+  it('rm with a literal "?" in the pattern only matches files that actually contain one (found by code review)', () => {
+    const fsDelete = vi.fn(() => ({ ok: true as const }))
+    const ctx = makeContext({
+      fsList: () => ({
+        ok: true,
+        entries: [
+          { name: 'log?.txt', type: 'file' },
+          { name: 'logs.txt', type: 'file' },
+        ],
+      }),
+      fsDelete,
+    })
+    executeCommand('rm log?.txt', ctx)
+    expect(fsDelete).toHaveBeenCalledWith('/log?.txt')
+    expect(fsDelete).not.toHaveBeenCalledWith('/logs.txt')
+  })
+
   describe('working directory (roadmap-v3.md §1.1)', () => {
     it('cd with no argument goes to root', () => {
       const ctx = makeContext()
@@ -578,6 +595,14 @@ describe('executeCommand', () => {
 
     it('rejects export with no = at all', () => {
       expect(executeCommand('export FOO', makeContext())[0]).toMatchObject({ isError: true })
+    })
+
+    it('a later segment on the same chained line sees a variable set earlier on that line, not its stale value', () => {
+      const ctx = makeContext()
+      expect(texts('export A=1 && echo $A', ctx)).toEqual(['1'])
+
+      executeCommand('export B=old', ctx)
+      expect(texts('export B=new && echo $B', ctx)).toEqual(['new'])
     })
 
     it('substitution reaches into a path argument', () => {

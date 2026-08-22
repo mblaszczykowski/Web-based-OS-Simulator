@@ -97,6 +97,11 @@ export function TerminalWindow() {
   const [search, setSearch] = useState<SearchState | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  // Whatever was typed but not yet submitted when Ctrl+R was pressed — real
+  // bash/zsh restore this on an aborted (Escape) search rather than
+  // discarding it (found by code review: this used to just be wiped with
+  // no way back).
+  const preSearchValueRef = useRef('')
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
@@ -134,18 +139,28 @@ export function TerminalWindow() {
     setValue([...prefixParts, completion].join(' ') + trailer)
   }
 
-  /** Re-runs the search for `query` and mirrors the match (or '') into the normal input buffer, so Enter can just reuse submit(). */
+  /**
+   * Re-runs the search for `query` and, only on an actual match, mirrors it
+   * into the normal input buffer (so Enter can just reuse submit()). On no
+   * match, `value` is deliberately left alone — real bash/zsh keep showing
+   * the last successful match with a "failed" label rather than blanking
+   * the line, whether that's from typing a character with no match at all
+   * or from stepping past the oldest match with a repeated Ctrl+R (found
+   * by code review: this used to unconditionally blank `value` on a null
+   * `matchIndex`, wiping the visible match in both cases).
+   */
   function updateSearch(query: string, fromIndex: number) {
     const matchIndex = findMatch(history, query, fromIndex)
     setSearch({ query, matchIndex })
-    setValue(matchIndex !== null ? history[matchIndex]! : '')
+    if (matchIndex !== null) setValue(history[matchIndex]!)
   }
 
   function handleSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>, current: SearchState) {
     e.preventDefault()
     if (e.key === 'Escape') {
       setSearch(null)
-      setValue('')
+      setValue(preSearchValueRef.current)
+      setHistoryIndex(null) // found by code review: left stale otherwise, so a post-abort ArrowUp resumed from wherever it was before the search instead of the most recent entry
     } else if (e.key === 'Enter') {
       if (current.matchIndex === null) return // nothing matched — stay in search rather than submit a blank line
       setSearch(null)
@@ -164,6 +179,7 @@ export function TerminalWindow() {
     if (e.ctrlKey && e.key === 'r') {
       e.preventDefault()
       if (search === null) {
+        preSearchValueRef.current = value
         setSearch({ query: '', matchIndex: null })
         setValue('')
       } else {

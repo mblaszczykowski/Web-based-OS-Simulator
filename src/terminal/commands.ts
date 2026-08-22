@@ -284,24 +284,43 @@ const VAR_REF = /\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)/g
 
 /**
  * Substitutes `$VAR`/`${VAR}` with an exported value, or an empty string if
- * unset — roadmap-v4.md §1.2. Applied once to the whole raw input line,
- * before `;`/`&&`/`|` are split, so it works uniformly across a chained or
- * piped line. This is deliberately the ceiling of "variables": no quoting
- * exists in this shell (see splitSequence's comment) and none is added
- * here, so a literal `$` that doesn't match an identifier just passes
- * through unchanged, and there's no way to prevent substitution inside a
- * value that happens to contain one.
+ * unset — roadmap-v4.md §1.2. Applied per `;`/`&&`-segment, right before
+ * that segment runs (see runCommandLine) — NOT once upfront over the whole
+ * raw line — so `export X=1 && echo $X` sees the value `export` just set,
+ * the same left-to-right ordering a real shell gives you (found by code
+ * review: substituting everything upfront meant a later segment always saw
+ * whatever VAR held *before* the line started, even one set earlier in the
+ * very same line). This is deliberately the ceiling of "variables": no
+ * quoting exists in this shell (see splitSequence's comment) and none is
+ * added here, so a literal `$` that doesn't match an identifier just
+ * passes through unchanged, and there's no way to prevent substitution
+ * inside a value that happens to contain one.
+ *
+ * Takes `getEnv` directly rather than a full `CommandContext` so callers
+ * that only have env access — store.ts's `clear`-command fast path, which
+ * runs before a full CommandContext exists — can resolve a line without
+ * fabricating one (found by code review: that fast path compared the raw,
+ * unsubstituted line against `'clear'`, so e.g. `export X=clear` then
+ * typing `$X` silently fell through to commands.ts's own inert `clear`
+ * case instead of actually clearing the screen).
  */
-function substituteEnvVars(input: string, ctx: CommandContext): string {
+function substituteEnvVars(input: string, getEnv: (name: string) => string | undefined): string {
   return input.replace(VAR_REF, (_match, braced: string | undefined, bare: string | undefined) => {
     const name = braced ?? bare ?? ''
-    return ctx.getEnv(name) ?? ''
+    return getEnv(name) ?? ''
   })
 }
 
-/** Translates a simple `*`-only glob into an anchored RegExp. */
+/**
+ * Translates a simple `*`-only glob into an anchored RegExp. `?` is not a
+ * supported wildcard here — it must be escaped to a literal along with the
+ * other regex metacharacters, not left to compile as "the preceding
+ * character is optional" (found by code review: `rm log?*.txt` was
+ * matching `log*.txt` too, silently deleting files with no `?` in their
+ * name at all).
+ */
 function globToRegExp(pattern: string): RegExp {
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
+  const escaped = pattern.replace(/[.+^${}()|[\]\\?]/g, '\\$&').replace(/\*/g, '.*')
   return new RegExp(`^${escaped}$`)
 }
 
@@ -758,20 +777,24 @@ function runPipeline(text: string, ctx: CommandContext, ran: RanCommand[]): Comm
  * `;`/`&&`-joined line).
  */
 export function runCommandLine(input: string, ctx: CommandContext): CommandLineResult {
-  const segments = splitSequence(substituteEnvVars(input, ctx))
+  const segments = splitSequence(input)
   const lines: CommandOutputLine[] = []
   const ran: RanCommand[] = []
   let lastFailed = false
 
   for (const segment of segments) {
     if (segment.connector === '&&' && lastFailed) continue
-    const segmentLines = runPipeline(segment.text, ctx, ran)
+    const resolvedText = substituteEnvVars(segment.text, ctx.getEnv)
+    const segmentLines = runPipeline(resolvedText, ctx, ran)
     lines.push(...segmentLines)
     lastFailed = segmentLines.some((l) => l.isError)
   }
 
   return { lines, ran }
 }
+
+/** Exported for store.ts's `clear`-command fast path — see substituteEnvVars()'s doc comment. */
+export { substituteEnvVars }
 
 /** Convenience wrapper over runCommandLine() for callers that only need the rendered output (e.g. tests). */
 export function executeCommand(input: string, ctx: CommandContext): CommandOutputLine[] {

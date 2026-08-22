@@ -29,7 +29,17 @@ export function syscallTraceFor(input: string, ok: boolean, cwd: string): string
       return ['sysinfo(&info) = 0']
 
     case 'run': {
-      const name = args.join(' ') || 'proc'
+      // run --threads=<n> (roadmap-v4.md §2.1) spawns n separate scheduler
+      // entries sharing one address space — n forks, not one, and the flag
+      // itself isn't part of the program name (found by code review: this
+      // case predates §2.1 and didn't know about the flag, so it used to
+      // fold it straight into the traced execve() path).
+      const threadsArg = args.find((a) => a.startsWith('--threads='))
+      const name = args.filter((a) => a !== threadsArg).join(' ') || 'proc'
+      if (threadsArg) {
+        const count = threadsArg.slice('--threads='.length)
+        return [`fork() = <pid> (x${count})`, `execve("/bin/${name}", [...], [...]) = 0 (x${count})`]
+      }
       return ['fork() = <pid>', `execve("/bin/${name}", [...], [...]) = 0`]
     }
 
