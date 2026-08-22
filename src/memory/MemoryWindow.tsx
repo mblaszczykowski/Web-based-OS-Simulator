@@ -11,6 +11,7 @@ export function MemoryWindow() {
   const clockHand = memory.getClockHand()
   const blocks = memory.getContiguousBlocks()
   const metrics = memory.getMetrics()
+  const tlbEntries = memory.getTlbEntries()
   const usedFrames = frames.filter((f) => f.owner !== null).length
   const kernelFrames = frames.filter((f) => f.owner?.pid === 0).length
 
@@ -21,7 +22,13 @@ export function MemoryWindow() {
   const totalArena = blocks.reduce((sum, b) => sum + b.size, 0)
 
   return (
-    <WindowFrame id="memory" title="Memory" subtitle="Clock paging" accent="var(--accent)" icon={<MemoryIcon />}>
+    <WindowFrame
+      id="memory"
+      title="Memory"
+      subtitle={metrics.thrashing ? '⚠ thrashing' : 'Clock paging'}
+      accent="var(--accent)"
+      icon={<MemoryIcon />}
+    >
       <div className="win-body">
         <div className="mem-sidebar">
           <div className="field">
@@ -65,6 +72,39 @@ export function MemoryWindow() {
             <span className="stat-value" style={{ fontSize: 15 }}>
               {metrics.swappedPages} page(s)
             </span>
+          </div>
+          <div className="field">
+            <span className="label">TLB ({tlbEntries.length}/8) &mdash; hit ratio {Math.round(metrics.tlbHitRatio * 100)}%</span>
+            <div className="ptable-wrap" style={{ maxHeight: 110 }}>
+              <div className="ptable-row head" style={{ gridTemplateColumns: '40px 44px 44px' }}>
+                <span>PID</span>
+                <span>Page</span>
+                <span>Frame</span>
+              </div>
+              {tlbEntries.length === 0 ? (
+                <div className="ptable-row">
+                  <span className="term-muted">empty</span>
+                </div>
+              ) : (
+                tlbEntries.map((e) => (
+                  <div className="ptable-row" style={{ gridTemplateColumns: '40px 44px 44px' }} key={`${e.pid}:${e.page}`}>
+                    <span>{e.pid}</span>
+                    <span>{e.page}</span>
+                    <span>{e.frame}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          <div className="field">
+            <span className="label">
+              Recent fault rate (last 20) &mdash; {Math.round(metrics.recentFaultRate * 100)}%
+            </span>
+            {metrics.thrashing && (
+              <span className="stat-value" style={{ color: 'var(--warning)', fontSize: 13 }}>
+                ⚠ thrashing — paging is crowding out real work
+              </span>
+            )}
           </div>
         </div>
 
