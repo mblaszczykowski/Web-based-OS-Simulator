@@ -249,7 +249,14 @@ describe('SchedulerEngine — stop() / cont() (roadmap-v3.md §2.2, SIGSTOP/SIGC
     expect(p1.queueLevel).toBe(1)
   })
 
-  it('regression: resuming a process stopped mid-I/O-burst treats that I/O as complete instead of miscounting the wait as CPU time (found by code review)', () => {
+  it('resuming a process stopped mid-I/O-burst puts it back in WAITING, with the rest of that wait still to serve (roadmap-v5.md §1.1)', () => {
+    // Supersedes an earlier behaviour where cont() instantly *completed*
+    // the I/O burst, inferred from `burstIndex % 2`. That heuristic only
+    // held while a self-timed I/O burst was the sole possible reason to
+    // wait; the reason is now recorded on the process, so resuming can
+    // simply put it back where it was instead of fabricating a
+    // completion. The wait itself is unaffected by having been stopped —
+    // no burst is consumed while STOPPED, exactly like a CPU burst isn't.
     const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
     // CPU 2, IO 5, CPU 3 — burstIndex 1 (the IO burst) is where we'll stop it.
     const p1 = createProcess('interactive', 'interactive', [2, 5, 3])
@@ -258,25 +265,40 @@ describe('SchedulerEngine — stop() / cont() (roadmap-v3.md §2.2, SIGSTOP/SIGC
     engine.tick() // burns the 2-tick CPU burst -> WAITING, burstIndex 1, burstRemaining 5
     expect(p1.state).toBe('WAITING')
     expect(p1.burstIndex).toBe(1)
+    expect(p1.blockedOn).toBe('io-burst')
+
+    engine.tick() // one tick of the I/O wait actually elapses: 5 -> 4
+    expect(p1.burstRemaining).toBe(4)
 
     engine.stop(p1.pid)
     expect(p1.state).toBe('STOPPED')
+    expect(p1.blockedOn).toBe('io-burst') // still blocked — being stopped doesn't resolve the wait
+    engine.tick()
+    engine.tick()
+    expect(p1.burstRemaining).toBe(4) // frozen: no I/O progress while stopped
 
     const resumed = engine.cont(p1.pid)
-    expect(resumed?.state).toBe('READY')
-    // The I/O burst is treated as having just completed: burstIndex
-    // advances to the final CPU burst, with a fresh slice — exactly what
-    // the real I/O-return step in tick() would have done.
-    expect(p1.burstIndex).toBe(2)
-    expect(p1.burstRemaining).toBe(3)
-    expect(p1.sliceRemaining).toBe(4)
+    expect(resumed?.state).toBe('WAITING')
+    expect(p1.burstIndex).toBe(1)
+    expect(p1.burstRemaining).toBe(4)
 
-    engine.tick() // dispatched
+    for (let i = 0; i < 3; i++) engine.tick()
+    expect(p1.state).toBe('WAITING') // 3 of the remaining 4 I/O ticks served
+    expect(p1.burstRemaining).toBe(1)
+
+    // The 4th tick both resolves the I/O (READY, on to the final CPU
+    // burst) and dispatches it, since nothing else is runnable.
+    engine.tick()
+    expect(p1.state).toBe('RUNNING')
+    expect(p1.blockedOn).toBeNull()
+    expect(p1.burstIndex).toBe(2)
+    expect(p1.burstRemaining).toBe(2) // 3-tick burst, one tick already served
+
     engine.tick()
     engine.tick() // finishes its real final 3-tick CPU burst
     expect(p1.state).toBe('TERMINATED')
     // totalBurstTicks only ever counted genuine CPU bursts (2 + 3 = 5) —
-    // the abandoned I/O wait was never miscounted as CPU work.
+    // the I/O wait was never miscounted as CPU work.
     expect(p1.totalBurstTicks).toBe(5)
   })
 })
@@ -409,5 +431,176 @@ describe('SchedulerEngine — malformed (even-length) bursts array', () => {
     expect(p1.state).toBe('TERMINATED')
     expect(p1.finishTick).toBe(2)
     expect(p1.totalBurstTicks).toBe(1) // exactly the declared CPU burst, no phantom extra tick
+  })
+})
+
+describe('SchedulerEngine — device-owned I/O waits (roadmap-v5.md §1.1)', () => {
+  /** An IoPort that always accepts, recording what it was asked to do. */
+  function recordingPort() {
+    const submitted: { pid: number; sizeHint: number }[] = []
+    return {
+      submitted,
+      port: {
+        submit(pid: number, sizeHint: number) {
+          submitted.push({ pid, sizeHint })
+          return true
+        },
+      },
+    }
+  }
+
+  it('hands the I/O burst to the installed device and does NOT count it down itself', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    const { submitted, port } = recordingPort()
+    engine.setIoPort(port)
+
+    const p1 = createProcess('interactive', 'interactive', [1, 3, 2]) // CPU 1, IO 3, CPU 2
+    engine.spawn(p1)
+
+    engine.tick() // admitted
+    engine.tick() // burns the 1-tick CPU burst -> submits its I/O to the device
+    expect(p1.state).toBe('WAITING')
+    expect(p1.blockedOn).toBe('device')
+    expect(submitted).toEqual([{ pid: p1.pid, sizeHint: 3 }])
+
+    // Far longer than the 3-tick "burst" the old self-timed model would
+    // have counted down — a device wait lasts exactly as long as the
+    // device takes, and nothing else.
+    for (let i = 0; i < 20; i++) engine.tick()
+    expect(p1.state).toBe('WAITING')
+    expect(p1.blockedOn).toBe('device')
+
+    expect(engine.wake(p1.pid)).toBe(true)
+    expect(p1.state).toBe('READY')
+    expect(p1.blockedOn).toBeNull()
+    expect(p1.burstIndex).toBe(2) // returning from the device advances past the I/O burst
+    expect(p1.burstRemaining).toBe(2)
+  })
+
+  it('falls back to the self-timed countdown when the device declines the request', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    engine.setIoPort({ submit: () => false })
+
+    const p1 = createProcess('interactive', 'interactive', [1, 2, 1])
+    engine.spawn(p1)
+    engine.tick()
+    engine.tick() // CPU burst done, device says no
+    expect(p1.blockedOn).toBe('io-burst')
+
+    engine.tick()
+    engine.tick() // the 2-tick I/O burst elapses on the scheduler's own clock
+    expect(p1.blockedOn).toBeNull()
+    expect(p1.burstIndex).toBe(2)
+  })
+
+  it('keeps its queue level across a device wait — a voluntary yield is still never punished (rule 3)', () => {
+    const engine = new SchedulerEngine({ quanta: [2, 8, Infinity], boostInterval: 0 })
+    engine.setIoPort({ submit: () => true })
+    // CPU 4 (burns two 2-tick slices at Q0 -> demoted to Q1), IO, CPU 1.
+    const p1 = createProcess('mixed', 'cpu-bound', [4, 1, 1])
+    engine.spawn(p1)
+    for (let i = 0; i < 5; i++) engine.tick()
+    expect(p1.queueLevel).toBe(1)
+    expect(p1.state).toBe('WAITING')
+
+    engine.wake(p1.pid)
+    expect(p1.queueLevel).toBe(1) // unchanged, and given a full Q1 slice
+    expect(p1.sliceRemaining).toBe(8)
+  })
+
+  it('wake() is a no-op for a self-timed wait, an unknown pid, or a runnable process', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    const p1 = createProcess('a', 'interactive', [1, 5, 1])
+    engine.spawn(p1)
+    engine.tick()
+    expect(engine.wake(p1.pid)).toBe(false) // RUNNING, not blocked
+    engine.tick()
+    expect(p1.blockedOn).toBe('io-burst') // no port installed
+    expect(engine.wake(p1.pid)).toBe(false) // the scheduler owns this one
+    expect(p1.state).toBe('WAITING')
+    expect(engine.wake(999)).toBe(false)
+  })
+
+  it('a device completion arriving while the process is STOPPED is honoured, but SIGSTOP still holds it', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    engine.setIoPort({ submit: () => true })
+    const p1 = createProcess('a', 'interactive', [1, 5, 2])
+    engine.spawn(p1)
+    engine.tick()
+    engine.tick()
+    expect(p1.blockedOn).toBe('device')
+
+    engine.stop(p1.pid)
+    expect(engine.wake(p1.pid)).toBe(true)
+    expect(p1.state).toBe('STOPPED') // the wake doesn't override the signal
+    expect(p1.blockedOn).toBeNull() // ...but the I/O really did complete
+    expect(p1.burstIndex).toBe(2)
+
+    // Dropping that wake instead would strand the process: nothing would
+    // ever complete the same request a second time.
+    expect(engine.cont(p1.pid)?.state).toBe('READY')
+  })
+
+  it('blockOn() parks a runnable process on a pipe and wake() returns it at the same queue level', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    const p1 = createProcess('writer', 'cpu-bound', [10])
+    engine.spawn(p1)
+    engine.tick()
+    expect(p1.state).toBe('RUNNING')
+
+    expect(engine.blockOn(p1.pid, 'pipe')).toBe(true)
+    expect(p1.state).toBe('WAITING')
+    expect(p1.blockedOn).toBe('pipe')
+
+    engine.tick() // nothing runnable — the CPU idles rather than running a blocked process
+    expect(engine.getRunning()).toBeUndefined()
+    expect(p1.burstRemaining).toBe(9) // no burst consumed while blocked
+
+    expect(engine.wake(p1.pid)).toBe(true)
+    expect(p1.state).toBe('READY')
+    expect(p1.burstIndex).toBe(0) // a pipe wait is not an I/O burst — no burst is advanced
+  })
+
+  it('blockOn() refuses a process that is not currently runnable', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    const p1 = createProcess('a', 'cpu-bound', [5])
+    engine.spawn(p1)
+    // Not admitted yet: blocking here would leave it in `waiting` while
+    // tick()'s admission step readies it again a tick later.
+    expect(engine.blockOn(p1.pid, 'pipe')).toBe(false)
+
+    engine.tick()
+    expect(engine.blockOn(p1.pid, 'pipe')).toBe(true)
+    expect(engine.blockOn(p1.pid, 'pipe')).toBe(false) // already blocked
+    expect(engine.blockOn(999, 'pipe')).toBe(false)
+  })
+
+  it('killing a blocked process clears its wait rather than leaving it in the waiting set', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    engine.setIoPort({ submit: () => true })
+    const p1 = createProcess('a', 'interactive', [1, 5, 1])
+    engine.spawn(p1)
+    engine.tick()
+    engine.tick()
+    expect(p1.blockedOn).toBe('device')
+
+    engine.kill(p1.pid)
+    expect(p1.blockedOn).toBeNull()
+    expect(engine.wake(p1.pid)).toBe(false) // a late completion for a dead process is harmless
+    expect(engine.getBlockedCounts()).toEqual({ 'io-burst': 0, device: 0, pipe: 0 })
+  })
+
+  it('getBlockedCounts() reports what each blocked process is actually waiting for', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    engine.setIoPort({ submit: () => true })
+    const onDevice = createProcess('io', 'interactive', [1, 5, 1])
+    const onPipe = createProcess('pipe', 'cpu-bound', [20])
+    engine.spawn(onDevice)
+    engine.spawn(onPipe)
+    engine.tick()
+    engine.tick() // onDevice runs first (spawned first) and blocks on the device
+    engine.blockOn(onPipe.pid, 'pipe')
+
+    expect(engine.getBlockedCounts()).toEqual({ 'io-burst': 0, device: 1, pipe: 1 })
   })
 })

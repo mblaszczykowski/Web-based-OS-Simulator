@@ -15,6 +15,13 @@ export interface IoRequest {
   blockIndex: number
   kind: IoKind
   enqueuedTick: number
+  /**
+   * Process blocked waiting for this request to complete — roadmap-v5.md
+   * §1.1. Undefined for the filesystem's own bookkeeping I/O (block
+   * allocation, swap writes): those are real head movement, but nobody is
+   * sitting in WAITING until they finish.
+   */
+  waiterPid?: number
 }
 
 export interface CompletedIoRequest extends IoRequest {
@@ -33,6 +40,8 @@ export interface IoSchedulerState {
 
 export interface IoSchedulerMetrics {
   cylinderCount: number
+  /** How many cylinders the head crosses per tick — see IoScheduler's constructor. */
+  seekCylindersPerTick: number
   headPosition: number
   direction: 1 | -1
   pendingCount: number
@@ -60,11 +69,28 @@ export class IoScheduler {
   private totalSeekDistance = 0
   private totalWaitTicks = 0
 
-  constructor(private cylinderCount: number) {}
+  /**
+   * `seekCylindersPerTick` is how far the head travels per simulated tick.
+   * It defaults to 1 (one cylinder per tick — the plain model every unit
+   * test in ioScheduler.test.ts is hand-traced against), but the live
+   * filesystem runs it faster (see DEFAULT_FS_CONFIG). That knob only
+   * became load-bearing once processes actually *block* on their requests
+   * (roadmap-v5.md §1.1): at one cylinder per tick a 64-cylinder disk makes
+   * the average request wait ~32 ticks, which is an order of magnitude
+   * longer than the CPU bursts around it and would leave the whole
+   * simulation visibly stalled in WAITING. It changes only how fast the
+   * sweep runs — never its order, which is what SCAN is actually about.
+   */
+  constructor(
+    private cylinderCount: number,
+    private seekCylindersPerTick = 1,
+  ) {}
 
-  enqueue(blockIndex: number, kind: IoKind, tick: number): void {
-    if (blockIndex < 0 || blockIndex >= this.cylinderCount) return // out of range — nothing sensible to schedule
-    this.pending.push({ id: this.nextRequestId++, blockIndex, kind, enqueuedTick: tick })
+  /** Queues a request. Returns false (and queues nothing) for a cylinder this disk doesn't have. */
+  enqueue(blockIndex: number, kind: IoKind, tick: number, waiterPid?: number): boolean {
+    if (blockIndex < 0 || blockIndex >= this.cylinderCount) return false // out of range — nothing sensible to schedule
+    this.pending.push({ id: this.nextRequestId++, blockIndex, kind, enqueuedTick: tick, waiterPid })
+    return true
   }
 
   /**
@@ -76,9 +102,30 @@ export class IoScheduler {
    * inflated by aimless idle motion. When work arrives again the head
    * resumes from wherever it parked, in whatever direction it was already
    * sweeping — exactly like a real SCAN sweep that got caught up.
+   *
+   * Returns everything it serviced this tick, so a caller that has
+   * processes blocked on those requests (app/engines.ts, roadmap-v5.md
+   * §1.1) can wake them without having to poll the completed history and
+   * diff it.
    */
-  step(currentTick: number): void {
-    if (this.pending.length === 0) return
+  step(currentTick: number): CompletedIoRequest[] {
+    const serviced: CompletedIoRequest[] = []
+    // One tick can carry the head across several cylinders (see the
+    // constructor). Repeating the exact single-cylinder sweep below is
+    // deliberate over computing a range: reversal at the two ends, the
+    // 1-cylinder-disk special case and the idle park all keep working
+    // unchanged, and the head can even turn around mid-tick.
+    for (let i = 0; i < this.seekCylindersPerTick; i++) {
+      serviced.push(...this.stepOneCylinder(currentTick))
+    }
+    if (this.completed.length > COMPLETED_HISTORY_LIMIT) {
+      this.completed.splice(0, this.completed.length - COMPLETED_HISTORY_LIMIT)
+    }
+    return serviced
+  }
+
+  private stepOneCylinder(currentTick: number): CompletedIoRequest[] {
+    if (this.pending.length === 0) return []
 
     // A 1-cylinder disk has nowhere to sweep to — cylinder 0 is
     // simultaneously "both ends", so the two branches below would
@@ -95,14 +142,15 @@ export class IoScheduler {
 
     const [serviced, stillPending] = partition(this.pending, (r) => r.blockIndex === this.headPosition)
     this.pending = stillPending
+    const completedNow: CompletedIoRequest[] = []
     for (const req of serviced) {
       this.completedCount++
       this.totalWaitTicks += currentTick - req.enqueuedTick
-      this.completed.push({ ...req, completedTick: currentTick })
+      const done = { ...req, completedTick: currentTick }
+      this.completed.push(done)
+      completedNow.push(done)
     }
-    if (this.completed.length > COMPLETED_HISTORY_LIMIT) {
-      this.completed.splice(0, this.completed.length - COMPLETED_HISTORY_LIMIT)
-    }
+    return completedNow
   }
 
   getState(): IoSchedulerState {
@@ -117,6 +165,7 @@ export class IoScheduler {
   getMetrics(): IoSchedulerMetrics {
     return {
       cylinderCount: this.cylinderCount,
+      seekCylindersPerTick: this.seekCylindersPerTick,
       headPosition: this.headPosition,
       direction: this.direction,
       pendingCount: this.pending.length,
@@ -127,7 +176,15 @@ export class IoScheduler {
     }
   }
 
-  reset(): void {
+  /**
+   * Wipes the queue and every metric. Returns the pids that were still
+   * blocked on a now-discarded request: dropping the queue silently would
+   * leave those processes WAITING on a wakeup that can never arrive, and
+   * the caller (app/engines.ts) is the only place that can actually
+   * release them — see roadmap-v5.md §1.1.
+   */
+  reset(): number[] {
+    const abandoned = this.pending.flatMap((r) => (r.waiterPid === undefined ? [] : [r.waiterPid]))
     this.pending = []
     this.completed = []
     this.nextRequestId = 1
@@ -136,6 +193,7 @@ export class IoScheduler {
     this.completedCount = 0
     this.totalSeekDistance = 0
     this.totalWaitTicks = 0
+    return abandoned
   }
 }
 

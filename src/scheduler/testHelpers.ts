@@ -27,6 +27,7 @@ export function makeProcess(overrides: Partial<Process> = {}): Process {
     burstIndex: 0,
     burstRemaining: 5,
     sliceRemaining: 4,
+    blockedOn: null,
     totalWaitingTicks: 0,
     totalBurstTicks: 0,
     contextSwitches: 0,

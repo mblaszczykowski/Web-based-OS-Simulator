@@ -1,4 +1,4 @@
-import { INIT_PID, type GanttSample, type Process, type ProcessKind, type QueueLevel } from '../shared/types'
+import { INIT_PID, type BlockReason, type GanttSample, type Process, type ProcessKind, type QueueLevel } from '../shared/types'
 import { simBus } from '../shared/eventBus'
 
 export interface SchedulerConfig {
@@ -81,11 +81,40 @@ export function createProcess(
     burstIndex: 0,
     burstRemaining: bursts[0] ?? 0,
     sliceRemaining: DEFAULT_SCHEDULER_CONFIG.quanta[0],
+    blockedOn: null,
     totalWaitingTicks: 0,
     totalBurstTicks: 0,
     contextSwitches: 0,
     pageCount: opts.pageCount ?? 2 + Math.floor(Math.random() * 5),
   }
+}
+
+/**
+ * The seam between the scheduler and a real I/O device — roadmap-v5.md
+ * §1.1. Before this existed, an "I/O burst" was a number the scheduler
+ * counted down by itself, so a process's I/O had no relationship to the
+ * disk the filesystem module was simultaneously modelling: `cat` never
+ * blocked anything, and a process in WAITING never moved the disk head.
+ *
+ * This keeps SchedulerEngine dependency-free (plan.md §5) — it knows only
+ * that *something* may take ownership of a wait, not what a disk, a
+ * cylinder or SCAN are. app/engines.ts installs the real implementation,
+ * exactly like it already coordinates swap between memory and filesystem
+ * (ADR-0004).
+ */
+export interface IoPort {
+  /**
+   * Called when a process's CPU burst ends and its next burst is an I/O
+   * one. Return true to take ownership of the wait — the process then
+   * stays WAITING until wake() is called for it. Return false to decline
+   * (e.g. the device is unavailable), and the scheduler falls back to the
+   * original self-timed countdown so a process can never be lost.
+   *
+   * `sizeHint` is the generated I/O burst length. A real device decides
+   * its own service time (here: how far the head has to travel), so this
+   * is genuinely only a hint about how much work was asked for.
+   */
+  submit(pid: number, sizeHint: number): boolean
 }
 
 /** How many TERMINATED processes to keep around (for the process list / getProcesses()) before pruning the oldest. */
@@ -107,7 +136,13 @@ const MAX_TERMINATED_HISTORY = 15
 export class SchedulerEngine {
   private processes = new Map<number, Process>()
   private queues: [number[], number[], number[]] = [[], [], []]
+  /**
+   * Every WAITING process, whatever it's waiting for. Only the ones with
+   * `blockedOn === 'io-burst'` are counted down by tick(); the rest are
+   * owned by whoever blocked them and only leave via wake().
+   */
   private waiting = new Set<number>()
+  private ioPort: IoPort | null = null
   private pendingArrivals: number[] = []
   private tickCount = 0
   private lastBoostTick = 0
@@ -171,6 +206,7 @@ export class SchedulerEngine {
     this.pendingArrivals = this.pendingArrivals.filter((p) => p !== pid)
 
     process.state = 'TERMINATED'
+    process.blockedOn = null
     process.finishTick = this.tickCount
     this.recordTermination(process, 'killed')
     return process
@@ -193,47 +229,146 @@ export class SchedulerEngine {
     this.queues[process.queueLevel] = this.queues[process.queueLevel].filter((p) => p !== pid)
     this.waiting.delete(pid)
     this.pendingArrivals = this.pendingArrivals.filter((p) => p !== pid)
+    // `blockedOn` is deliberately left as-is: a process stopped while
+    // blocked is still blocked, and cont() below uses that to put it back
+    // where it was rather than jumping it to READY (roadmap-v5.md §1.1).
     process.state = 'STOPPED'
     return process
   }
 
   /**
-   * SIGCONT — resumes into READY at the process's last queue level, never
-   * demoting it for having been stopped. Whether it also gets a *fresh*
-   * slice depends on what kind of burst it was paused mid-way through
-   * (bursts[] alternates CPU/IO/CPU/... starting and ending on CPU — see
-   * generateBursts() — so burstIndex's parity tells us which):
-   *  - Stopped mid-CPU-burst (RUNNING, or READY about to run one): resumes
-   *    with whatever sliceRemaining/burstRemaining it already had. Fixed
-   *    from an earlier version that unconditionally reset sliceRemaining
-   *    to a full quantum here — that let repeated SIGSTOP/SIGCONT grant an
-   *    unlimited string of fresh quanta at Q0, defeating MLFQ demotion
-   *    entirely (found by code review).
-   *  - Stopped mid-I/O-burst (WAITING): the same deliberate simplification
-   *    as before — rather than resuming the remainder of that I/O wait, it
-   *    completes that burst instantly (advancing burstIndex/burstRemaining
-   *    exactly like the real I/O-return step in tick() does) and gets a
-   *    fresh slice for the CPU burst it's about to start. This has to
-   *    actually advance burstIndex, not just jump to READY — the RUNNING
-   *    branch in tick() has no idea a paused burst was really an I/O one
-   *    and would otherwise silently misaccount it as CPU time, permanently
-   *    shifting which of the process's remaining bursts count as CPU vs
-   *    I/O (also found by code review).
+   * SIGCONT — resumes a stopped process at its last queue level, never
+   * demoting it for having been stopped. Where it resumes *to* depends on
+   * whether it was blocked when the SIGSTOP landed:
+   *  - Stopped while runnable (RUNNING, or READY): back to READY, keeping
+   *    whatever sliceRemaining/burstRemaining it already had. Not a fresh
+   *    quantum — an earlier version reset sliceRemaining here, which let
+   *    repeated SIGSTOP/SIGCONT grant an unlimited string of fresh quanta
+   *    at Q0 and defeat MLFQ demotion entirely (found by code review).
+   *  - Stopped while blocked (WAITING, `blockedOn !== null`): back to
+   *    WAITING, still blocked on the same thing. This replaces the old
+   *    "instantly complete the I/O burst" simplification, which inferred
+   *    the wait from `burstIndex % 2` — a heuristic that only ever worked
+   *    while a self-timed I/O burst was the single possible reason to
+   *    wait. It can't survive roadmap-v5.md §1.1/§1.2, where a process can
+   *    just as well be parked on a real disk request or a pipe, so the
+   *    reason is now recorded (Process.blockedOn) instead of guessed, and
+   *    resuming simply puts the process back where it was. A device wake
+   *    that arrives *while* it's stopped isn't lost either — wake() clears
+   *    blockedOn without readying it, so this lands in the runnable branch
+   *    above.
    */
   cont(pid: number): Process | undefined {
     const process = this.processes.get(pid)
     if (!process || process.state === 'TERMINATED') return undefined
     if (process.state !== 'STOPPED') return process // idempotent — signalling a process that isn't stopped is harmless
 
-    const wasWaitingOnIO = process.burstIndex % 2 === 1
-    if (wasWaitingOnIO) {
-      process.burstIndex++
-      process.burstRemaining = process.bursts[process.burstIndex] ?? 0
-      process.sliceRemaining = this.config.quanta[process.queueLevel]
+    if (process.blockedOn !== null) {
+      process.state = 'WAITING'
+      this.waiting.add(pid)
+      return process
     }
     process.state = 'READY'
     this.queues[process.queueLevel].push(pid)
     return process
+  }
+
+  /**
+   * Installs (or clears, with null) the device that owns I/O waits — see
+   * IoPort. Nothing calls this in a plain unit test, which is exactly why
+   * the self-timed fallback still exists: SchedulerEngine on its own is
+   * still a complete, hand-traceable MLFQ implementation.
+   */
+  setIoPort(port: IoPort | null): void {
+    this.ioPort = port
+  }
+
+  /**
+   * Blocks a runnable process on something outside the scheduler — a pipe
+   * that's full/empty (roadmap-v5.md §1.2), never an I/O burst (those go
+   * through tick()'s own burst-completion path). The process keeps its
+   * queue level and its remaining burst: it is parked, not punished, the
+   * same Rule-3 treatment a voluntary I/O yield gets.
+   *
+   * Returns false for a process that isn't currently runnable — already
+   * blocked, stopped, terminated or not admitted yet. Blocking a
+   * not-yet-admitted process would strand it: tick()'s admission step
+   * would ready it again a tick later while it's still in `waiting`,
+   * leaving it in two structures at once.
+   */
+  blockOn(pid: number, reason: Exclude<BlockReason, 'io-burst'>): boolean {
+    const process = this.processes.get(pid)
+    if (!process) return false
+    if (process.state !== 'RUNNING' && process.state !== 'READY') return false
+
+    this.queues[process.queueLevel] = this.queues[process.queueLevel].filter((p) => p !== pid)
+    process.state = 'WAITING'
+    process.blockedOn = reason
+    this.waiting.add(pid)
+    return true
+  }
+
+  /**
+   * The "interrupt": whatever owned this process's wait is telling the
+   * scheduler it's finished — roadmap-v5.md §1.1. Returns false when
+   * there was no externally-owned wait to end (unknown pid, terminated,
+   * runnable already, or waiting on a self-timed `io-burst` the scheduler
+   * resolves itself).
+   *
+   * A wake for a STOPPED process is honoured but doesn't ready it — the
+   * device really has finished, so `blockedOn` is cleared and the burst
+   * advanced, but SIGSTOP still means stopped until a SIGCONT arrives.
+   * Dropping the wake instead would leave that process permanently
+   * blocked on a request nobody will ever complete a second time.
+   */
+  wake(pid: number): boolean {
+    const process = this.processes.get(pid)
+    if (!process || process.state === 'TERMINATED') return false
+    const reason = process.blockedOn
+    if (reason === null || reason === 'io-burst') return false
+
+    process.blockedOn = null
+    this.waiting.delete(pid)
+    // A device wait stands in for the I/O burst the process was on, so
+    // returning from it advances past that burst exactly like the
+    // self-timed path in tick() does.
+    if (reason === 'device' && this.advancePastIoBurst(process)) return true
+    if (process.state === 'STOPPED') return true
+
+    process.state = 'READY'
+    // Rule 3: no demotion on return from I/O — same queue level as before.
+    process.sliceRemaining = this.config.quanta[process.queueLevel]
+    this.queues[process.queueLevel].push(pid)
+    return true
+  }
+
+  /**
+   * Moves a process off the I/O burst it was serving and onto the next CPU
+   * burst. Returns true if that terminated it instead — see the long note
+   * in tick()'s I/O resolution step for why a run off the end of `bursts`
+   * terminates rather than scheduling a phantom CPU tick.
+   */
+  private advancePastIoBurst(process: Process): boolean {
+    process.burstIndex++
+    if (process.burstIndex >= process.bursts.length) {
+      process.state = 'TERMINATED'
+      process.blockedOn = null
+      process.finishTick = this.tickCount
+      this.recordTermination(process, 'natural')
+      return true
+    }
+    process.burstRemaining = process.bursts[process.burstIndex]!
+    return false
+  }
+
+  /** How many processes are blocked for each reason — surfaced by `ps`/`top` and the scheduler window. */
+  getBlockedCounts(): Record<BlockReason, number> {
+    const counts: Record<BlockReason, number> = { 'io-burst': 0, device: 0, pipe: 0 }
+    for (const pid of this.waiting) {
+      const reason = this.processes.get(pid)?.blockedOn
+      if (reason) counts[reason]++
+    }
+    return counts
   }
 
   getProcess(pid: number): Process | undefined {
@@ -282,32 +417,31 @@ export class SchedulerEngine {
     }
     this.pendingArrivals = []
 
-    // 2. Resolve I/O completions.
+    // 2. Resolve I/O completions — only for the self-timed waits this
+    //    engine owns. A process parked on a real device or a pipe
+    //    (roadmap-v5.md §1.1/§1.2) is deliberately untouched here: nothing
+    //    counts down, and it leaves this set only when wake() says the
+    //    thing it's actually waiting for has happened.
     for (const pid of [...this.waiting]) {
       const process = this.processes.get(pid)
       if (!process) {
         this.waiting.delete(pid)
         continue
       }
+      if (process.blockedOn !== 'io-burst') continue
       process.burstRemaining--
       if (process.burstRemaining <= 0) {
         this.waiting.delete(pid)
-        process.burstIndex++
-        if (process.burstIndex >= process.bursts.length) {
-          // A well-formed bursts array always starts and ends on a CPU
-          // burst (see the class docs), so an I/O burst is never the
-          // last element — this only fires for a malformed (even-length)
-          // array. Terminating immediately, rather than defaulting
-          // burstRemaining to 0 and scheduling a phantom CPU tick next
-          // tick, keeps totalBurstTicks exactly equal to the sum of the
-          // array's declared CPU-position entries no matter what the
-          // caller passed in.
-          process.state = 'TERMINATED'
-          process.finishTick = this.tickCount
-          this.recordTermination(process, 'natural')
-          continue
-        }
-        process.burstRemaining = process.bursts[process.burstIndex]!
+        process.blockedOn = null
+        // A well-formed bursts array always starts and ends on a CPU
+        // burst (see the class docs), so an I/O burst is never the
+        // last element — running off the end only happens for a
+        // malformed (even-length) array. Terminating immediately, rather
+        // than defaulting burstRemaining to 0 and scheduling a phantom
+        // CPU tick next tick, keeps totalBurstTicks exactly equal to the
+        // sum of the array's declared CPU-position entries no matter what
+        // the caller passed in.
+        if (this.advancePastIoBurst(process)) continue
         process.state = 'READY'
         // Rule 3: no demotion on return from I/O — same queue level as before.
         process.sliceRemaining = this.config.quanta[process.queueLevel]
@@ -399,9 +533,18 @@ export class SchedulerEngine {
         winner.finishTick = this.tickCount
         this.recordTermination(winner, 'natural')
       } else {
+        // The CPU burst finished and the next burst is an I/O one. Offer
+        // it to the installed device first (roadmap-v5.md §1.1): if the
+        // device takes it, the wait is real — the process sits here until
+        // the disk head actually reaches its request and calls wake().
+        // With no device installed, or one that declines, the original
+        // self-timed countdown in step 2 above resolves it instead, so
+        // this engine remains complete and hand-traceable on its own.
         winner.burstIndex++
         winner.burstRemaining = winner.bursts[winner.burstIndex] ?? 0
+        const takenByDevice = this.ioPort?.submit(winner.pid, winner.burstRemaining) ?? false
         winner.state = 'WAITING'
+        winner.blockedOn = takenByDevice ? 'device' : 'io-burst'
         this.waiting.add(winner.pid)
       }
     } else if (winner.sliceRemaining <= 0) {

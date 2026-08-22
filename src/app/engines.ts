@@ -9,7 +9,7 @@
 import { INIT_PID, SHELL_PID, type Process, type ProcessKind } from '../shared/types'
 import { SchedulerEngine, createProcess } from '../scheduler/engine'
 import { MemoryEngine } from '../memory/engine'
-import { FilesystemEngine } from '../filesystem/engine'
+import { FilesystemEngine, DEFAULT_FS_CONFIG } from '../filesystem/engine'
 import {
   loadFilesystemState,
   saveFilesystemState,
@@ -52,6 +52,37 @@ export function resetSync(unsafe: boolean): void {
 // A couple of frames "reserved" for the kernel so the RAM grid looks like a
 // real machine's memory map from the very first render.
 memory.reserveKernelFrames(2)
+
+// --------------------------------------------------------------------------
+// Real I/O blocking (roadmap-v5.md §1.1) — the second real integration
+// between two engines, built the same way as swap: neither engine imports
+// the other, and this module is the only place that knows both exist
+// (ADR-0004).
+//
+// Before this, the simulator held two unrelated notions of "I/O": the
+// scheduler counted an I/O burst down by itself, while the filesystem's
+// SCAN queue was fed purely by file operations. A process in WAITING never
+// moved the disk head, and `iostat` and the Gantt chart described two
+// disconnected worlds. Now the scheduler hands its I/O burst to the disk
+// and the process stays blocked until the head actually reaches it.
+//
+// Which cylinder a process asks for is drawn uniformly at random. A real
+// process's I/O targets its own file's blocks, but this simulator's
+// synthetic workload (`run compiler`) owns no files — and a uniformly
+// random request stream over the cylinders is exactly the reference
+// workload SCAN is judged against in the textbook, so it's the honest
+// stand-in rather than a shortcut.
+scheduler.setIoPort({
+  submit(pid) {
+    // A crashed disk rejects everything until `fsck`. Declining here (so
+    // the scheduler falls back to its self-timed countdown) rather than
+    // blocking is what keeps `crash` from silently freezing every process
+    // that happens to reach an I/O burst before the user runs `fsck`.
+    if (filesystem.isCrashed()) return false
+    const cylinder = Math.floor(Math.random() * DEFAULT_FS_CONFIG.blockCount)
+    return filesystem.requestDeviceIo(cylinder, Math.random() < 0.7 ? 'read' : 'write', pid)
+  },
+})
 
 const PROCESS_NAME_POOL = [
   'compiler',
@@ -342,7 +373,20 @@ const AUTO_SPAWN_CAP = 7
 /** Advance the whole simulation by one tick and return what the scheduler ran. */
 export function stepSimulation() {
   const result = scheduler.tick()
-  filesystem.advanceTick()
+
+  // Advance the disk, then release whoever it just finished serving. Order
+  // matters: the request a process submitted during scheduler.tick() above
+  // is already queued, so a head that happens to land on it this very tick
+  // wakes it immediately rather than a tick late.
+  for (const completed of filesystem.advanceTick()) {
+    if (completed.waiterPid !== undefined) scheduler.wake(completed.waiterPid)
+  }
+  // A `reset-fs` (or a cross-tab import) throws the pending queue away.
+  // Anything that was blocked on a discarded request would otherwise wait
+  // forever for a completion that no longer exists, so it's released here
+  // instead — the I/O failed, but the process still runs.
+  for (const pid of filesystem.drainAbandonedIoWaiters()) scheduler.wake(pid)
+
   sync.tick()
   network.tick()
 

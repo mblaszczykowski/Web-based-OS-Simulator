@@ -4,6 +4,29 @@
 /** STOPPED is a SIGSTOP pause (roadmap-v3.md §2.2) — distinct from TERMINATED. tick() skips a stopped process entirely (no burst consumed, no waiting accrued) until a SIGCONT returns it to READY. */
 export type ProcessState = 'NEW' | 'READY' | 'RUNNING' | 'WAITING' | 'STOPPED' | 'TERMINATED'
 
+/**
+ * Why a WAITING process is waiting — roadmap-v5.md §1.1. Before this
+ * existed there was exactly one kind of wait (a self-timed I/O burst) and
+ * the scheduler could infer everything about it from `burstIndex`'s parity.
+ * Now a wait can also be owned by something outside the scheduler, which
+ * has to be recorded rather than inferred:
+ *
+ *  - `io-burst`: the original model — a countdown of `burstRemaining` ticks
+ *    resolved by the scheduler itself. Still the fallback whenever no
+ *    device port is installed (pure unit tests) or the device refuses the
+ *    request (e.g. a crashed filesystem).
+ *  - `device`: a real request submitted to the disk (SCAN, see
+ *    filesystem/ioScheduler.ts). The scheduler does NOT count this down —
+ *    the process stays blocked until the disk head actually services its
+ *    request and something calls `wake()`.
+ *  - `pipe`: blocked on a kernel pipe (roadmap-v5.md §1.2) — a full pipe
+ *    for a writer, an empty one for a reader. Also externally woken.
+ *
+ * `io-burst` is the only reason the scheduler resolves on its own; every
+ * other reason means "someone else owns this wakeup".
+ */
+export type BlockReason = 'io-burst' | 'device' | 'pipe'
+
 export type ProcessKind = 'cpu-bound' | 'interactive'
 
 /** MLFQ priority levels. 0 is the highest priority (shortest quantum). */
@@ -52,6 +75,14 @@ export interface Process {
 
   /** How many ticks left in the current MLFQ time slice, once running. */
   sliceRemaining: number
+
+  /**
+   * Why this process is blocked, or null when it isn't — roadmap-v5.md
+   * §1.1. Meaningful whenever state is WAITING, and deliberately preserved
+   * across a SIGSTOP so `cont()` can put a still-blocked process back into
+   * WAITING instead of guessing from burst parity (see BlockReason).
+   */
+  blockedOn: BlockReason | null
 
   /** Bookkeeping used to compute waiting time / turnaround time. */
   totalWaitingTicks: number

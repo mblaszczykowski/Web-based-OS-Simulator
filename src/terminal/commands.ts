@@ -290,6 +290,19 @@ function parseMode(input: string | undefined): number | null {
   return Number(input[0])
 }
 
+/**
+ * The STATE column in `ps`. WAITING alone stopped being enough once a
+ * process could be waiting for genuinely different things (roadmap-v5.md
+ * §1.1/§1.2) — "waiting on the disk head" and "waiting for a pipe reader"
+ * behave nothing alike, and which one it is now determines whether the
+ * process is even reachable by anything the user can do.
+ */
+function formatState(p: Process): string {
+  if (p.state !== 'WAITING' || p.blockedOn === null) return p.state
+  const label = { device: 'disk', pipe: 'pipe', 'io-burst': 'io' }[p.blockedOn]
+  return `WAITING(${label})`
+}
+
 function pct(ratio: number): string {
   return `${Math.round(ratio * 100)}%`
 }
@@ -387,11 +400,11 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       return out(...HELP_TEXT)
 
     case 'ps': {
-      const header = 'PID   STATE       QUEUE  CMD'
+      const header = 'PID   STATE           QUEUE  CMD'
       const rows = ctx.listProcesses().map((p) =>
         [
           String(p.pid).padEnd(6),
-          p.state.padEnd(12),
+          formatState(p).padEnd(16),
           (p.state === 'WAITING' || p.state === 'STOPPED' ? '-' : `Q${p.queueLevel}`).padEnd(7),
           p.name,
         ].join(''),
@@ -404,9 +417,12 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       const procs = ctx.listProcesses()
       const running = procs.filter((p) => p.state === 'RUNNING').length
       const ready = procs.filter((p) => p.state === 'READY').length
-      const waiting = procs.filter((p) => p.state === 'WAITING').length
+      const waiting = procs.filter((p) => p.state === 'WAITING')
+      const onDisk = waiting.filter((p) => p.blockedOn === 'device').length
+      const onPipe = waiting.filter((p) => p.blockedOn === 'pipe').length
       return out(
-        `CPU: ${pct(m.cpuUtilization)}  Procs: ${procs.length} (${running} running, ${ready} ready, ${waiting} waiting)`,
+        `CPU: ${pct(m.cpuUtilization)}  Procs: ${procs.length} (${running} running, ${ready} ready, ${waiting.length} waiting)`,
+        `Blocked: ${onDisk} on disk, ${onPipe} on a pipe, ${waiting.length - onDisk - onPipe} on a self-timed I/O burst`,
         `Avg waiting: ${m.avgWaitingTicks.toFixed(1)} ticks  Avg turnaround: ${m.avgTurnaroundTicks.toFixed(1)} ticks  Ctx switches: ${m.contextSwitches}`,
       )
     }
@@ -635,9 +651,13 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
 
     case 'iostat': {
       const m = ctx.ioMetrics()
+      const blocked = ctx.listProcesses().filter((p) => p.blockedOn === 'device')
       return out(
         `Head: cylinder ${m.headPosition}/${m.cylinderCount - 1}  Queue depth: ${m.pendingCount}  Completed: ${m.completedCount}`,
         `Avg seek distance: ${m.avgSeekDistance.toFixed(1)} cylinders  Avg wait: ${m.avgWaitTicks.toFixed(1)} ticks`,
+        blocked.length === 0
+          ? 'Processes blocked on this disk: none'
+          : `Processes blocked on this disk: ${blocked.map((p) => `P${p.pid}`).join(', ')}`,
       )
     }
 

@@ -108,3 +108,72 @@ describe('IoScheduler — SCAN disk-head scheduling', () => {
     expect(io.getMetrics().totalSeekDistance).toBe(0)
   })
 })
+
+describe('IoScheduler — blocking requests and multi-cylinder seeks (roadmap-v5.md §1.1)', () => {
+  it('carries the waiting pid through to the completion, so the caller knows who to wake', () => {
+    const io = new IoScheduler(8)
+    expect(io.enqueue(2, 'read', 0, 42)).toBe(true)
+    io.step(1)
+    expect(io.step(2)).toMatchObject([{ blockIndex: 2, waiterPid: 42 }])
+  })
+
+  it('reports nothing for the filesystem’s own bookkeeping I/O, which nobody is blocked on', () => {
+    const io = new IoScheduler(8)
+    io.enqueue(1, 'write', 0) // no waiterPid — block allocation, a swap write
+    expect(io.step(1)[0]).toMatchObject({ blockIndex: 1, waiterPid: undefined })
+  })
+
+  it('crosses seekCylindersPerTick cylinders per tick, servicing everything it passes over', () => {
+    const io = new IoScheduler(16, 4)
+    io.enqueue(1, 'read', 0)
+    io.enqueue(3, 'read', 0)
+    io.enqueue(6, 'read', 0)
+
+    const first = io.step(1) // head 0 -> 4, passing 1 and 3
+    expect(first.map((r) => r.blockIndex)).toEqual([1, 3])
+    expect(io.getState().headPosition).toBe(4)
+
+    // 4 -> 6, servicing the last request — then the queue is empty, so the
+    // head parks for the rest of the tick rather than coasting out to 8.
+    const second = io.step(2)
+    expect(second.map((r) => r.blockIndex)).toEqual([6])
+    expect(io.getState().headPosition).toBe(6)
+    expect(io.getMetrics().totalSeekDistance).toBe(6)
+  })
+
+  it('parks mid-tick as soon as the queue empties instead of coasting out the rest of the seek', () => {
+    const io = new IoScheduler(16, 4)
+    io.enqueue(1, 'read', 0)
+    io.step(1)
+    // The request sat one cylinder away, so the head stops there rather
+    // than running the full 4 cylinders it was allowed — an idle disk
+    // parks (see step()), and that has to hold within a tick too, or
+    // totalSeekDistance stops meaning "movement in service of the queue".
+    expect(io.getState().headPosition).toBe(1)
+    expect(io.getMetrics().totalSeekDistance).toBe(1)
+  })
+
+  it('can turn around mid-tick when the sweep reaches an end', () => {
+    const io = new IoScheduler(4, 4) // cylinders 0..3
+    io.enqueue(0, 'read', 0) // sits behind the head — only reachable after the high-end turnaround
+    io.step(1) // 0->1->2->3 (high end), then reverses: 3->2
+    expect(io.getState().direction).toBe(-1)
+    expect(io.getState().headPosition).toBe(2)
+    const rest = io.step(2) // 2->1->0, services the request, then reverses back up to 1
+    expect(rest.map((r) => r.blockIndex)).toEqual([0])
+  })
+
+  it('reset() hands back the pids left blocked on a discarded request', () => {
+    const io = new IoScheduler(8)
+    io.enqueue(5, 'read', 0, 7)
+    io.enqueue(6, 'write', 0, 9)
+    io.enqueue(7, 'write', 0) // no waiter — not reported
+    expect(io.reset().sort()).toEqual([7, 9])
+    expect(io.reset()).toEqual([]) // the queue is empty now; nothing left to abandon
+  })
+
+  it('reports its seek rate in the metrics so the UI can label the head speed honestly', () => {
+    expect(new IoScheduler(8).getMetrics().seekCylindersPerTick).toBe(1)
+    expect(new IoScheduler(8, 4).getMetrics().seekCylindersPerTick).toBe(4)
+  })
+})

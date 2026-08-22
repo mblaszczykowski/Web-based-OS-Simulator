@@ -8,6 +8,19 @@ import { ProcessTree } from './ProcessTree'
 import { buildRunCsv, runExportFilename } from './exportRun'
 import { downloadTextFile } from '../app/download'
 
+/**
+ * What a WAITING process is actually waiting for (roadmap-v5.md §1.1/§1.2).
+ * Shown as a suffix on the state pill rather than a separate column: it
+ * only ever applies to WAITING rows, and "waiting" without a reason stopped
+ * being a useful thing to read once the reason could be a real disk request
+ * or a pipe rather than a self-timed countdown.
+ */
+const BLOCK_REASON_LABEL: Record<string, string> = {
+  device: 'disk',
+  pipe: 'pipe',
+  'io-burst': 'io',
+}
+
 const STATE_PILL_CLASS: Record<string, string> = {
   RUNNING: 'pill--running',
   READY: 'pill--ready',
@@ -87,7 +100,13 @@ export function SchedulerWindow() {
                   <span className="pid">P{p.pid}</span>
                   <span className="proc-name">{p.name}</span>
                   <span className="qtag">{p.state === 'WAITING' || p.state === 'STOPPED' ? '-' : `Q${p.queueLevel}`}</span>
-                  <span className={`pill ${STATE_PILL_CLASS[p.state]}`}>{p.state}</span>
+                  <span
+                    className={`pill ${STATE_PILL_CLASS[p.state]}`}
+                    title={p.blockedOn ? `blocked on: ${BLOCK_REASON_LABEL[p.blockedOn]}` : undefined}
+                  >
+                    {p.state}
+                    {p.state === 'WAITING' && p.blockedOn ? ` · ${BLOCK_REASON_LABEL[p.blockedOn]}` : ''}
+                  </span>
                   {p.state !== 'TERMINATED' && (
                     <button
                       type="button"

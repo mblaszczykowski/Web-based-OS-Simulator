@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { SHELL_PID } from '../shared/types'
-import { memory, spawnProcess, spawnThreadGroup, killProcess } from './engines'
+import { memory, scheduler, filesystem, spawnProcess, spawnThreadGroup, killProcess, stepSimulation } from './engines'
 
 // roadmap-v4.md §2.1 — lightweight threads: several independently-scheduled
 // Process entries sharing exactly one memory allocation. These exercise the
@@ -80,5 +80,71 @@ describe('spawnProcess — ordinary (non-thread) process, unaffected by thread-g
 
     killProcess(process.pid)
     expect(memory.getPageTable(process.pid)).toBeUndefined()
+  })
+})
+
+// roadmap-v5.md §1.1 — the wiring that makes a process's I/O burst a real
+// request to the disk instead of a number the scheduler counts down alone.
+// Like the thread tests above, this exercises the live singletons, because
+// the behavior under test is the coordination in this module: neither
+// SchedulerEngine nor FilesystemEngine knows the other exists.
+describe('real I/O blocking — scheduler ↔ SCAN disk (roadmap-v5.md §1.1)', () => {
+  it('parks a process on the disk queue when it blocks, and wakes it when the head services its request', () => {
+    const process = spawnProcess('ioer', 'interactive', SHELL_PID)
+    // A hand-picked burst sequence: one CPU tick, then I/O. The randomised
+    // generator would work too, but this makes the tick count exact.
+    process.bursts = [1, 4, 1]
+    process.burstRemaining = 1
+
+    let blockedAtTick = -1
+    for (let i = 0; i < 60 && blockedAtTick === -1; i++) {
+      stepSimulation()
+      if (process.blockedOn === 'device') blockedAtTick = i
+    }
+    expect(blockedAtTick).toBeGreaterThanOrEqual(0)
+    expect(process.state).toBe('WAITING')
+    // The wait is real: there is a queued request with this pid on it.
+    expect(filesystem.getIoState().pending.some((r) => r.waiterPid === process.pid)).toBe(true)
+
+    // The head sweeps at most a full disk-width to reach it, whichever
+    // cylinder it happened to land on.
+    for (let i = 0; i < 200 && process.blockedOn === 'device'; i++) stepSimulation()
+    expect(process.blockedOn).not.toBe('device')
+    expect(process.burstIndex).toBeGreaterThanOrEqual(2) // returned past its I/O burst
+
+    killProcess(process.pid)
+  })
+
+  it('never leaves a process blocked on a request the disk threw away (reset-fs, cross-tab import)', () => {
+    const process = spawnProcess('ioer', 'interactive', SHELL_PID)
+    process.bursts = [1, 4, 1]
+    process.burstRemaining = 1
+    for (let i = 0; i < 60 && process.blockedOn !== 'device'; i++) stepSimulation()
+    expect(process.blockedOn).toBe('device')
+
+    // Wipes the disk — and with it the pending queue holding the only
+    // event that could ever have released this process.
+    filesystem.resetToEmpty()
+    expect(filesystem.getIoState().pending).toHaveLength(0)
+
+    stepSimulation()
+    expect(process.blockedOn).not.toBe('device')
+    expect(scheduler.getBlockedCounts().device).toBe(0)
+
+    killProcess(process.pid)
+  })
+
+  it('falls back to a self-timed wait while the disk is crashed, rather than freezing every process until fsck', () => {
+    filesystem.crash()
+    try {
+      const process = spawnProcess('ioer', 'interactive', SHELL_PID)
+      process.bursts = [1, 4, 1]
+      process.burstRemaining = 1
+      for (let i = 0; i < 60 && process.blockedOn === null; i++) stepSimulation()
+      expect(process.blockedOn).toBe('io-burst')
+      killProcess(process.pid)
+    } finally {
+      filesystem.fsck()
+    }
   })
 })

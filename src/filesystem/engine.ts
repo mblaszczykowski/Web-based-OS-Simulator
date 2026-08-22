@@ -1,17 +1,29 @@
 import type { DirEntry, DiskBlock, Inode, JournalEntry, JournalOp } from '../shared/types'
 import { simBus } from '../shared/eventBus'
-import { IoScheduler, type IoSchedulerMetrics, type IoSchedulerState } from './ioScheduler'
+import { IoScheduler, type CompletedIoRequest, type IoSchedulerMetrics, type IoSchedulerState } from './ioScheduler'
 
 export interface FilesystemConfig {
   blockCount: number
   blockSizeBytes: number
   journalHistoryLimit: number
+  /**
+   * Cylinders the SCAN head crosses per tick. Optional, defaulting to the
+   * plain one-cylinder-per-tick model every hand-traced test in this
+   * module is written against; the live engine runs it faster — see
+   * DEFAULT_FS_CONFIG and IoScheduler's constructor for why.
+   */
+  seekCylindersPerTick?: number
 }
 
 export const DEFAULT_FS_CONFIG: FilesystemConfig = {
   blockCount: 64,
   blockSizeBytes: 64,
   journalHistoryLimit: 50,
+  // A full 64-cylinder sweep therefore takes 16 ticks, so an average
+  // request waits ~8 — the same order of magnitude as the CPU bursts it
+  // interleaves with (generateBursts() in scheduler/engine.ts), now that
+  // processes genuinely block on these requests (roadmap-v5.md §1.1).
+  seekCylindersPerTick: 4,
 }
 
 export type FsResult = { ok: true } | { ok: false; error: string }
@@ -73,15 +85,48 @@ export class FilesystemEngine {
   private crashed = false
   private lastTouchedPath: string | null = null
   private ioScheduler: IoScheduler
+  /** See drainAbandonedIoWaiters(). */
+  private abandonedIoWaiters: number[] = []
 
   constructor(private config: FilesystemConfig = DEFAULT_FS_CONFIG) {
     this.blocks = Array.from({ length: config.blockCount }, (_, index) => ({ index, owner: null }))
-    this.ioScheduler = new IoScheduler(config.blockCount)
+    this.ioScheduler = new IoScheduler(config.blockCount, config.seekCylindersPerTick ?? 1)
   }
 
-  advanceTick(): void {
+  /**
+   * Advances the disk by one tick and returns everything the head
+   * serviced. Processes blocked on those requests (roadmap-v5.md §1.1)
+   * are woken by the caller in app/engines.ts — this engine stays
+   * scheduler-unaware, exactly like it stays memory-unaware for swap.
+   */
+  advanceTick(): CompletedIoRequest[] {
     this.tick++
-    this.ioScheduler.step(this.tick)
+    return this.ioScheduler.step(this.tick)
+  }
+
+  /**
+   * Submits one I/O request on behalf of a process that is about to block
+   * on it — roadmap-v5.md §1.1. Distinct from the filesystem's own
+   * internal enqueues (block allocation, `cat`'s read) in exactly one way:
+   * it carries the waiter's pid, so completing it can release that
+   * process. Returns false if the request can't be queued at all, which is
+   * the caller's signal to fall back rather than block a process forever.
+   */
+  requestDeviceIo(blockIndex: number, kind: 'read' | 'write', waiterPid: number): boolean {
+    return this.ioScheduler.enqueue(blockIndex, kind, this.tick, waiterPid)
+  }
+
+  /**
+   * Pids that were blocked on a request the disk queue threw away (a
+   * `reset-fs`, or a cross-tab import replacing the disk under them).
+   * Drained by the caller each tick and woken — without this they would
+   * sit in WAITING forever, since the only event that could ever release
+   * them was discarded along with the queue.
+   */
+  drainAbandonedIoWaiters(): number[] {
+    const abandoned = this.abandonedIoWaiters
+    this.abandonedIoWaiters = []
+    return abandoned
   }
 
   isCrashed(): boolean {
@@ -712,7 +757,7 @@ export class FilesystemEngine {
       // part of FilesystemState/exportState() (same category as the live
       // process/frame state the scheduler and memory engines never
       // persist either), so it's reset rather than carried over stale.
-      this.ioScheduler.reset()
+      this.abandonedIoWaiters.push(...this.ioScheduler.reset())
       return true
     } catch {
       return false
@@ -730,6 +775,6 @@ export class FilesystemEngine {
     this.tick = 0
     this.crashed = false
     this.lastTouchedPath = null
-    this.ioScheduler.reset()
+    this.abandonedIoWaiters.push(...this.ioScheduler.reset())
   }
 }

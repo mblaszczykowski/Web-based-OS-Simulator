@@ -2,7 +2,7 @@ import type { DirEntry, DiskBlock } from '../shared/types'
 import { WindowFrame } from '../app/WindowFrame'
 import { FilesystemIcon, FolderIcon, FileIcon, WarningIcon } from '../app/icons'
 import { useSimStore } from '../app/store'
-import { filesystem } from '../app/engines'
+import { filesystem, scheduler } from '../app/engines'
 import { rwxTriplet } from './engine'
 import { colorForPid, labelColorForPid } from '../app/colors'
 
@@ -69,6 +69,7 @@ export function FilesystemWindow() {
   const metrics = filesystem.getMetrics()
   const ioState = filesystem.getIoState()
   const ioMetrics = filesystem.getIoMetrics()
+  const blockedOnDisk = scheduler.getProcesses().filter((p) => p.blockedOn === 'device')
 
   return (
     <WindowFrame
@@ -184,6 +185,15 @@ export function FilesystemWindow() {
             <div className="algo-desc" style={{ marginTop: 6 }}>
               Avg seek: {ioMetrics.avgSeekDistance.toFixed(1)} cylinders &middot; Avg wait: {ioMetrics.avgWaitTicks.toFixed(1)}{' '}
               ticks &middot; Completed: {ioMetrics.completedCount}
+              {/* roadmap-v5.md §1.1 — the point of the whole integration: these
+                  are real processes sitting in WAITING until this head reaches
+                  them, not a queue of anonymous block numbers. */}
+              {blockedOnDisk.length > 0 && (
+                <>
+                  {' '}
+                  &middot; blocking {blockedOnDisk.map((p) => `P${p.pid}`).join(', ')}
+                </>
+              )}
             </div>
           </div>
 
