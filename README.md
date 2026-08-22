@@ -100,6 +100,7 @@ React + TypeScript, Zustand, Vite, Vitest (+ React Testing Library/jsdom for com
 - **Cross-tab consistency**: opening the app in two tabs no longer means one silently overwrites the other's disk on the next save. Tabs announce a successful filesystem save over a `BroadcastChannel`; on hearing another tab's announcement, a tab cancels its own pending save and re-hydrates from the newer persisted state, logging it to the terminal so the reconciliation is visible. Best-effort, not full multi-tab consistency — memory/scheduler state stays tab-local by design.
 - **Small screens**: the desktop metaphor (overlapping draggable windows) has nowhere sensible to degrade to on a phone. Below ~860px wide, a small feature-detected notice replaces the boot sequence and desktop entirely, rather than a horizontally-clipped layout.
 - **Hard links, permissions**: `Inode.links` and a real rwx mode bit are actually enforced — `rm` only frees a file's blocks once every hard-linked name pointing at it is gone, and `write`/`rm`/`cat`/`cp` reject a file missing the relevant permission bit, not just cosmetically.
+- **Shareable session link**: which Sync window tab is open, and whether the unsafe/race-condition demo is on, live in the URL's query string (`src/app/urlState.ts`) and update via `history.replaceState` — copy the address bar to send someone straight to a specific scenario. Front-end only, no backend (see `docs/adr/0003-no-backend.md`); window layout and everything else stay out of it, on purpose — see that module's own comment for why.
 
 ## Accessibility
 
