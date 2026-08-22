@@ -562,7 +562,7 @@ export class SchedulerEngine {
       cpuUtilization: this.tickCount ? this.busyTicks / (this.tickCount * this.coreCount) : 0,
       coreCount: this.coreCount,
       migrations: this.migrations,
-      /** Runnable processes queued on each CPU right now — the imbalance the balancer acts on. */
+      /** Runnable processes on each CPU — queued plus the one running. See runnableLoad(). */
       loadPerCore: this.runnableLoad(),
     }
   }

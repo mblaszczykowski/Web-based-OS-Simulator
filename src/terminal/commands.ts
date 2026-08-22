@@ -12,7 +12,7 @@ export interface SchedulerMetricsView {
   coreCount: number
   /** Times the load balancer moved a process between CPUs. */
   migrations: number
-  /** Runnable processes queued on each CPU right now. */
+  /** Runnable processes on each CPU right now — queued plus the one on the CPU. */
   loadPerCore: number[]
 }
 
