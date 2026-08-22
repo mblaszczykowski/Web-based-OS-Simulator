@@ -10,6 +10,7 @@ function makeProcess(overrides: Partial<Process> = {}): Process {
     state: 'READY',
     queueLevel: 0,
     parentPid: SHELL_PID,
+    memoryOwnerPid: 1,
     arrivalTick: 0,
     finishTick: null,
     bursts: [5],
@@ -31,6 +32,8 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     listProcesses: () => [],
     spawnProcess: (name) => makeProcess({ name }),
     spawnStress: (n) => Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1, kind: 'cpu-bound' })),
+    spawnThreads: (name, n) =>
+      Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1, name: `${name}:t${i + 1}`, memoryOwnerPid: 1 })),
     killProcess: () => true,
     stopProcess: () => true,
     contProcess: () => true,
@@ -464,6 +467,40 @@ describe('executeCommand', () => {
       expect(executeCommand('stress 0', makeContext())[0]).toMatchObject({ isError: true })
       expect(executeCommand('stress -1', makeContext())[0]).toMatchObject({ isError: true })
       expect(executeCommand('stress abc', makeContext())[0]).toMatchObject({ isError: true })
+    })
+  })
+
+  describe('run --threads (roadmap-v4.md §2.1)', () => {
+    it('spawns the requested thread count under the given name', () => {
+      const spawnThreads = vi.fn((name: string, n: number) =>
+        Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1, name: `${name}:t${i + 1}` })),
+      )
+      const ctx = makeContext({ spawnThreads })
+      const lines = texts('run --threads=3 worker', ctx)
+      expect(spawnThreads).toHaveBeenCalledWith('worker', 3)
+      expect(lines[0]).toContain('Started 3 threads of worker')
+    })
+
+    it('falls back to a random name when none is given', () => {
+      const spawnThreads = vi.fn((name: string, n: number) =>
+        Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1, name: `${name}:t${i + 1}` })),
+      )
+      executeCommand('run --threads=2', makeContext({ spawnThreads }))
+      expect(spawnThreads).toHaveBeenCalledWith(expect.stringMatching(/^proc\d+$/), 2)
+    })
+
+    it('does not spawn a normal process as well as the thread group', () => {
+      const spawnProcess = vi.fn(() => makeProcess())
+      const spawnThreads = vi.fn(() => [makeProcess()])
+      executeCommand('run --threads=2 worker', makeContext({ spawnProcess, spawnThreads }))
+      expect(spawnProcess).not.toHaveBeenCalled()
+    })
+
+    it('rejects a count outside 2-8, or a non-integer', () => {
+      expect(executeCommand('run --threads=1 worker', makeContext())[0]).toMatchObject({ isError: true })
+      expect(executeCommand('run --threads=9 worker', makeContext())[0]).toMatchObject({ isError: true })
+      expect(executeCommand('run --threads=abc worker', makeContext())[0]).toMatchObject({ isError: true })
+      expect(executeCommand('run --threads=2.5 worker', makeContext())[0]).toMatchObject({ isError: true })
     })
   })
 

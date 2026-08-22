@@ -54,6 +54,8 @@ export interface CommandContext {
   spawnProcess(name: string): Process
   /** Immediately spawns `n` CPU-bound processes — roadmap-v3.md §1.3's `stress`. */
   spawnStress(n: number): Process[]
+  /** `n` threads of one process, sharing a single address space — roadmap-v4.md §2.1's `run --threads=n`. */
+  spawnThreads(name: string, n: number): Process[]
   killProcess(pid: number): boolean
   /** SIGSTOP / SIGCONT — roadmap-v3.md §2.2. */
   stopProcess(pid: number): boolean
@@ -96,6 +98,7 @@ const HELP_TEXT = [
   '  ps                 list processes',
   '  top                live scheduler summary',
   '  run <name>          spawn a new process',
+  '  run --threads=<n> <name>  spawn n (2-8) threads of one process, sharing one address space',
   '  stress [n]           spawn n (default 6) CPU-bound processes at once',
   '  kill <pid>          terminate a process',
   '  kill -STOP <pid>      pause a process (SIGSTOP) without terminating it',
@@ -176,7 +179,7 @@ export const COMMAND_NAMES = [
 const MAN_PAGES: Record<string, string[]> = {
   ps: ['ps - list processes', 'usage: ps', 'Shows every process with its pid, state, and MLFQ queue level.', 'example: ps'],
   top: ['top - live scheduler summary', 'usage: top', 'CPU utilization, process counts by state, average waiting/turnaround, context switches.', 'example: top'],
-  run: ['run - spawn a new process', 'usage: run [name]', 'Starts a process under the MLFQ scheduler; a random name is used if omitted.', 'example: run compiler'],
+  run: ['run - spawn a new process, or threads of one', 'usage: run [name] | run --threads=<n> [name]', '--threads spawns n (2-8) threads sharing one address space, each with its own scheduler entry. A random name is used if omitted.', 'example: run --threads=3 compiler'],
   stress: ['stress - spawn many CPU-bound processes at once', 'usage: stress [n]', 'Spawns n (default 6, capped at 20) processes to show MLFQ demotion and Clock evictions under load.', 'example: stress 12'],
   kill: ['kill - terminate or pause/resume a process', 'usage: kill <pid> | kill -STOP <pid> | kill -CONT <pid>', '-STOP/-CONT send SIGSTOP/SIGCONT (pause/resume) instead of terminating.', 'example: kill -STOP 3'],
   free: ['free - memory usage summary', 'usage: free', 'Frames used, page faults, hit ratio, and external fragmentation.', 'example: free'],
@@ -211,6 +214,10 @@ const MAN_PAGES: Record<string, string[]> = {
 const DEFAULT_STRESS_COUNT = 6
 /** Safety valve on an explicit user request — nothing else in the sim ever spawns this many processes at once. */
 const MAX_STRESS_COUNT = 20
+
+/** roadmap-v4.md §2.1 — below 2 there's no second thread to share memory with (that's just `run`); above 8 the Gantt chart/ps table stop being legible. */
+const MIN_THREADS = 2
+const MAX_THREADS = 8
 
 /** Collapses `.`/`..` segments in an already-absolute path. `/a/../b` -> `/b`, `/a/./b` -> `/a/b`. */
 function collapseDots(path: string): string {
@@ -358,6 +365,18 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
     }
 
     case 'run': {
+      const threadsArg = args.find((a) => a.startsWith('--threads='))
+      if (threadsArg) {
+        const n = Number(threadsArg.slice('--threads='.length))
+        if (!Number.isInteger(n) || n < MIN_THREADS || n > MAX_THREADS) {
+          return err(`run: --threads=<n> must be an integer from ${MIN_THREADS} to ${MAX_THREADS}`)
+        }
+        const name = args.filter((a) => a !== threadsArg).join(' ') || `proc${Math.floor(Math.random() * 1000)}`
+        const threads = ctx.spawnThreads(name, n)
+        return out(
+          `Started ${threads.length} threads of ${name}, sharing one address space: ${threads.map((t) => `P${t.pid}`).join(', ')}.`,
+        )
+      }
       const name = args.join(' ') || `proc${Math.floor(Math.random() * 1000)}`
       const process = ctx.spawnProcess(name)
       return out(`Started process ${process.pid} (${process.name}).`)
