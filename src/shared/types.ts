@@ -77,6 +77,18 @@ export interface Process {
   sliceRemaining: number
 
   /**
+   * Which CPU this process is assigned to — roadmap-v5.md §2.3. `null`
+   * only in the single tick between spawn() and its first admission.
+   *
+   * This IS the affinity model: a process stays on its core across I/O
+   * waits, preemptions and priority boosts, and moves only when the load
+   * balancer explicitly migrates it. Nothing else ever reassigns it, so
+   * "which core is this running on" is a property of the process rather
+   * than a fresh decision made every tick.
+   */
+  core: number | null
+
+  /**
    * Why this process is blocked, or null when it isn't — roadmap-v5.md
    * §1.1. Meaningful whenever state is WAITING, and deliberately preserved
    * across a SIGSTOP so `cont()` can put a still-blocked process back into
@@ -95,7 +107,12 @@ export interface Process {
 
 export interface GanttSample {
   tick: number
-  pid: number | null
+  /**
+   * What each CPU ran this tick — one entry per core, `null` for an idle
+   * one. An array rather than a single pid since roadmap-v5.md §2.3: with
+   * more than one core there is no single "the process that ran".
+   */
+  pids: (number | null)[]
 }
 
 // ---------------------------------------------------------------------------

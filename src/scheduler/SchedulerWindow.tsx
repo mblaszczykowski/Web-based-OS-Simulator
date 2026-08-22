@@ -51,7 +51,13 @@ export function SchedulerWindow() {
   }
 
   return (
-    <WindowFrame id="scheduler" title="Scheduler" subtitle="MLFQ" accent="var(--accent)" icon={<SchedulerIcon />}>
+    <WindowFrame
+      id="scheduler"
+      title="Scheduler"
+      subtitle={scheduler.coreCount > 1 ? `MLFQ · ${scheduler.coreCount} cores` : 'MLFQ'}
+      accent="var(--accent)"
+      icon={<SchedulerIcon />}
+    >
       <div className="win-body">
         <div className="sched-sidebar">
           <div className="field">
@@ -65,6 +71,27 @@ export function SchedulerWindow() {
               level.
             </span>
           </div>
+
+          {/* Per-CPU run-queue depth and the balancer's migration count —
+              roadmap-v5.md §2.3. Hidden on a single-core build, where both
+              numbers would say nothing. */}
+          {scheduler.coreCount > 1 && (
+            <div className="field">
+              <span className="label">CPUs &mdash; runnable processes</span>
+              <div className="qlevels">
+                {metrics.loadPerCore.map((load, core) => (
+                  <div className="qlevel" key={core}>
+                    <span className="qlevel-name">CPU{core}</span>
+                    <span className="qlevel-meta">{load}</span>
+                  </div>
+                ))}
+              </div>
+              <span className="algo-desc">
+                A process stays on the CPU it was admitted to (affinity); the load balancer moves one across only when
+                the imbalance is worth the lost cache. {metrics.migrations} migration(s) so far.
+              </span>
+            </div>
+          )}
 
           <div className="field">
             <span className="label">Queue levels</span>
@@ -147,19 +174,30 @@ export function SchedulerWindow() {
               </button>
             </div>
           </div>
-          <div className="gantt">
-            {ganttLog.length === 0 && <div className="gantt-seg idle" style={{ flex: 1 }} />}
-            {ganttLog.map((pid, i) => (
-              <div
-                key={i}
-                className={`gantt-seg${pid === null ? ' idle' : ''}`}
-                style={pid === null ? undefined : { background: colorForPid(pid), color: labelColorForPid(pid) }}
-                title={pid === null ? 'idle' : `P${pid}`}
-              >
-                {pid !== null && ganttLog.length <= 24 ? `P${pid}` : ''}
+          {/* One row per CPU (roadmap-v5.md §2.3). With a single core this
+              renders exactly as it always did — one unlabelled row — so the
+              extra structure costs nothing when there is nothing to show. */}
+          {scheduler.cores.map((core) => (
+            <div className="gantt-row" key={core}>
+              {scheduler.coreCount > 1 && <span className="gantt-core-label">CPU{core}</span>}
+              <div className="gantt">
+                {ganttLog.length === 0 && <div className="gantt-seg idle" style={{ flex: 1 }} />}
+                {ganttLog.map((pids, i) => {
+                  const pid = pids[core] ?? null
+                  return (
+                    <div
+                      key={i}
+                      className={`gantt-seg${pid === null ? ' idle' : ''}`}
+                      style={pid === null ? undefined : { background: colorForPid(pid), color: labelColorForPid(pid) }}
+                      title={pid === null ? `CPU${core}: idle` : `CPU${core}: P${pid}`}
+                    >
+                      {pid !== null && ganttLog.length <= 24 ? `P${pid}` : ''}
+                    </div>
+                  )
+                })}
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
 
           <div className="field">
             <span className="label">Ready queue (by level)</span>

@@ -24,6 +24,9 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
       avgTurnaroundTicks: 0,
       contextSwitches: 0,
       cpuUtilization: 0,
+      coreCount: 1,
+      migrations: 0,
+      loadPerCore: [0],
     }),
     memoryMetrics: () => ({
       pageFaults: 0,
@@ -752,7 +755,7 @@ describe('ps / top / iostat report what a process is blocked on (roadmap-v5.md Â
         makeProcess({ pid: 4, state: 'WAITING', blockedOn: 'io-burst' }),
       ],
     })
-    expect(executeCommand('top', ctx)[1]!.text).toBe('Blocked: 2 on disk, 1 on a pipe, 1 on a self-timed I/O burst')
+    expect(executeCommand('top', ctx)[2]!.text).toBe('Blocked: 2 on disk, 1 on a pipe, 1 on a self-timed I/O burst')
   })
 
   it('iostat names the processes actually parked on the head â€” the point of the integration', () => {

@@ -24,7 +24,7 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     killProcess: () => true,
     stopProcess: () => true,
     contProcess: () => true,
-    schedulerMetrics: () => ({ completed: 0, avgWaitingTicks: 0, avgTurnaroundTicks: 0, contextSwitches: 0, cpuUtilization: 0 }),
+    schedulerMetrics: () => ({ completed: 0, avgWaitingTicks: 0, avgTurnaroundTicks: 0, contextSwitches: 0, cpuUtilization: 0, coreCount: 1, migrations: 0, loadPerCore: [0] }),
     memoryMetrics: () => ({
       pageFaults: 0,
       accesses: 0,

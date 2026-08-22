@@ -7,7 +7,13 @@ export interface SchedulerMetricsView {
   avgWaitingTicks: number
   avgTurnaroundTicks: number
   contextSwitches: number
+  /** Fraction of *core*-ticks spent running something — roadmap-v5.md §2.3. */
   cpuUtilization: number
+  coreCount: number
+  /** Times the load balancer moved a process between CPUs. */
+  migrations: number
+  /** Runnable processes queued on each CPU right now. */
+  loadPerCore: number[]
 }
 
 export interface MemoryMetricsView {
@@ -246,8 +252,18 @@ export const COMMAND_NAMES = [
 
 /** Short manual pages — roadmap-v4.md §1.4. One entry per COMMAND_NAMES; a static map, no per-command logic. */
 const MAN_PAGES: Record<string, string[]> = {
-  ps: ['ps - list processes', 'usage: ps', 'Shows every process with its pid, state, and MLFQ queue level.', 'example: ps'],
-  top: ['top - live scheduler summary', 'usage: top', 'CPU utilization, process counts by state, average waiting/turnaround, context switches.', 'example: top'],
+  ps: [
+    'ps - list processes',
+    'usage: ps',
+    'Shows every process with its pid, state (including what a blocked one is waiting for), the CPU it is bound to, and its MLFQ queue level.',
+    'example: ps',
+  ],
+  top: [
+    'top - live scheduler summary',
+    'usage: top',
+    'CPU utilization across every core, process counts by state, runnable processes per CPU and the migration count, average waiting/turnaround, context switches.',
+    'example: top',
+  ],
   run: ['run - spawn a new process, or threads of one', 'usage: run [name] | run --threads=<n> [name]', '--threads spawns n (2-8) threads sharing one address space, each with its own scheduler entry. A random name is used if omitted.', 'example: run --threads=3 compiler'],
   stress: ['stress - spawn many CPU-bound processes at once', 'usage: stress [n]', 'Spawns n (default 6, capped at 20) processes to show MLFQ demotion and Clock evictions under load.', 'example: stress 12'],
   fork: [
@@ -508,11 +524,15 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       return out(...HELP_TEXT)
 
     case 'ps': {
-      const header = 'PID   STATE           QUEUE  CMD'
+      const header = 'PID   STATE           CPU  QUEUE  CMD'
       const rows = ctx.listProcesses().map((p) =>
         [
           String(p.pid).padEnd(6),
           formatState(p).padEnd(16),
+          // Which CPU this process is bound to — roadmap-v5.md §2.3. It is
+          // a property of the process, not of this instant: a WAITING one
+          // still belongs to the core it will come back to.
+          (p.core === null ? '-' : String(p.core)).padEnd(5),
           (p.state === 'WAITING' || p.state === 'STOPPED' ? '-' : `Q${p.queueLevel}`).padEnd(7),
           p.name,
         ].join(''),
@@ -529,7 +549,8 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       const onDisk = waiting.filter((p) => p.blockedOn === 'device').length
       const onPipe = waiting.filter((p) => p.blockedOn === 'pipe').length
       return out(
-        `CPU: ${pct(m.cpuUtilization)}  Procs: ${procs.length} (${running} running, ${ready} ready, ${waiting.length} waiting)`,
+        `CPU: ${pct(m.cpuUtilization)} across ${m.coreCount} core(s)  Procs: ${procs.length} (${running} running, ${ready} ready, ${waiting.length} waiting)`,
+        `Runnable per CPU: ${m.loadPerCore.map((load, core) => `CPU${core}=${load}`).join('  ')}  Migrations: ${m.migrations}`,
         `Blocked: ${onDisk} on disk, ${onPipe} on a pipe, ${waiting.length - onDisk - onPipe} on a self-timed I/O burst`,
         `Avg waiting: ${m.avgWaitingTicks.toFixed(1)} ticks  Avg turnaround: ${m.avgTurnaroundTicks.toFixed(1)} ticks  Ctx switches: ${m.contextSwitches}`,
       )

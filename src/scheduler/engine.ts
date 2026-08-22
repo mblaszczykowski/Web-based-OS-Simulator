@@ -6,12 +6,45 @@ export interface SchedulerConfig {
   quanta: readonly [number, number, number]
   /** Every N ticks, every non-terminated process is boosted back to Q0 to prevent starvation. 0 disables it. */
   boostInterval: number
+  /**
+   * How many CPUs to schedule onto — roadmap-v5.md §2.3. Each gets its own
+   * complete set of MLFQ queues.
+   *
+   * Optional, defaulting to 1: every hand-traced test in engine.test.ts is
+   * written against a single CPU, and one core is genuinely the same
+   * algorithm — per-CPU run queues with one CPU *is* plain MLFQ. The live
+   * simulator runs more (see DEFAULT_SCHEDULER_CONFIG), the same way the
+   * disk runs a faster head than its unit tests do.
+   */
+  coreCount?: number
+  /**
+   * Ticks between load-balancing passes. 0 disables balancing entirely,
+   * which is what makes affinity observable on its own: with no balancer,
+   * a process never leaves the core it was admitted to.
+   */
+  balanceInterval?: number
 }
 
 export const DEFAULT_SCHEDULER_CONFIG: SchedulerConfig = {
   quanta: [4, 8, Infinity],
   boostInterval: 50,
+  // Two CPUs, not four or eight: the Gantt chart gets one row per core and
+  // the point being demonstrated (a process migrating between run queues)
+  // is legible with two and turns into a wall of colour with eight.
+  coreCount: 2,
+  // Often enough to be visible within a demo, far enough apart that
+  // processes aren't bounced between cores every few ticks — which would
+  // destroy the cache affinity the per-core queues exist to model.
+  balanceInterval: 20,
 }
+
+/**
+ * How much busier one core must be than another before the balancer moves
+ * anything. Migrating on a difference of one would leave two cores
+ * swapping a single process back and forth forever, since moving it just
+ * inverts the imbalance.
+ */
+const MIGRATION_THRESHOLD = 2
 
 export interface TickResult {
   tick: number
@@ -82,6 +115,8 @@ export function createProcess(
     burstRemaining: bursts[0] ?? 0,
     sliceRemaining: DEFAULT_SCHEDULER_CONFIG.quanta[0],
     blockedOn: null,
+    // Assigned on admission, by whichever core is least loaded then.
+    core: null,
     totalWaitingTicks: 0,
     totalBurstTicks: 0,
     contextSwitches: 0,
@@ -135,7 +170,13 @@ const MAX_TERMINATED_HISTORY = 15
  */
 export class SchedulerEngine {
   private processes = new Map<number, Process>()
-  private queues: [number[], number[], number[]] = [[], [], []]
+  /**
+   * One complete set of MLFQ queues per CPU — roadmap-v5.md §2.3,
+   * Silberschatz ch. 5.5. Per-core queues rather than one shared queue is
+   * the decision worth making visible: a shared queue needs no balancing
+   * and no affinity, and so demonstrates neither.
+   */
+  private queues: [number[], number[], number[]][]
   /**
    * Every WAITING process, whatever it's waiting for. Only the ones with
    * `blockedOn === 'io-burst'` are counted down by tick(); the rest are
@@ -146,9 +187,13 @@ export class SchedulerEngine {
   private pendingArrivals: number[] = []
   private tickCount = 0
   private lastBoostTick = 0
-  private lastRunningPid: number | null = null
+  /** Per core, so a context switch on one CPU isn't counted against another. */
+  private lastRunningPid: (number | null)[]
   private globalContextSwitches = 0
+  /** Core-ticks actually spent running something, out of tickCount * coreCount. */
   private busyTicks = 0
+  private lastBalanceTick = 0
+  private migrations = 0
 
   // Lifetime aggregates survive pruning even after the Process object
   // itself is dropped from `processes` — see recordTermination().
@@ -157,7 +202,94 @@ export class SchedulerEngine {
   private terminatedWaitingTicks = 0
   private terminatedTurnaroundTicks = 0
 
-  constructor(private config: SchedulerConfig = DEFAULT_SCHEDULER_CONFIG) {}
+  constructor(private config: SchedulerConfig = DEFAULT_SCHEDULER_CONFIG) {
+    this.queues = Array.from({ length: this.coreCount }, () => [[], [], []] as [number[], number[], number[]])
+    this.lastRunningPid = Array(this.coreCount).fill(null)
+  }
+
+  get coreCount(): number {
+    return Math.max(1, this.config.coreCount ?? 1)
+  }
+
+  /** Every core index, for callers that iterate CPUs (the Gantt chart, `ps`). */
+  get cores(): number[] {
+    return Array.from({ length: this.coreCount }, (_, i) => i)
+  }
+
+  /**
+   * The CPU a newly-admitted process is assigned to: whichever currently
+   * carries the fewest live processes. Counting every live process (not
+   * just runnable ones) is deliberate — a process blocked on the disk is
+   * still that core's responsibility and will come back to it.
+   */
+  private leastLoadedCore(): number {
+    const load = Array(this.coreCount).fill(0)
+    for (const process of this.processes.values()) {
+      if (process.state === 'TERMINATED' || process.core === null) continue
+      load[process.core]!++
+    }
+    let best = 0
+    for (let core = 1; core < this.coreCount; core++) {
+      if (load[core]! < load[best]!) best = core
+    }
+    return best
+  }
+
+  /**
+   * Runnable processes per core — queued *plus* the one on the CPU. What
+   * the balancer equalises.
+   *
+   * Counting only the queue would miss the case load balancing most
+   * exists for: an idle core next to one running a process with another
+   * waiting behind it reads as 0-vs-1, under the threshold, so nothing
+   * moves and the idle core stays idle. Counting the running process
+   * makes that 0-vs-2 and pulls work across. Blocked processes are
+   * excluded either way — a process parked on the disk is not competing
+   * for a CPU, and balancing against it would move work towards a core
+   * that is about to get busy again.
+   */
+  private runnableLoad(): number[] {
+    return this.cores.map(
+      (core) =>
+        this.queues[core]!.reduce((sum, queue) => sum + queue.length, 0) + (this.getRunning(core) === undefined ? 0 : 1),
+    )
+  }
+
+  /**
+   * Pulls a pid out of whichever ready queue holds it. Scans every core,
+   * not just `process.core`: the balancer moves a process between cores,
+   * and a single missed removal would leave the same pid queued twice and
+   * running on two CPUs at once.
+   */
+  private dequeue(pid: number): void {
+    for (const levels of this.queues) {
+      for (let level = 0; level < levels.length; level++) {
+        levels[level] = levels[level]!.filter((p) => p !== pid)
+      }
+    }
+  }
+
+  /**
+   * Puts a process at the back (or front, on preemption) of its own core's
+   * queue for its current level — the single choke point for anything
+   * becoming runnable.
+   *
+   * It also assigns a core to a process that somehow has none. That is not
+   * defensive padding: a process SIGSTOP'd in the one tick between spawn()
+   * and its first admission never went through step 1, so `cont()` used to
+   * queue it with `core` still null. It landed in core 0's queue and got
+   * picked, but every later `getRunning(core)` looks for `p.core === core`
+   * — so no CPU ever recognised it as its own, nobody dequeued or
+   * preempted it, and it sat RUNNING forever while its core went on
+   * picking other processes. Found by the pipe tests, which stop an
+   * endpoint immediately after spawning it.
+   */
+  private enqueue(process: Process, front = false): void {
+    if (process.core === null) process.core = this.leastLoadedCore()
+    const queue = this.queues[process.core]![process.queueLevel]!
+    if (front) queue.unshift(process.pid)
+    else queue.push(process.pid)
+  }
 
   /**
    * Single choke point for every state transition into TERMINATED —
@@ -201,7 +333,7 @@ export class SchedulerEngine {
     const process = this.processes.get(pid)
     if (!process || process.state === 'TERMINATED') return undefined
 
-    this.queues[process.queueLevel] = this.queues[process.queueLevel].filter((p) => p !== pid)
+    this.dequeue(pid)
     this.waiting.delete(pid)
     this.pendingArrivals = this.pendingArrivals.filter((p) => p !== pid)
 
@@ -226,7 +358,7 @@ export class SchedulerEngine {
     if (!process || process.state === 'TERMINATED') return undefined
     if (process.state === 'STOPPED') return process // idempotent — signalling an already-stopped process is harmless
 
-    this.queues[process.queueLevel] = this.queues[process.queueLevel].filter((p) => p !== pid)
+    this.dequeue(pid)
     this.waiting.delete(pid)
     this.pendingArrivals = this.pendingArrivals.filter((p) => p !== pid)
     // `blockedOn` is deliberately left as-is: a process stopped while
@@ -269,7 +401,7 @@ export class SchedulerEngine {
       return process
     }
     process.state = 'READY'
-    this.queues[process.queueLevel].push(pid)
+    this.enqueue(process)
     return process
   }
 
@@ -301,7 +433,7 @@ export class SchedulerEngine {
     if (!process) return false
     if (process.state !== 'RUNNING' && process.state !== 'READY') return false
 
-    this.queues[process.queueLevel] = this.queues[process.queueLevel].filter((p) => p !== pid)
+    this.dequeue(pid)
     process.state = 'WAITING'
     process.blockedOn = reason
     this.waiting.add(pid)
@@ -344,8 +476,9 @@ export class SchedulerEngine {
 
     process.state = 'READY'
     // Rule 3: no demotion on return from I/O — same queue level as before.
+    // It returns to its own core, too: that is what affinity means here.
     process.sliceRemaining = this.config.quanta[process.queueLevel]
-    this.queues[process.queueLevel].push(pid)
+    this.enqueue(process)
     return true
   }
 
@@ -386,16 +519,35 @@ export class SchedulerEngine {
     return [...this.processes.values()]
   }
 
-  getReadyQueues(): [Process[], Process[], Process[]] {
-    return [
-      this.queues[0].map((pid) => this.processes.get(pid)!).filter(Boolean),
-      this.queues[1].map((pid) => this.processes.get(pid)!).filter(Boolean),
-      this.queues[2].map((pid) => this.processes.get(pid)!).filter(Boolean),
-    ]
+  /**
+   * Ready queues by MLFQ level, merged across every core — what the
+   * "ready queue (by level)" readout shows. Pass a core index for that
+   * one CPU's own queues, which is what the balancer and the per-core
+   * readouts want.
+   */
+  getReadyQueues(core?: number): [Process[], Process[], Process[]] {
+    const levels = ([0, 1, 2] as const).map((level) =>
+      (core === undefined ? this.queues.flatMap((q) => q[level]) : (this.queues[core]?.[level] ?? []))
+        .map((pid) => this.processes.get(pid))
+        .filter((p): p is Process => p !== undefined),
+    )
+    return levels as [Process[], Process[], Process[]]
   }
 
-  getRunning(): Process | undefined {
-    return this.getProcesses().find((p) => p.state === 'RUNNING')
+  /** What each CPU is running right now — one entry per core, undefined for an idle one. */
+  getRunningProcesses(): (Process | undefined)[] {
+    return this.cores.map((core) => this.getProcesses().find((p) => p.state === 'RUNNING' && p.core === core))
+  }
+
+  /**
+   * The process on `core`, or — with no argument — whichever CPU's process
+   * happens to be found first. The no-argument form only makes sense for a
+   * caller that wants "some running process" as a focus (e.g. the Memory
+   * window's page-table panel); anything that cares which CPU it is on
+   * should use getRunningProcesses().
+   */
+  getRunning(core?: number): Process | undefined {
+    return this.getProcesses().find((p) => p.state === 'RUNNING' && (core === undefined || p.core === core))
   }
 
   getMetrics() {
@@ -405,7 +557,13 @@ export class SchedulerEngine {
       avgWaitingTicks: n ? this.terminatedWaitingTicks / n : 0,
       avgTurnaroundTicks: n ? this.terminatedTurnaroundTicks / n : 0,
       contextSwitches: this.globalContextSwitches,
-      cpuUtilization: this.tickCount ? this.busyTicks / this.tickCount : 0,
+      // Out of core-ticks, not ticks: two CPUs both idle for a tick is
+      // two units of wasted capacity, and 100% has to mean every CPU busy.
+      cpuUtilization: this.tickCount ? this.busyTicks / (this.tickCount * this.coreCount) : 0,
+      coreCount: this.coreCount,
+      migrations: this.migrations,
+      /** Runnable processes queued on each CPU right now — the imbalance the balancer acts on. */
+      loadPerCore: this.runnableLoad(),
     }
   }
 
@@ -413,14 +571,20 @@ export class SchedulerEngine {
   tick(): TickResult {
     this.tickCount++
 
-    // 1. Admit anything that arrived since the last tick, always at Q0.
+    // 1. Admit anything that arrived since the last tick, always at Q0 —
+    //    and, since roadmap-v5.md §2.3, onto whichever CPU is least loaded
+    //    at that moment. Assigned one at a time rather than all at once so
+    //    a burst of arrivals (`stress 12`) spreads across the cores
+    //    instead of every one of them picking the same "least loaded" core
+    //    from the same stale snapshot.
     for (const pid of this.pendingArrivals) {
       const process = this.processes.get(pid)
       if (!process) continue
       process.state = 'READY'
       process.queueLevel = 0
       process.sliceRemaining = this.config.quanta[0]
-      this.queues[0].push(pid)
+      process.core = this.leastLoadedCore()
+      this.enqueue(process)
     }
     this.pendingArrivals = []
 
@@ -452,7 +616,7 @@ export class SchedulerEngine {
         process.state = 'READY'
         // Rule 3: no demotion on return from I/O — same queue level as before.
         process.sliceRemaining = this.config.quanta[process.queueLevel]
-        this.queues[process.queueLevel].push(pid)
+        this.enqueue(process)
       }
     }
 
@@ -461,20 +625,26 @@ export class SchedulerEngine {
     if (this.config.boostInterval > 0 && this.tickCount - this.lastBoostTick >= this.config.boostInterval) {
       boosted = true
       this.lastBoostTick = this.tickCount
-      for (const level of [1, 2] as const) {
-        for (const pid of this.queues[level]) {
-          const process = this.processes.get(pid)
-          if (!process) continue
-          process.queueLevel = 0
-          process.sliceRemaining = this.config.quanta[0]
-          this.queues[0].push(pid)
+      // Each CPU's queues are boosted within that CPU: a priority boost
+      // is about starvation, not about load, so it must not quietly
+      // relocate processes and undo their affinity.
+      for (const levels of this.queues) {
+        for (const level of [1, 2] as const) {
+          for (const pid of levels[level]) {
+            const process = this.processes.get(pid)
+            if (!process) continue
+            process.queueLevel = 0
+            process.sliceRemaining = this.config.quanta[0]
+            levels[0].push(pid)
+          }
+          levels[level] = []
         }
-        this.queues[level] = []
       }
-      const running = this.getRunning()
-      if (running && running.queueLevel !== 0) {
-        running.queueLevel = 0
-        running.sliceRemaining = this.config.quanta[0]
+      for (const running of this.getRunningProcesses()) {
+        if (running && running.queueLevel !== 0) {
+          running.queueLevel = 0
+          running.sliceRemaining = this.config.quanta[0]
+        }
       }
       // Processes blocked on I/O also get amnesty — otherwise a process
       // demoted right before it blocks can miss every boost that happens
@@ -487,45 +657,106 @@ export class SchedulerEngine {
       }
     }
 
-    // 4. Preempt the running process if a strictly higher queue is non-empty.
-    const running = this.getRunning()
-    const higherLevelReady = ([0, 1, 2] as const).find((level) => this.queues[level].length > 0)
-    if (running && higherLevelReady !== undefined && higherLevelReady < running.queueLevel) {
-      running.state = 'READY'
-      this.queues[running.queueLevel].unshift(running.pid)
-    }
+    // 3b. Load balancing (roadmap-v5.md §2.3) — the counterweight to
+    //     affinity. Without it a core that happens to be handed several
+    //     long-running processes stays busy while another idles, because
+    //     nothing ever moves a process off the CPU it was admitted to.
+    this.balanceLoad()
 
-    // 5. Pick who runs this tick: front of the highest non-empty queue.
-    const stillRunning = this.getRunning()
-    let winnerPid: number | null = null
-    if (stillRunning) {
-      winnerPid = stillRunning.pid
-    } else {
-      const level = ([0, 1, 2] as const).find((l) => this.queues[l].length > 0)
-      if (level !== undefined) {
-        winnerPid = this.queues[level].shift()!
+    // 4. Per CPU: preempt its running process if a strictly higher queue
+    //    *on that CPU* is non-empty. A higher-priority process on another
+    //    core is deliberately not grounds for preemption here — it will be
+    //    run by that core this very tick.
+    for (const core of this.cores) {
+      const running = this.getRunning(core)
+      const levels = this.queues[core]!
+      const higherLevelReady = ([0, 1, 2] as const).find((level) => levels[level].length > 0)
+      if (running && higherLevelReady !== undefined && higherLevelReady < running.queueLevel) {
+        running.state = 'READY'
+        this.enqueue(running, true)
       }
     }
 
-    // 6. Everyone else still READY accrues waiting time.
-    for (const level of [0, 1, 2] as const) {
-      for (const pid of this.queues[level]) {
-        if (pid === winnerPid) continue
-        const process = this.processes.get(pid)
-        if (process) process.totalWaitingTicks++
+    // 5. Per CPU: pick who runs, from the front of that CPU's highest
+    //    non-empty queue. Every core is chosen before any of them runs, so
+    //    no CPU can pick up a process another is about to be given.
+    const winners: (number | null)[] = this.cores.map((core) => {
+      const stillRunning = this.getRunning(core)
+      if (stillRunning) return stillRunning.pid
+      const levels = this.queues[core]!
+      const level = ([0, 1, 2] as const).find((l) => levels[l].length > 0)
+      return level === undefined ? null : levels[level].shift()!
+    })
+
+    // 6. Everyone else still READY accrues waiting time — including
+    //    processes queued on a *different* core than the one that picked
+    //    them, which is exactly the cost a poor balance imposes.
+    const running = new Set(winners.filter((pid): pid is number => pid !== null))
+    for (const levels of this.queues) {
+      for (const queue of levels) {
+        for (const pid of queue) {
+          if (running.has(pid)) continue
+          const process = this.processes.get(pid)
+          if (process) process.totalWaitingTicks++
+        }
       }
     }
 
-    if (winnerPid !== null && winnerPid !== this.lastRunningPid && this.lastRunningPid !== null) {
-      this.globalContextSwitches++
+    for (const core of this.cores) {
+      const winnerPid = winners[core]!
+      if (winnerPid !== null && winnerPid !== this.lastRunningPid[core] && this.lastRunningPid[core] !== null) {
+        this.globalContextSwitches++
+      }
+      this.lastRunningPid[core] = winnerPid
+      if (winnerPid !== null) this.runOneTick(winnerPid)
     }
-    this.lastRunningPid = winnerPid
 
-    if (winnerPid === null) {
-      return { tick: this.tickCount, sample: { tick: this.tickCount, pid: null }, boosted }
+    return { tick: this.tickCount, sample: { tick: this.tickCount, pids: winners }, boosted }
+  }
+
+  /**
+   * Moves one process from the busiest CPU's run queue to the idlest —
+   * roadmap-v5.md §2.3. One at a time, and only past MIGRATION_THRESHOLD,
+   * so balancing nudges the system towards even rather than thrashing
+   * processes between cores and destroying the very affinity per-core
+   * queues exist to model.
+   *
+   * The victim is taken from the *lowest-priority* non-empty queue on the
+   * busiest core: those are its batch processes, the ones least likely to
+   * be holding warm cache state, which is the same instinct a real
+   * balancer's "least recently run" heuristic encodes.
+   */
+  private balanceLoad(): void {
+    const interval = this.config.balanceInterval ?? 0
+    if (this.coreCount < 2 || interval <= 0) return
+    if (this.tickCount - this.lastBalanceTick < interval) return
+    this.lastBalanceTick = this.tickCount
+
+    const load = this.runnableLoad()
+    let busiest = 0
+    let idlest = 0
+    for (const core of this.cores) {
+      if (load[core]! > load[busiest]!) busiest = core
+      if (load[core]! < load[idlest]!) idlest = core
     }
+    if (busiest === idlest || load[busiest]! - load[idlest]! < MIGRATION_THRESHOLD) return
+
+    const levels = this.queues[busiest]!
+    for (const level of [2, 1, 0] as const) {
+      const pid = levels[level].pop()
+      if (pid === undefined) continue
+      const process = this.processes.get(pid)
+      if (!process) continue
+      process.core = idlest
+      this.enqueue(process)
+      this.migrations++
+      return
+    }
+  }
+
+  /** Runs `pid` for exactly one tick on whichever CPU picked it. */
+  private runOneTick(winnerPid: number): void {
     this.busyTicks++
-
     const winner = this.processes.get(winnerPid)!
     if (winner.state !== 'RUNNING') winner.contextSwitches++
     winner.state = 'RUNNING'
@@ -559,10 +790,8 @@ export class SchedulerEngine {
       winner.queueLevel = (Math.min(2, winner.queueLevel + 1) as QueueLevel)
       winner.sliceRemaining = this.config.quanta[winner.queueLevel]
       winner.state = 'READY'
-      this.queues[winner.queueLevel].push(winner.pid)
+      this.enqueue(winner)
     }
     // else: still mid-burst and mid-slice, stays RUNNING into the next tick.
-
-    return { tick: this.tickCount, sample: { tick: this.tickCount, pid: winnerPid }, boosted }
   }
 }

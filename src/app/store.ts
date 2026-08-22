@@ -110,9 +110,10 @@ interface SimStore {
   /** Bumped on *any* mutation (tick or terminal command) — the signal every window subscribes to. */
   version: number
   running: boolean
-  ganttLog: (number | null)[]
+  /** One entry per visible tick, each holding what every CPU ran that tick — see GanttSample. */
+  ganttLog: (number | null)[][]
   /** Every tick since boot, for "export this run" — see GANTT_HISTORY_CAP. */
-  ganttHistory: (number | null)[]
+  ganttHistory: (number | null)[][]
   /** Real tick number of ganttHistory[0] — 1 until the cap trims the front, then it advances with every trim so exported rows stay labeled with the real tick, not the array index (found by code review). */
   ganttHistoryStartTick: number
   /** Terminal working directory — roadmap-v3.md §1.1. Mutated only via `cd` (through CommandContext.setCwd). */
@@ -255,12 +256,12 @@ export const useSimStore = create<SimStore>((set, get) => ({
   stepOnce: () => {
     const result = stepSimulation()
     set((s) => {
-      const nextHistory = [...s.ganttHistory, result.sample.pid]
+      const nextHistory = [...s.ganttHistory, result.sample.pids]
       const overflow = Math.max(0, nextHistory.length - GANTT_HISTORY_CAP)
       return {
         tick: s.tick + 1,
         version: s.version + 1,
-        ganttLog: [...s.ganttLog.slice(-(GANTT_WINDOW - 1)), result.sample.pid],
+        ganttLog: [...s.ganttLog.slice(-(GANTT_WINDOW - 1)), result.sample.pids],
         ganttHistory: overflow > 0 ? nextHistory.slice(overflow) : nextHistory,
         ganttHistoryStartTick: s.ganttHistoryStartTick + overflow,
       }

@@ -622,3 +622,195 @@ describe('SchedulerEngine — device-owned I/O waits (roadmap-v5.md §1.1)', () 
     expect(engine.getBlockedCounts()).toEqual({ 'io-burst': 0, device: 1, pipe: 1 })
   })
 })
+
+describe('SchedulerEngine — multiprocessor scheduling (roadmap-v5.md §2.3)', () => {
+  /** A two-CPU engine with balancing off, so affinity can be observed on its own. */
+  function twoCores(balanceInterval = 0) {
+    return new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0, coreCount: 2, balanceInterval })
+  }
+
+  it('defaults to one core, so a config without coreCount is still plain MLFQ', () => {
+    const engine = new SchedulerEngine({ quanta: [4, 8, Infinity], boostInterval: 0 })
+    expect(engine.coreCount).toBe(1)
+    const p1 = createProcess('a', 'cpu-bound', [5])
+    engine.spawn(p1)
+    expect(engine.tick().sample.pids).toHaveLength(1)
+  })
+
+  it('runs one process per CPU in the same tick', () => {
+    const engine = twoCores()
+    const p1 = createProcess('a', 'cpu-bound', [10])
+    const p2 = createProcess('b', 'cpu-bound', [10])
+    engine.spawn(p1)
+    engine.spawn(p2)
+
+    const result = engine.tick()
+    expect(result.sample.pids).toEqual([p1.pid, p2.pid])
+    expect(p1.state).toBe('RUNNING')
+    expect(p2.state).toBe('RUNNING')
+    // Both really consumed a tick of CPU — this is two cores' worth of
+    // work in one tick, not one process being counted twice.
+    expect(p1.burstRemaining).toBe(9)
+    expect(p2.burstRemaining).toBe(9)
+  })
+
+  it('spreads arrivals across CPUs instead of piling them onto one', () => {
+    const engine = twoCores()
+    const processes = Array.from({ length: 4 }, (_, i) => createProcess(`p${i}`, 'cpu-bound', [20]))
+    for (const p of processes) engine.spawn(p)
+    engine.tick()
+
+    const perCore = [0, 1].map((core) => processes.filter((p) => p.core === core).length)
+    expect(perCore).toEqual([2, 2])
+  })
+
+  it('keeps a process on its own CPU across preemption, demotion and an I/O wait — that is the affinity model', () => {
+    const engine = twoCores() // balancing off
+    const p1 = createProcess('a', 'interactive', [2, 3, 2, 3, 2])
+    const p2 = createProcess('b', 'cpu-bound', [30])
+    engine.spawn(p1)
+    engine.spawn(p2)
+    engine.tick()
+    const home = p1.core!
+
+    for (let i = 0; i < 40; i++) engine.tick()
+    if (p1.state !== 'TERMINATED') expect(p1.core).toBe(home)
+  })
+
+  it('a CPU only runs what is in its own queue — a higher-priority process on the other core does not preempt it', () => {
+    const engine = twoCores()
+    const busy = createProcess('busy', 'cpu-bound', [40])
+    engine.spawn(busy)
+    engine.tick()
+    const busyCore = busy.core!
+    const otherCore = busyCore === 0 ? 1 : 0
+
+    // A fresh Q0 process lands on the *other* (idle) core, so it can't be
+    // what preempts `busy` — it simply runs alongside it.
+    const fresh = createProcess('fresh', 'cpu-bound', [10])
+    engine.spawn(fresh)
+    engine.tick()
+
+    expect(fresh.core).toBe(otherCore)
+    expect(engine.getRunning(busyCore)?.pid).toBe(busy.pid)
+    expect(engine.getRunning(otherCore)?.pid).toBe(fresh.pid)
+  })
+
+  it('never runs the same process on two CPUs at once', () => {
+    const engine = twoCores(5)
+    for (let i = 0; i < 6; i++) engine.spawn(createProcess(`p${i}`, 'cpu-bound', [40]))
+
+    for (let t = 0; t < 100; t++) {
+      const { pids } = engine.tick().sample
+      const live = pids.filter((pid): pid is number => pid !== null)
+      expect(new Set(live).size).toBe(live.length)
+    }
+  })
+
+  it('migrates a process off an overloaded CPU once the imbalance is worth it', () => {
+    const engine = twoCores(1) // balance every tick, so the test is short
+    // Spawn onto one core deliberately by making the other busy first is
+    // fiddly; instead, spawn four and then kill everything on one core,
+    // which is the same shape of imbalance a real run produces.
+    const processes = Array.from({ length: 4 }, (_, i) => createProcess(`p${i}`, 'cpu-bound', [200]))
+    for (const p of processes) engine.spawn(p)
+    engine.tick()
+
+    const victims = processes.filter((p) => p.core === 1)
+    for (const v of victims) engine.kill(v.pid)
+    // Core 1 is now empty and core 0 holds everything left.
+    expect(engine.getMetrics().loadPerCore[1]).toBe(0)
+
+    for (let i = 0; i < 10; i++) engine.tick()
+    expect(engine.getMetrics().migrations).toBeGreaterThan(0)
+    expect(processes.some((p) => p.state !== 'TERMINATED' && p.core === 1)).toBe(true)
+  })
+
+  it('does not migrate for an imbalance of one — that would just swap it back and forth forever', () => {
+    const engine = twoCores(1)
+    const p1 = createProcess('a', 'cpu-bound', [200])
+    const p2 = createProcess('b', 'cpu-bound', [200])
+    engine.spawn(p1)
+    engine.spawn(p2)
+    engine.tick() // one process per core
+    engine.kill(p2.pid) // now 1 vs 0 — lopsided, but by exactly one
+
+    for (let i = 0; i < 20; i++) engine.tick()
+    expect(engine.getMetrics().migrations).toBe(0)
+    expect(p1.core).toBe(0) // and it never left its core
+  })
+
+  it('pulls work towards a CPU that has gone idle — the case balancing exists for', () => {
+    const engine = twoCores(1)
+    const p1 = createProcess('a', 'cpu-bound', [200])
+    const p2 = createProcess('b', 'cpu-bound', [200])
+    const p3 = createProcess('c', 'cpu-bound', [200])
+    for (const p of [p1, p2, p3]) engine.spawn(p)
+    engine.tick()
+    // Empty one core out entirely: its process dies, leaving it with
+    // nothing while the other has one running and one waiting behind it.
+    for (const p of [p1, p2, p3].filter((p) => p.core === 1)) engine.kill(p.pid)
+    expect(engine.getMetrics().loadPerCore[1]).toBe(0)
+
+    for (let i = 0; i < 5; i++) engine.tick()
+    // Counting only queued processes would have read this as 0-vs-1 —
+    // under the threshold — and left the idle core idle forever.
+    expect(engine.getMetrics().migrations).toBeGreaterThan(0)
+    expect(engine.getMetrics().loadPerCore[1]).toBeGreaterThan(0)
+  })
+
+  it('never migrates with balancing switched off, however lopsided things get', () => {
+    const engine = twoCores(0)
+    const processes = Array.from({ length: 4 }, (_, i) => createProcess(`p${i}`, 'cpu-bound', [200]))
+    for (const p of processes) engine.spawn(p)
+    engine.tick()
+    for (const p of processes.filter((p) => p.core === 1)) engine.kill(p.pid)
+
+    for (let i = 0; i < 50; i++) engine.tick()
+    expect(engine.getMetrics().migrations).toBe(0)
+  })
+
+  it('measures utilization in core-ticks, so one busy CPU out of two is 50%', () => {
+    const engine = twoCores()
+    const p1 = createProcess('a', 'cpu-bound', [10])
+    engine.spawn(p1)
+    for (let i = 0; i < 4; i++) engine.tick()
+
+    // Admission and dispatch both happen within a tick, so all 4 ticks ran
+    // it — 4 busy core-ticks out of 4 ticks x 2 cores. The other CPU had
+    // nothing to run, and that idleness is exactly what this figure is
+    // supposed to expose.
+    expect(engine.getMetrics().cpuUtilization).toBeCloseTo(4 / 8)
+  })
+
+  it('boosts within each CPU rather than relocating processes as a side effect', () => {
+    const engine = new SchedulerEngine({ quanta: [1, 2, Infinity], boostInterval: 6, coreCount: 2, balanceInterval: 0 })
+    const p1 = createProcess('a', 'cpu-bound', [50])
+    const p2 = createProcess('b', 'cpu-bound', [50])
+    engine.spawn(p1)
+    engine.spawn(p2)
+    engine.tick()
+    const homes = [p1.core, p2.core]
+
+    let boosted = false
+    for (let i = 0; i < 12 && !boosted; i++) boosted = engine.tick().boosted
+    expect(boosted).toBe(true)
+    expect([p1.core, p2.core]).toEqual(homes) // a boost is about starvation, not load
+  })
+
+  it('a killed process is removed from whichever CPU queue holds it, even after a migration', () => {
+    const engine = twoCores(1)
+    const processes = Array.from({ length: 4 }, (_, i) => createProcess(`p${i}`, 'cpu-bound', [200]))
+    for (const p of processes) engine.spawn(p)
+    engine.tick()
+    for (const p of processes.filter((p) => p.core === 1)) engine.kill(p.pid)
+    for (let i = 0; i < 10; i++) engine.tick()
+
+    const survivor = processes.find((p) => p.state !== 'TERMINATED')!
+    engine.kill(survivor.pid)
+    for (let i = 0; i < 5; i++) {
+      const { pids } = engine.tick().sample
+      expect(pids).not.toContain(survivor.pid)
+    }
+  })
+})

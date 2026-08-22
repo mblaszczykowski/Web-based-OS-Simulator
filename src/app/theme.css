@@ -1387,3 +1387,31 @@ button {
   background: var(--accent-fs);
   border-color: var(--accent-fs);
 }
+
+
+/* Per-CPU Gantt rows (roadmap-v5.md §2.3). The label column is fixed-width
+   so every core's timeline starts at the same x — the rows are meant to be
+   read against each other, which only works if their tick columns line up. */
+.gantt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gantt-row + .gantt-row {
+  margin-top: 4px;
+}
+
+.gantt-row .gantt {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+}
+
+.gantt-core-label {
+  flex: 0 0 34px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}

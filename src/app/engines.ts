@@ -481,14 +481,20 @@ export function stepSimulation() {
   sync.tick()
   network.tick()
 
-  // Whoever is running this tick touches one page of its own address
-  // space — this is what actually drives page faults / Clock evictions
-  // over time. Accessed by memoryOwnerPid, not pid: for an ordinary
-  // process those are the same value, but a thread (roadmap-v4.md §2.1)
-  // must access its *group's* shared page table, not one keyed by its own
-  // pid (which memory/engine.ts never allocated anything under).
-  const running = scheduler.getRunning()
-  if (running) {
+  // Every CPU that ran something this tick touches one page of that
+  // process's address space — this is what actually drives page faults /
+  // Clock evictions over time. Accessed by memoryOwnerPid, not pid: for an
+  // ordinary process those are the same value, but a thread
+  // (roadmap-v4.md §2.1) must access its *group's* shared page table, not
+  // one keyed by its own pid (which memory/engine.ts never allocated
+  // anything under).
+  //
+  // One access per busy core, not one per tick (roadmap-v5.md §2.3): with
+  // two CPUs running, twice as much memory is being referenced, and
+  // pretending otherwise would halve the observed fault rate and quietly
+  // make the thrashing indicator unreachable.
+  for (const running of scheduler.getRunningProcesses()) {
+    if (!running) continue
     const page = Math.floor(Math.random() * running.pageCount)
     const isWrite = Math.random() < 0.3 // most memory references are reads
     const access = memory.access(running.memoryOwnerPid, page, isWrite)
