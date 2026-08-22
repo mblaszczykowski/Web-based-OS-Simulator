@@ -147,7 +147,7 @@ export interface ContiguousBlock {
 // Filesystem
 // ---------------------------------------------------------------------------
 
-export type DirNodeType = 'file' | 'dir'
+export type DirNodeType = 'file' | 'dir' | 'symlink'
 
 export interface DirEntry {
   name: string
@@ -156,6 +156,14 @@ export interface DirEntry {
   inode?: number
   /** Only present for directories. */
   children?: DirEntry[]
+  /**
+   * Only present for symlinks (roadmap-v5.md §2.2) — the path this link
+   * points at, stored exactly as it was written. A symlink carries no
+   * inode and owns no blocks: it is a name that resolves to another name,
+   * which is precisely what distinguishes it from the hard link next to it
+   * (roadmap-v3.md §2.1) and why it may dangle.
+   */
+  target?: string
 }
 
 export interface Inode {
@@ -173,7 +181,7 @@ export interface DiskBlock {
   owner: number | null
 }
 
-export type JournalOp = 'create' | 'write' | 'delete' | 'mkdir' | 'move' | 'copy' | 'link' | 'chmod'
+export type JournalOp = 'create' | 'write' | 'delete' | 'mkdir' | 'move' | 'copy' | 'link' | 'symlink' | 'chmod'
 
 export interface JournalEntry {
   id: number

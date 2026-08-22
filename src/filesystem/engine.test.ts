@@ -493,3 +493,214 @@ describe('FilesystemEngine — I/O scheduling (roadmap-v4.md §1.1)', () => {
     expect(fs.getIoState()).toEqual({ pending: [], headPosition: 0, direction: 1, recentlyCompleted: [] })
   })
 })
+
+describe('FilesystemEngine — symbolic links (roadmap-v5.md §2.2)', () => {
+  function fresh() {
+    return new FilesystemEngine({ blockCount: 16, blockSizeBytes: 16, journalHistoryLimit: 50 })
+  }
+
+  /** list() that throws rather than returning an error result, so a test reads as one line. */
+  function entriesOf(fs: FilesystemEngine, path = '/') {
+    const result = fs.list(path)
+    if (!result.ok) throw new Error(result.error)
+    return result.entries
+  }
+
+  it('reads through a symlink to the file it names', () => {
+    const fs = fresh()
+    fs.write('/notes.txt', 'hello')
+    expect(fs.symlink('/notes.txt', '/link')).toEqual({ ok: true })
+    expect(fs.read('/link')).toEqual({ ok: true, content: 'hello' })
+  })
+
+  it('writes through a symlink to the target, not to the link', () => {
+    const fs = fresh()
+    fs.write('/notes.txt', 'a')
+    fs.symlink('/notes.txt', '/link')
+    fs.write('/link', 'b')
+    expect(fs.read('/notes.txt')).toEqual({ ok: true, content: 'ab' })
+    // And the link is still a link, not a file that shadowed the target.
+    expect(entriesOf(fs).find((e) => e.name === 'link')).toMatchObject({ type: 'symlink', target: '/notes.txt' })
+  })
+
+  it('rm on a symlink removes the link and leaves the target alone — the case that deletes the wrong file if followed', () => {
+    const fs = fresh()
+    fs.write('/notes.txt', 'hello')
+    fs.symlink('/notes.txt', '/link')
+
+    expect(fs.delete('/link')).toEqual({ ok: true })
+    expect(fs.read('/notes.txt')).toEqual({ ok: true, content: 'hello' })
+    expect(entriesOf(fs).some((e) => e.name === 'link')).toBe(false)
+  })
+
+  it('may dangle: creating a link to a path that does not exist is legal, and it starts working when the target appears', () => {
+    const fs = fresh()
+    expect(fs.symlink('/later.txt', '/link')).toEqual({ ok: true })
+    expect(fs.read('/link').ok).toBe(false) // nothing there yet
+
+    fs.write('/later.txt', 'now')
+    expect(fs.read('/link')).toEqual({ ok: true, content: 'now' })
+  })
+
+  it('resolves a relative target against the directory the link lives in', () => {
+    const fs = fresh()
+    fs.write('/home/notes.txt', 'hi')
+    fs.symlink('notes.txt', '/home/link')
+    expect(fs.read('/home/link')).toEqual({ ok: true, content: 'hi' })
+  })
+
+  it('follows a symlink used as an intermediate directory component', () => {
+    const fs = fresh()
+    fs.write('/real/deep/file.txt', 'found')
+    fs.symlink('/real/deep', '/shortcut')
+    expect(fs.read('/shortcut/file.txt')).toEqual({ ok: true, content: 'found' })
+    expect(fs.list('/shortcut').ok).toBe(true)
+  })
+
+  it('follows a chain of links', () => {
+    const fs = fresh()
+    fs.write('/a.txt', 'end')
+    fs.symlink('/a.txt', '/b')
+    fs.symlink('/b', '/c')
+    expect(fs.read('/c')).toEqual({ ok: true, content: 'end' })
+  })
+
+  it('gives up on a loop instead of recursing forever (ELOOP)', () => {
+    const fs = fresh()
+    fs.symlink('/loop-b', '/loop-a')
+    fs.symlink('/loop-a', '/loop-b')
+    const result = fs.read('/loop-a')
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.error).toContain('Too many levels of symbolic links')
+  })
+
+  it('a link pointing at itself is created but never followed', () => {
+    const fs = fresh()
+    expect(fs.symlink('/self', '/self')).toEqual({ ok: true })
+    expect(fs.read('/self').ok).toBe(false)
+  })
+
+  it('refuses to create a link where something already exists', () => {
+    const fs = fresh()
+    fs.write('/taken.txt', 'x')
+    expect(fs.symlink('/a', '/taken.txt').ok).toBe(false)
+    fs.symlink('/a', '/link')
+    expect(fs.symlink('/b', '/link').ok).toBe(false)
+  })
+
+  it('a hard link made through a symlink lands on the real inode, not on the link', () => {
+    const fs = fresh()
+    fs.write('/notes.txt', 'shared')
+    fs.symlink('/notes.txt', '/link')
+    expect(fs.link('/link', '/hard')).toEqual({ ok: true })
+
+    // The hard link shares content with the original file...
+    fs.write('/hard', '!')
+    expect(fs.read('/notes.txt')).toEqual({ ok: true, content: 'shared!' })
+    // ...and the inode's link count reflects two real names, not three.
+    expect(fs.getInodes()[0]!.links).toBe(2)
+  })
+
+  it('mv moves the link itself rather than what it points at', () => {
+    const fs = fresh()
+    fs.write('/notes.txt', 'hello')
+    fs.symlink('/notes.txt', '/link')
+    expect(fs.move('/link', '/moved')).toEqual({ ok: true })
+
+    expect(fs.read('/notes.txt')).toEqual({ ok: true, content: 'hello' }) // untouched
+    expect(fs.read('/moved')).toEqual({ ok: true, content: 'hello' }) // still resolves
+    expect(entriesOf(fs).find((e) => e.name === 'moved')).toMatchObject({ type: 'symlink' })
+  })
+
+  it('chmod through a symlink changes the target — a link has no permission bits of its own', () => {
+    const fs = fresh()
+    fs.write('/notes.txt', 'x')
+    fs.symlink('/notes.txt', '/link')
+    fs.chmod('/link', 4) // r--
+
+    expect(fs.write('/notes.txt', 'more').ok).toBe(false) // the target really lost its write bit
+    expect(fs.read('/link')).toEqual({ ok: true, content: 'x' })
+  })
+
+  it('owns no blocks — a link costs a directory entry and nothing else', () => {
+    const fs = fresh()
+    const before = fs.getMetrics().usedBlocks
+    fs.symlink('/somewhere', '/link')
+    expect(fs.getMetrics().usedBlocks).toBe(before)
+    expect(fs.getInodes()).toHaveLength(0)
+  })
+
+  it('survives an export/import round trip', () => {
+    const fs = fresh()
+    fs.write('/notes.txt', 'hello')
+    fs.symlink('/notes.txt', '/link')
+
+    const restored = fresh()
+    expect(restored.importState(fs.exportState())).toBe(true)
+    expect(restored.read('/link')).toEqual({ ok: true, content: 'hello' })
+  })
+
+  it('replays through the journal after a crash like every other operation', () => {
+    const fs = fresh()
+    fs.write('/notes.txt', 'hello')
+    fs.symlink('/notes.txt', '/link')
+    const ops = fs.getJournal().map((e) => e.op)
+    expect(ops).toContain('symlink')
+    expect(fs.getJournal().every((e) => e.status === 'committed')).toBe(true)
+  })
+})
+
+describe('FilesystemEngine — free-space bit vector (roadmap-v5.md §2.2)', () => {
+  it('reports usage straight from the bitmap the allocator consults', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    expect(fs.getMetrics()).toMatchObject({ usedBlocks: 0, freeBlocks: 8, totalBlocks: 8 })
+
+    fs.write('/a.txt', 'hello') // 5 bytes -> 2 blocks
+    expect(fs.getMetrics()).toMatchObject({ usedBlocks: 2, freeBlocks: 6 })
+    expect(fs.getFreeSpaceBitmap().filter(Boolean)).toHaveLength(2)
+  })
+
+  it('keeps the bitmap and the block owners in agreement across allocate/free cycles', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    const agree = () =>
+      fs.getFreeSpaceBitmap().every((allocated, index) => allocated === (fs.getBlocks()[index]!.owner !== null))
+
+    fs.write('/a.txt', 'hello world')
+    expect(agree()).toBe(true)
+    fs.write('/b.txt', 'more')
+    expect(agree()).toBe(true)
+    fs.delete('/a.txt')
+    expect(agree()).toBe(true)
+    expect(fs.getMetrics().usedBlocks).toBe(1)
+  })
+
+  it('reuses freed blocks, lowest first', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'aaaa') // block 0
+    fs.write('/b.txt', 'bbbb') // block 1
+    fs.delete('/a.txt') // frees block 0
+    fs.write('/c.txt', 'cccc')
+
+    expect(fs.getInodes().find((i) => i.blockIds.includes(0))).toBeDefined()
+    expect(fs.getMetrics().usedBlocks).toBe(2)
+  })
+
+  it('rebuilds the bitmap from the disk on import, rather than carrying over stale bits', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hello world') // 3 blocks
+
+    const other = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    other.write('/x.txt', 'x') // 1 block of its own first
+    expect(other.importState(fs.exportState())).toBe(true)
+    expect(other.getMetrics().usedBlocks).toBe(3)
+    expect(other.getFreeSpaceBitmap().filter(Boolean)).toHaveLength(3)
+  })
+
+  it('clears the bitmap on reset', () => {
+    const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
+    fs.write('/a.txt', 'hello')
+    fs.resetToEmpty()
+    expect(fs.getMetrics()).toMatchObject({ usedBlocks: 0, freeBlocks: 8 })
+    expect(fs.getFreeSpaceBitmap().every((b) => !b)).toBe(true)
+  })
+})

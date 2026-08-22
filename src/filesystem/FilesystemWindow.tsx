@@ -7,6 +7,21 @@ import { rwxTriplet } from './engine'
 import { colorForPid, labelColorForPid } from '../app/colors'
 
 function TreeNode({ entry, depth }: { entry: DirEntry; depth: number }) {
+  if (entry.type === 'symlink') {
+    // roadmap-v5.md §2.2 — shown with the target rather than as a plain
+    // name, because the target is the only thing that distinguishes a
+    // symlink from the hard link beside it (a hard link is genuinely
+    // indistinguishable from the original name, and correctly renders as
+    // an ordinary file here).
+    return (
+      <div className="tree-row file" style={{ paddingLeft: depth * 16 }} title={`symbolic link → ${entry.target ?? '?'}`}>
+        <FileIcon />
+        <span>
+          {entry.name} <span className="term-muted">&rarr; {entry.target}</span>
+        </span>
+      </div>
+    )
+  }
   if (entry.type === 'file') {
     return (
       <div className="tree-row file" style={{ paddingLeft: depth * 16 }}>
@@ -67,6 +82,7 @@ export function FilesystemWindow() {
   const journal = filesystem.getJournal()
   const crashed = filesystem.isCrashed()
   const metrics = filesystem.getMetrics()
+  const freeSpaceBitmap = filesystem.getFreeSpaceBitmap()
   const ioState = filesystem.getIoState()
   const ioMetrics = filesystem.getIoMetrics()
   const blockedOnDisk = scheduler.getProcesses().filter((p) => p.blockedOn === 'device')
@@ -128,6 +144,14 @@ export function FilesystemWindow() {
                   free
                 </span>
               </div>
+            </div>
+            {/* roadmap-v5.md §2.2 — the free-space bit vector the allocator
+                actually consults, next to the block grid it describes. One
+                cell per block, so the two line up row for row. */}
+            <div className="bitmap-strip" style={{ marginTop: 8 }} title="Free-space bitmap: filled = allocated">
+              {freeSpaceBitmap.map((allocated, index) => (
+                <span key={index} className={`bitmap-bit${allocated ? ' allocated' : ''}`} />
+              ))}
             </div>
             <div className="disk-grid" style={{ marginTop: 8 }}>
               {blocks.map((b) => (

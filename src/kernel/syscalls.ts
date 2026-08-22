@@ -267,6 +267,12 @@ export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTra
       return result
     },
 
+    fsSymlink: (target, link) => {
+      const result = ctx.fsSymlink(target, link)
+      emit(`symlink(${quote(target)}, ${quote(link)}) = ${result.ok ? '0' : '-1 EEXIST'}`)
+      return result
+    },
+
     fsChmod: (path, mode) => {
       const result = ctx.fsChmod(path, mode)
       emit(`chmod(${quote(path)}, 0${mode}00) = ${result.ok ? '0' : '-1 ENOENT'}`)

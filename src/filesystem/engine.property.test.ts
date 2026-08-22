@@ -11,7 +11,15 @@ import { FilesystemEngine } from './engine'
 // anything new; `chmod` (§2.3) is included because it's the one op that
 // can turn a *later* write/delete in the same sequence into a rejection
 // that must still leave the block table untouched — exactly the kind of
-// accounting edge case this test exists to catch.
+// accounting edge case this test exists to catch. `symlink` (roadmap-v5.md
+// §2.2) is included for the mirror-image reason: it allocates nothing at
+// all, but it redirects where every *later* op in the sequence lands, so a
+// mistake in resolution shows up here as blocks going missing.
+//
+// Since usedBlocks/freeBlocks are now read from the free-space bit vector
+// while `blocks[].owner` is what the grid renders, the "ground truth"
+// assertions below double as the check that those two representations
+// never drift apart.
 
 const PATHS = ['/a.txt', '/b.txt', '/c.txt'] as const
 const opArb = fc.oneof(
@@ -39,6 +47,11 @@ const opArb = fc.oneof(
     path: fc.constantFrom(...PATHS),
     mode: fc.integer({ min: 0, max: 7 }),
   }),
+  fc.record({
+    kind: fc.constant('symlink' as const),
+    path: fc.constantFrom(...PATHS),
+    target: fc.constantFrom(...PATHS),
+  }),
 )
 
 describe('FilesystemEngine — property: block accounting always reconciles', () => {
@@ -55,6 +68,7 @@ describe('FilesystemEngine — property: block accounting always reconciles', ()
           else if (op.kind === 'move') fs.move(op.path, op.target)
           else if (op.kind === 'copy') fs.copy(op.path, op.target)
           else if (op.kind === 'link') fs.link(op.path, op.target)
+          else if (op.kind === 'symlink') fs.symlink(op.target, op.path)
           else fs.chmod(op.path, op.mode)
 
           const m = fs.getMetrics()

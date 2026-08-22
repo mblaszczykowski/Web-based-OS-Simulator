@@ -1,6 +1,7 @@
 import type { DirEntry, DiskBlock, Inode, JournalEntry, JournalOp } from '../shared/types'
 import { simBus } from '../shared/eventBus'
 import { IoScheduler, type CompletedIoRequest, type IoSchedulerMetrics, type IoSchedulerState } from './ioScheduler'
+import { FreeSpaceBitmap } from './freeSpaceBitmap'
 
 export interface FilesystemConfig {
   blockCount: number
@@ -87,10 +88,35 @@ export class FilesystemEngine {
   private ioScheduler: IoScheduler
   /** See drainAbandonedIoWaiters(). */
   private abandonedIoWaiters: number[] = []
+  /**
+   * The authority on which blocks are free — roadmap-v5.md §2.2. Kept in
+   * lockstep with `blocks[].owner` by claimBlock()/releaseBlock() below,
+   * which are the only two places allowed to change either.
+   */
+  private freeSpace: FreeSpaceBitmap
 
   constructor(private config: FilesystemConfig = DEFAULT_FS_CONFIG) {
     this.blocks = Array.from({ length: config.blockCount }, (_, index) => ({ index, owner: null }))
     this.ioScheduler = new IoScheduler(config.blockCount, config.seekCylindersPerTick ?? 1)
+    this.freeSpace = new FreeSpaceBitmap(config.blockCount)
+  }
+
+  /**
+   * The only place a block becomes allocated, and the only place it
+   * becomes free again. Both representations — the bitmap that decides
+   * availability and the owner field the grid renders — are updated here
+   * together, so they cannot drift apart.
+   */
+  private claimBlock(blockIndex: number, inodeId: number): void {
+    this.freeSpace.claim(blockIndex)
+    const block = this.blocks[blockIndex]
+    if (block) block.owner = inodeId
+  }
+
+  private releaseBlock(blockIndex: number): void {
+    this.freeSpace.release(blockIndex)
+    const block = this.blocks[blockIndex]
+    if (block) block.owner = null
   }
 
   /**
@@ -166,12 +192,16 @@ export class FilesystemEngine {
   mkdir(path: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
-    if (this.findFileEntry(path) || this.findDirEntry(path)) {
+    // The directory being created is the final component, so it is never
+    // followed — but the path leading to it may run through symlinks.
+    const resolved = this.resolveLinks(path, false)
+    if (!resolved.ok) return { ok: false, error: `mkdir: ${resolved.error}` }
+    if (this.findFileEntry(resolved.path) || this.findDirEntry(resolved.path) || this.findSymlinkEntry(resolved.path)) {
       return { ok: false, error: `mkdir: ${path}: File exists` }
     }
-    if (this.ancestorIsFile(path)) return { ok: false, error: `mkdir: ${path}: Not a directory` }
+    if (this.ancestorIsFile(resolved.path)) return { ok: false, error: `mkdir: ${path}: Not a directory` }
 
-    this.commitJournalEntry('mkdir', { path, touchedPath: path })
+    this.commitJournalEntry('mkdir', { path: resolved.path, touchedPath: resolved.path })
     return { ok: true }
   }
 
@@ -179,14 +209,22 @@ export class FilesystemEngine {
   move(srcPath: string, destPath: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
-    if (this.findDirEntry(srcPath)) return { ok: false, error: `mv: ${srcPath}: Is a directory` }
-    if (!this.findFileEntry(srcPath)) return { ok: false, error: `mv: ${srcPath}: No such file or directory` }
-    if (this.findFileEntry(destPath) || this.findDirEntry(destPath)) {
+    // Neither end follows its final component: `mv link elsewhere` moves
+    // the link, it does not move what the link points at.
+    const src = this.resolveLinks(srcPath, false)
+    if (!src.ok) return { ok: false, error: `mv: ${src.error}` }
+    const dest = this.resolveLinks(destPath, false)
+    if (!dest.ok) return { ok: false, error: `mv: ${dest.error}` }
+    if (this.findDirEntry(src.path)) return { ok: false, error: `mv: ${srcPath}: Is a directory` }
+    if (!this.findFileEntry(src.path) && !this.findSymlinkEntry(src.path)) {
+      return { ok: false, error: `mv: ${srcPath}: No such file or directory` }
+    }
+    if (this.findFileEntry(dest.path) || this.findDirEntry(dest.path) || this.findSymlinkEntry(dest.path)) {
       return { ok: false, error: `mv: ${destPath}: already exists` }
     }
-    if (this.ancestorIsFile(destPath)) return { ok: false, error: `mv: ${destPath}: Not a directory` }
+    if (this.ancestorIsFile(dest.path)) return { ok: false, error: `mv: ${destPath}: Not a directory` }
 
-    this.commitJournalEntry('move', { path: srcPath, target: destPath, touchedPath: destPath })
+    this.commitJournalEntry('move', { path: src.path, target: dest.path, touchedPath: dest.path })
     return { ok: true }
   }
 
@@ -200,14 +238,42 @@ export class FilesystemEngine {
   link(srcPath: string, destPath: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
-    if (this.findDirEntry(srcPath)) return { ok: false, error: `ln: ${srcPath}: hard link not allowed for directory` }
-    if (!this.findFileEntry(srcPath)) return { ok: false, error: `ln: ${srcPath}: No such file or directory` }
-    if (this.findFileEntry(destPath) || this.findDirEntry(destPath)) {
+    // A hard link points at an inode, so its source IS followed through a
+    // symlink — the new name ends up on the real file, not on the link.
+    const src = this.resolveLinks(srcPath, true)
+    if (!src.ok) return { ok: false, error: `ln: ${src.error}` }
+    const dest = this.resolveLinks(destPath, false)
+    if (!dest.ok) return { ok: false, error: `ln: ${dest.error}` }
+    if (this.findDirEntry(src.path)) return { ok: false, error: `ln: ${srcPath}: hard link not allowed for directory` }
+    if (!this.findFileEntry(src.path)) return { ok: false, error: `ln: ${srcPath}: No such file or directory` }
+    if (this.findFileEntry(dest.path) || this.findDirEntry(dest.path) || this.findSymlinkEntry(dest.path)) {
       return { ok: false, error: `ln: ${destPath}: already exists` }
     }
-    if (this.ancestorIsFile(destPath)) return { ok: false, error: `ln: ${destPath}: Not a directory` }
+    if (this.ancestorIsFile(dest.path)) return { ok: false, error: `ln: ${destPath}: Not a directory` }
 
-    this.commitJournalEntry('link', { path: srcPath, target: destPath, touchedPath: destPath })
+    this.commitJournalEntry('link', { path: src.path, target: dest.path, touchedPath: dest.path })
+    return { ok: true }
+  }
+
+  /**
+   * Creates a symbolic link at `linkPath` pointing at `targetPath` —
+   * roadmap-v5.md §2.2, `ln -s`. Unlike link() next door, the target is
+   * neither resolved nor required to exist: a symlink stores a *name*, and
+   * a dangling one is a legal and useful thing (it starts working the
+   * moment its target is created). That is the whole difference from the
+   * hard link this sits beside.
+   */
+  symlink(targetPath: string, linkPath: string): FsResult {
+    const crashedError = this.rejectIfCrashed()
+    if (crashedError) return crashedError
+    const link = this.resolveLinks(linkPath, false)
+    if (!link.ok) return { ok: false, error: `ln: ${link.error}` }
+    if (this.findFileEntry(link.path) || this.findDirEntry(link.path) || this.findSymlinkEntry(link.path)) {
+      return { ok: false, error: `ln: ${linkPath}: already exists` }
+    }
+    if (this.ancestorIsFile(link.path)) return { ok: false, error: `ln: ${linkPath}: Not a directory` }
+
+    this.commitJournalEntry('symlink', { path: link.path, target: targetPath, touchedPath: link.path })
     return { ok: true }
   }
 
@@ -215,30 +281,41 @@ export class FilesystemEngine {
   chmod(path: string, mode: number): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
-    if (this.findDirEntry(path)) return { ok: false, error: `chmod: ${path}: Is a directory` }
-    if (!this.findFileEntry(path)) return { ok: false, error: `chmod: ${path}: No such file or directory` }
+    // Permissions live on the inode, and a symlink has none — so chmod
+    // follows it through to the file it names, like the real one does.
+    const resolved = this.resolveLinks(path, true)
+    if (!resolved.ok) return { ok: false, error: `chmod: ${resolved.error}` }
+    if (this.findDirEntry(resolved.path)) return { ok: false, error: `chmod: ${path}: Is a directory` }
+    if (!this.findFileEntry(resolved.path)) return { ok: false, error: `chmod: ${path}: No such file or directory` }
 
-    this.commitJournalEntry('chmod', { path, content: String(mode), touchedPath: path })
+    this.commitJournalEntry('chmod', { path: resolved.path, content: String(mode), touchedPath: resolved.path })
     return { ok: true }
   }
 
   copy(srcPath: string, destPath: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
+    // `cp` copies content, so the source is followed; the destination is
+    // a new name and never is.
+    const src = this.resolveLinks(srcPath, true)
+    if (!src.ok) return { ok: false, error: `cp: ${src.error}` }
+    const dest = this.resolveLinks(destPath, false)
+    if (!dest.ok) return { ok: false, error: `cp: ${dest.error}` }
+    srcPath = src.path
+    destPath = dest.path
     if (this.findDirEntry(srcPath)) return { ok: false, error: `cp: ${srcPath}: Is a directory` }
     const srcEntry = this.findFileEntry(srcPath)
     if (!srcEntry) return { ok: false, error: `cp: ${srcPath}: No such file or directory` }
     const srcInode = this.inodes.get(srcEntry.inode!)!
     if (!(srcInode.mode & MODE_READ)) return { ok: false, error: `cp: ${srcPath}: Permission denied` }
-    if (this.findFileEntry(destPath) || this.findDirEntry(destPath)) {
+    if (this.findFileEntry(destPath) || this.findDirEntry(destPath) || this.findSymlinkEntry(destPath)) {
       return { ok: false, error: `cp: ${destPath}: already exists` }
     }
     if (this.ancestorIsFile(destPath)) return { ok: false, error: `cp: ${destPath}: Not a directory` }
 
     const content = srcInode.content
     const neededBlocks = content.length === 0 ? 0 : Math.ceil(content.length / this.config.blockSizeBytes)
-    const freeBlocks = this.blocks.filter((b) => b.owner === null).length
-    if (neededBlocks > freeBlocks) return { ok: false, error: `cp: ${destPath}: No space left on device` }
+    if (neededBlocks > this.freeSpace.freeCount) return { ok: false, error: `cp: ${destPath}: No space left on device` }
 
     this.commitJournalEntry('copy', { path: destPath, content, target: srcPath, touchedPath: destPath })
     return { ok: true }
@@ -246,12 +323,16 @@ export class FilesystemEngine {
 
   list(
     path = '/',
-  ): { ok: true; entries: { name: string; type: DirEntry['type']; mode?: number; size?: number }[] } | { ok: false; error: string } {
+  ):
+    | { ok: true; entries: { name: string; type: DirEntry['type']; mode?: number; size?: number; target?: string }[] }
+    | { ok: false; error: string } {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
+    const resolved = this.resolveLinks(path, true)
+    if (!resolved.ok) return { ok: false, error: `ls: ${resolved.error}` }
     let dir: DirEntry
     try {
-      dir = this.resolveDir(this.splitPath(path), false)
+      dir = this.resolveDir(this.splitPath(resolved.path), false)
     } catch {
       return { ok: false, error: `ls: ${path}: No such file or directory` }
     }
@@ -260,6 +341,9 @@ export class FilesystemEngine {
         const inode = this.inodes.get(c.inode!)
         return { name: c.name, type: c.type, mode: inode?.mode, size: inode?.size }
       }
+      // A symlink carries its target rather than a mode or a size — it has
+      // neither, and the target is the only thing worth showing for one.
+      if (c.type === 'symlink') return { name: c.name, type: c.type, target: c.target }
       return { name: c.name, type: c.type }
     })
     return { ok: true, entries }
@@ -268,6 +352,10 @@ export class FilesystemEngine {
   read(path: string): FsReadResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
+    // Reading through a symlink reads its target — roadmap-v5.md §2.2.
+    const resolved = this.resolveLinks(path, true)
+    if (!resolved.ok) return { ok: false, error: `cat: ${resolved.error}` }
+    path = resolved.path
     const entry = this.findFileEntry(path)
     if (!entry) return { ok: false, error: `cat: ${path}: No such file or directory` }
     const inode = this.inodes.get(entry.inode!)!
@@ -313,6 +401,21 @@ export class FilesystemEngine {
   private mutate(op: JournalOp, path: string, content?: string, opts: { skipPermissionCheck?: boolean } = {}): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
+
+    // Writing through a symlink writes its target; `rm link` removes the
+    // link and leaves the target alone (roadmap-v5.md §2.2). Getting the
+    // delete case wrong is how `rm` on a symlink deletes the wrong file.
+    const resolved = this.resolveLinks(path, op !== 'delete')
+    if (!resolved.ok) return { ok: false, error: `${op}: ${resolved.error}` }
+    path = resolved.path
+
+    // `rm` on a symlink removes the link itself — it owns no inode and no
+    // blocks, so this is a pure directory-entry removal and never touches
+    // whatever it pointed at.
+    if (op === 'delete' && this.findSymlinkEntry(path)) {
+      this.commitJournalEntry('delete', { path, touchedPath: null })
+      return { ok: true }
+    }
 
     if ((op === 'create' || op === 'write') && this.findDirEntry(path)) {
       return { ok: false, error: `${op}: ${path}: Is a directory` }
@@ -407,6 +510,8 @@ export class FilesystemEngine {
         return this.applyCopy(path, content)
       case 'link':
         return this.applyLink(path, target!)
+      case 'symlink':
+        return this.applySymlink(path, target!)
       case 'chmod':
         return this.applyChmod(path, content)
       default: {
@@ -432,7 +537,7 @@ export class FilesystemEngine {
   }
 
   private applyMove(srcPath: string, destPath: string): void {
-    const fileEntry = this.findFileEntry(srcPath)
+    const fileEntry = this.findFileEntry(srcPath) ?? this.findSymlinkEntry(srcPath)
     if (!fileEntry) return
     const srcSegments = this.splitPath(srcPath)
     srcSegments.pop()
@@ -456,6 +561,22 @@ export class FilesystemEngine {
     const dir = this.resolveDir(segments, true)
     dir.children!.push({ name, type: 'file', inode: inode.id })
     inode.links++
+  }
+
+  /**
+   * `path` is the link's own location and `target` is what it points at,
+   * stored verbatim. Note the argument order is the reverse of
+   * applyLink()'s: a hard link needs its source to exist and is created
+   * *from* it, while a symlink is just a name holding a string and is
+   * perfectly legal when its target doesn't exist at all.
+   */
+  private applySymlink(path: string, target: string): void {
+    if (this.findFileEntry(path) || this.findDirEntry(path) || this.findSymlinkEntry(path)) return
+    const segments = this.splitPath(path)
+    const name = segments.pop()
+    if (!name) return
+    const dir = this.resolveDir(segments, true)
+    dir.children!.push({ name, type: 'symlink', target })
   }
 
   private applyChmod(path: string, modeStr: string): void {
@@ -534,6 +655,17 @@ export class FilesystemEngine {
   }
 
   private applyDelete(path: string, skipPermissionCheck = false): void {
+    // A symlink is a name and nothing else: no inode, no blocks, no
+    // permission bits to check — removing the directory entry is the
+    // whole operation (roadmap-v5.md §2.2).
+    const symlinkEntry = this.findSymlinkEntry(path)
+    if (symlinkEntry) {
+      const linkSegments = this.splitPath(path)
+      linkSegments.pop() // the link's own name; the entry itself is matched by identity below
+      const linkDir = this.resolveDir(linkSegments, false)
+      if (linkDir?.children) linkDir.children = linkDir.children.filter((c) => c !== symlinkEntry)
+      return
+    }
     const fileEntry = this.findFileEntry(path)
     if (!fileEntry) return
     const inode = this.inodes.get(fileEntry.inode!)
@@ -548,8 +680,7 @@ export class FilesystemEngine {
       inode.links--
       if (inode.links <= 0) {
         for (const blockIndex of inode.blockIds) {
-          const block = this.blocks[blockIndex]
-          if (block) block.owner = null
+          this.releaseBlock(blockIndex)
           // Freeing a block is still a physical touch of it (clearing its
           // owner) — modeled as a 'write' for scheduling purposes, same as
           // allocation; there's no separate "erase" kind worth adding.
@@ -564,14 +695,24 @@ export class FilesystemEngine {
     if (dir?.children) dir.children = dir.children.filter((c) => c.name !== name)
   }
 
+  /**
+   * Claims `count` blocks for an inode, walking the free-space bit vector
+   * (roadmap-v5.md §2.2) rather than scanning every DiskBlock. All or
+   * nothing: a partial allocation would leave an inode holding fewer
+   * blocks than its content needs, which no caller here is prepared for.
+   * Every caller has already checked free space itself, so this only
+   * fires if that check and this one ever disagree.
+   */
   private allocateFreeBlocks(inodeId: number, count: number): number[] {
+    if (count <= 0 || count > this.freeSpace.freeCount) return []
     const allocated: number[] = []
-    for (const block of this.blocks) {
-      if (allocated.length >= count) break
-      if (block.owner === null) {
-        block.owner = inodeId
-        allocated.push(block.index)
-      }
+    let next = 0
+    while (allocated.length < count) {
+      next = this.freeSpace.findFirstFree(next)
+      if (next === -1) break
+      this.claimBlock(next, inodeId)
+      allocated.push(next)
+      next++
     }
     for (const blockIndex of allocated) this.ioScheduler.enqueue(blockIndex, 'write', this.tick)
     return allocated
@@ -579,6 +720,84 @@ export class FilesystemEngine {
 
   private splitPath(path: string): string[] {
     return path.split('/').filter(Boolean)
+  }
+
+  /**
+   * How many links deep resolution will go before giving up — the ELOOP
+   * limit every real kernel has, for exactly the same reason: `ln -s /a /a`
+   * is legal to create and impossible to follow.
+   */
+  private static readonly MAX_SYMLINK_DEPTH = 8
+
+  /** Collapses `.`/`..` inside a symlink target, which is written by the user and may contain either. */
+  private static collapse(segments: string[]): string[] {
+    const out: string[] = []
+    for (const seg of segments) {
+      if (seg === '.') continue
+      if (seg === '..') out.pop()
+      else out.push(seg)
+    }
+    return out
+  }
+
+  /**
+   * Rewrites `path` with every symbolic link along it replaced by what it
+   * points at — roadmap-v5.md §2.2. Everything below this method then
+   * works on plain, link-free paths, which is why symlinks needed no
+   * changes to `resolveDir`, `findFileEntry`, the journal or replay.
+   *
+   * `followFinal` distinguishes the two things a caller can mean by a path
+   * that names a link. `cat link` wants the target (true); `rm link`,
+   * `mv link`, and creating a link in the first place want the link itself
+   * (false). Getting this backwards is how `rm` on a symlink deletes the
+   * wrong file.
+   *
+   * A component that doesn't exist stops resolution and the rest of the
+   * path is returned unchanged — the caller's own existence check reports
+   * it. That is also what makes a dangling symlink behave correctly:
+   * following it lands on a name that isn't there, and the caller says so.
+   */
+  private resolveLinks(path: string, followFinal: boolean, depth = 0): { ok: true; path: string } | { ok: false; error: string } {
+    if (depth > FilesystemEngine.MAX_SYMLINK_DEPTH) {
+      return { ok: false, error: `${path}: Too many levels of symbolic links` }
+    }
+    const segments = this.splitPath(path)
+    const out: string[] = []
+    let dir: DirEntry = this.root
+
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i]!
+      const child = dir.children?.find((c) => c.name === seg)
+      const isFinal = i === segments.length - 1
+
+      if (!child) {
+        // Nothing here (yet) — leave the remainder alone.
+        out.push(...segments.slice(i))
+        break
+      }
+
+      if (child.type === 'symlink' && (!isFinal || followFinal)) {
+        const target = child.target ?? ''
+        // An absolute target restarts from the root; a relative one is
+        // interpreted against the directory the link lives in, which is
+        // what makes `ln -s notes.txt here` work the way it reads.
+        const base = target.startsWith('/') ? this.splitPath(target) : [...out, ...this.splitPath(target)]
+        const combined = FilesystemEngine.collapse([...base, ...segments.slice(i + 1)])
+        return this.resolveLinks(`/${combined.join('/')}`, followFinal, depth + 1)
+      }
+
+      out.push(seg)
+      if (child.type === 'dir') {
+        dir = child
+      } else {
+        // A file (or an unfollowed link) mid-path: the caller's own
+        // ancestorIsFile()/existence checks are what reject that, so the
+        // remainder is passed through untouched.
+        out.push(...segments.slice(i + 1))
+        break
+      }
+    }
+    return { ok: true, path: `/${out.join('/')}` }
   }
 
   private resolveDir(segments: string[], create: boolean): DirEntry {
@@ -637,8 +856,21 @@ export class FilesystemEngine {
     const newLength = currentContent.length + text.length
     const neededBlocks = newLength === 0 ? 0 : Math.ceil(newLength / this.config.blockSizeBytes)
     const grow = Math.max(0, neededBlocks - currentBlocks)
-    const freeBlocks = this.blocks.filter((b) => b.owner === null).length
-    return grow > freeBlocks
+    return grow > this.freeSpace.freeCount
+  }
+
+  /** The symlink entry at `path`, if the final component is one. Never follows it — see resolveLinks(). */
+  private findSymlinkEntry(path: string): DirEntry | undefined {
+    const segments = this.splitPath(path)
+    const name = segments.pop()
+    if (!name) return undefined
+    let dir: DirEntry
+    try {
+      dir = this.resolveDir(segments, false)
+    } catch {
+      return undefined
+    }
+    return dir.children?.find((c) => c.name === name && c.type === 'symlink')
   }
 
   /** Does `path` already exist as a directory? Used to reject file ops that would collide with one. */
@@ -686,11 +918,15 @@ export class FilesystemEngine {
     return this.ioScheduler.getMetrics()
   }
 
+  /** The free-space bit vector, allocated = true — roadmap-v5.md §2.2. */
+  getFreeSpaceBitmap(): boolean[] {
+    return this.freeSpace.toArray()
+  }
+
   getMetrics() {
-    const used = this.blocks.filter((b) => b.owner !== null).length
     return {
-      usedBlocks: used,
-      freeBlocks: this.blocks.length - used,
+      usedBlocks: this.freeSpace.used,
+      freeBlocks: this.freeSpace.freeCount,
       totalBlocks: this.blocks.length,
       pendingJournalEntries: this.journal.filter((e) => e.status === 'pending').length,
     }
@@ -758,6 +994,9 @@ export class FilesystemEngine {
       // process/frame state the scheduler and memory engines never
       // persist either), so it's reset rather than carried over stale.
       this.abandonedIoWaiters.push(...this.ioScheduler.reset())
+      // Ground truth for a freshly imported disk is the blocks it came
+      // with, so the bitmap is rebuilt from them rather than carried over.
+      this.freeSpace.rebuild((index) => this.blocks[index]?.owner != null)
       return true
     } catch {
       return false
@@ -776,5 +1015,6 @@ export class FilesystemEngine {
     this.crashed = false
     this.lastTouchedPath = null
     this.abandonedIoWaiters.push(...this.ioScheduler.reset())
+    this.freeSpace.rebuild(() => false)
   }
 }

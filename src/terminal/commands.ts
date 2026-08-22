@@ -60,6 +60,16 @@ export interface PipeStatusView {
   readerOpen: boolean
 }
 
+/** Block usage as `df` reports it — roadmap-v5.md §2.2. */
+export interface FsUsageView {
+  totalBlocks: number
+  usedBlocks: number
+  freeBlocks: number
+  blockSizeBytes: number
+  /** The free-space bit vector itself, allocated = true — so `df -m` can print it. */
+  bitmap: boolean[]
+}
+
 export interface SyncStatusView {
   capacity: number
   occupancy: number
@@ -106,7 +116,9 @@ export interface CommandContext {
   memoryMetrics(): MemoryMetricsView
   fsList(
     path: string,
-  ): { ok: true; entries: { name: string; type: string; mode?: number; size?: number }[] } | { ok: false; error: string }
+  ):
+    | { ok: true; entries: { name: string; type: string; mode?: number; size?: number; target?: string }[] }
+    | { ok: false; error: string }
   fsRead(path: string): { ok: true; content: string } | { ok: false; error: string }
   fsCreate(path: string): { ok: true } | { ok: false; error: string }
   fsWrite(path: string, text: string): { ok: true } | { ok: false; error: string }
@@ -115,6 +127,8 @@ export interface CommandContext {
   fsMove(src: string, dest: string): { ok: true } | { ok: false; error: string }
   fsCopy(src: string, dest: string): { ok: true } | { ok: false; error: string }
   fsLink(target: string, link: string): { ok: true } | { ok: false; error: string }
+  /** Symbolic link — roadmap-v5.md §2.2's `ln -s`. The target is stored verbatim and may not exist. */
+  fsSymlink(target: string, link: string): { ok: true } | { ok: false; error: string }
   fsChmod(path: string, mode: number): { ok: true } | { ok: false; error: string }
   fsCrash(): void
   fsFsck(): { replayed: JournalEntry[] }
@@ -122,6 +136,8 @@ export interface CommandContext {
   fsReset(): void
   /** SCAN disk-head scheduler metrics — roadmap-v4.md §1.1. */
   ioMetrics(): IoMetricsView
+  /** Block usage from the free-space bit vector — roadmap-v5.md §2.2's `df`. */
+  fsUsage(): FsUsageView
   /** Current working directory — roadmap-v3.md §1.1. */
   getCwd(): string
   setCwd(path: string): void
@@ -159,11 +175,13 @@ const HELP_TEXT = [
   '  mv <src> <dest>       move/rename a file',
   '  cp <src> <dest>       copy a file',
   '  ln <target> <link>    create a hard link (shares content with target)',
+  '  ln -s <target> <link>  create a symbolic link (a name pointing at a path)',
   '  rm <file>            delete a file, supports * wildcards',
   '  crash               simulate a power loss mid-write',
   '  fsck                replay the journal and recover the filesystem',
   '  reset-fs             wipe the disk (in memory and the persisted copy)',
   '  iostat               disk I/O scheduler status (SCAN head position, queue, seek/wait)',
+  '  df [-m]               disk block usage; -m also prints the free-space bitmap',
   '  pipe <w> <r>          spawn two processes joined by a real kernel pipe',
   '  pipe                  list open pipes and their buffer occupancy',
   '  lsof                  list open file descriptors, per process',
@@ -212,6 +230,7 @@ export const COMMAND_NAMES = [
   'fsck',
   'reset-fs',
   'iostat',
+  'df',
   'pipe',
   'lsof',
   'sync',
@@ -248,7 +267,12 @@ const MAN_PAGES: Record<string, string[]> = {
   mkdir: ['mkdir - create a directory', 'usage: mkdir <dir>', 'example: mkdir /projects'],
   mv: ['mv - move or rename a file', 'usage: mv <src> <dest>', 'example: mv /a.txt /archive/a.txt'],
   cp: ['cp - copy a file', 'usage: cp <src> <dest>', 'example: cp /a.txt /a.bak.txt'],
-  ln: ['ln - create a hard link', 'usage: ln <target> <link>', 'The link shares content with target; editing one is visible through the other.', 'example: ln /notes.txt /home/notes-link.txt'],
+  ln: [
+    'ln - create a hard link, or with -s a symbolic one',
+    'usage: ln <target> <link> | ln -s <target> <link>',
+    'A hard link is a second name for the same inode: content is shared, and the file survives until every name is removed. A symbolic link stores the target *path* instead, so it may dangle, and `rm` on it removes the link rather than the target.',
+    'example: ln -s /notes.txt /home/notes',
+  ],
   chmod: ['chmod - change file permissions', 'usage: chmod <mode> <file>', 'mode is 1-3 octal digits (e.g. 644 or 6); only the owner digit is meaningful here.', 'example: chmod 644 /notes.txt'],
   rm: ['rm - delete a file', 'usage: rm <file>', 'Supports * wildcards.', 'example: rm *.tmp'],
   grep: [
@@ -260,6 +284,12 @@ const MAN_PAGES: Record<string, string[]> = {
   crash: ['crash - simulate a power loss mid-write', 'usage: crash', 'Leaves a pending write in the journal; recover with fsck.', 'example: crash'],
   fsck: ['fsck - replay the journal and recover the filesystem', 'usage: fsck', 'example: fsck'],
   'reset-fs': ['reset-fs - wipe the disk', 'usage: reset-fs', 'Clears both the in-memory and persisted filesystem back to a fresh, empty disk.', 'example: reset-fs'],
+  df: [
+    'df - disk block usage',
+    'usage: df [-m]',
+    'Blocks used and free, straight from the free-space bit vector the allocator actually consults. -m prints the bitmap itself, one character per block.',
+    'example: df -m',
+  ],
   iostat: ['iostat - disk I/O scheduler status', 'usage: iostat', 'SCAN head position/direction, pending queue depth, average seek distance and wait, requests completed.', 'example: iostat'],
   pipe: [
     'pipe - connect two processes with a real kernel pipe',
@@ -375,13 +405,23 @@ function pct(ratio: number): string {
   return `${Math.round(ratio * 100)}%`
 }
 
-/** One `ls -l` row. Directories don't carry a real Inode (only files do), so they're shown as always-traversable `drwx` — this simulator never restricts directory access, only file content (roadmap-v3.md §2.3). */
-function formatLongEntry(entry: { name: string; type: string; mode?: number; size?: number }): string {
+/**
+ * One `ls -l` row. Directories don't carry a real Inode (only files do), so
+ * they're shown as always-traversable `drwx` — this simulator never
+ * restricts directory access, only file content (roadmap-v3.md §2.3).
+ * A symlink (roadmap-v5.md §2.2) owns neither an inode nor blocks, so its
+ * mode is the conventional always-`lrwx` and its size is zero; what matters
+ * about it is the target, printed after the arrow the way real `ls -l`
+ * does.
+ */
+function formatLongEntry(entry: { name: string; type: string; mode?: number; size?: number; target?: string }): string {
   const isDir = entry.type === 'dir'
-  const kind = isDir ? 'd' : '-'
-  const rwx = rwxTriplet(isDir ? 0b111 : entry.mode ?? 0)
+  const isLink = entry.type === 'symlink'
+  const kind = isDir ? 'd' : isLink ? 'l' : '-'
+  const rwx = rwxTriplet(isDir || isLink ? 0b111 : entry.mode ?? 0)
   const size = String(entry.size ?? 0).padStart(6)
-  return `${kind}${rwx}  ${size}  ${isDir ? `${entry.name}/` : entry.name}`
+  const name = isDir ? `${entry.name}/` : isLink ? `${entry.name} -> ${entry.target ?? '?'}` : entry.name
+  return `${kind}${rwx}  ${size}  ${name}`
 }
 
 /** Splits on whitespace but keeps the tail (e.g. `write`'s text) as one chunk. */
@@ -581,7 +621,7 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       const pathArg = args.find((a) => a !== '-l')
       const render = (entries: { name: string; type: string; mode?: number; size?: number }[]): CommandOutputLine[] => {
         if (longFormat) return out(...entries.map((e) => formatLongEntry(e)))
-        const names = entries.map((e) => (e.type === 'dir' ? `${e.name}/` : e.name))
+        const names = entries.map((e) => (e.type === 'dir' ? `${e.name}/` : e.type === 'symlink' ? `${e.name}@` : e.name))
         return piped ? out(...names) : out(names.join('  '))
       }
       if (pathArg?.includes('*')) {
@@ -688,11 +728,20 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
     }
 
     case 'ln': {
-      if (args.length < 2) return err('ln: usage: ln <target> <link>')
+      const symbolic = args[0] === '-s'
+      const operands = symbolic ? args.slice(1) : args
+      if (operands.length < 2) return err('ln: usage: ln [-s] <target> <link>')
       const cwd = ctx.getCwd()
-      const [target, link] = args
-      const targetPath = resolvePath(cwd, target)
+      const [target, link] = operands
       const linkPath = resolvePath(cwd, link)
+      if (symbolic) {
+        // A symbolic link stores the target as written, so a relative one
+        // stays relative — that is what makes it resolve against wherever
+        // the link ends up living rather than being frozen to this cwd.
+        const result = ctx.fsSymlink(target!, linkPath)
+        return result.ok ? out(`${linkPath} -> ${target} (symbolic link).`) : err(result.error)
+      }
+      const targetPath = resolvePath(cwd, target)
       const result = ctx.fsLink(targetPath, linkPath)
       return result.ok ? out(`${linkPath} => ${targetPath} (hard link).`) : err(result.error)
     }
@@ -727,6 +776,32 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       // code review).
       ctx.setCwd('/')
       return out('[RESET] disk wiped — a fresh, empty filesystem is now mounted.')
+    }
+
+    case 'df': {
+      const u = ctx.fsUsage()
+      const pctUsed = u.totalBlocks === 0 ? 0 : u.usedBlocks / u.totalBlocks
+      const lines = [
+        'FILESYSTEM   BLOCKS    USED    FREE  USE%  BLOCK SIZE',
+        [
+          '/dev/sim0'.padEnd(13),
+          String(u.totalBlocks).padEnd(10),
+          String(u.usedBlocks).padEnd(8),
+          String(u.freeBlocks).padEnd(8),
+          pct(pctUsed).padEnd(6),
+          `${u.blockSizeBytes} B`,
+        ].join(''),
+      ]
+      if (args.includes('-m')) {
+        // One character per block, wrapped to the same 16-wide rows the
+        // Filesystem window's grid uses, so the two read as the same map.
+        lines.push('', 'Free-space bitmap (# = allocated, . = free):')
+        for (let i = 0; i < u.bitmap.length; i += 16) {
+          const row = u.bitmap.slice(i, i + 16).map((used) => (used ? '#' : '.')).join('')
+          lines.push(`  ${String(i).padStart(4)}  ${row}`)
+        }
+      }
+      return out(...lines)
     }
 
     case 'iostat': {

@@ -21,6 +21,7 @@ import {
   resetFilesystem,
 } from './engines'
 import { runCommandLine, type CommandContext } from '../terminal/commands'
+import { DEFAULT_FS_CONFIG } from '../filesystem/engine'
 import { traceSyscalls } from '../kernel/syscalls'
 import { STANDARD_STREAMS } from '../kernel/fdTable'
 import { simBus } from '../shared/eventBus'
@@ -325,11 +326,22 @@ export const useSimStore = create<SimStore>((set, get) => ({
       fsMove: (src, dest) => filesystem.move(src, dest),
       fsCopy: (src, dest) => filesystem.copy(src, dest),
       fsLink: (target, link) => filesystem.link(target, link),
+      fsSymlink: (target, link) => filesystem.symlink(target, link),
       fsChmod: (path, mode) => filesystem.chmod(path, mode),
       fsCrash: () => filesystem.crash(),
       fsFsck: () => filesystem.fsck(),
       fsCrashed: () => filesystem.isCrashed(),
       fsReset: () => resetFilesystem(),
+      fsUsage: () => {
+        const m = filesystem.getMetrics()
+        return {
+          totalBlocks: m.totalBlocks,
+          usedBlocks: m.usedBlocks,
+          freeBlocks: m.freeBlocks,
+          blockSizeBytes: DEFAULT_FS_CONFIG.blockSizeBytes,
+          bitmap: filesystem.getFreeSpaceBitmap(),
+        }
+      },
       ioMetrics: () => {
         const m = filesystem.getIoMetrics()
         return {

@@ -47,11 +47,13 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
     fsMove: () => ({ ok: true }),
     fsCopy: () => ({ ok: true }),
     fsLink: () => ({ ok: true }),
+    fsSymlink: () => ({ ok: true }),
     fsChmod: () => ({ ok: true }),
     fsCrash: () => {},
     fsFsck: () => ({ replayed: [] }),
     fsCrashed: () => false,
     fsReset: () => {},
+    fsUsage: () => ({ totalBlocks: 64, usedBlocks: 0, freeBlocks: 64, blockSizeBytes: 64, bitmap: Array(64).fill(false) }),
     ioMetrics: () => ({
       cylinderCount: 8,
       headPosition: 0,
@@ -828,5 +830,72 @@ describe('lsof — open file descriptors (roadmap-v5.md §2.2)', () => {
 
   it('says there are no live processes rather than printing a bare header', () => {
     expect(executeCommand('lsof', makeContext())[0]!.text).toBe('No live processes.')
+  })
+})
+
+describe('ln -s / df — symbolic links and free-space reporting (roadmap-v5.md §2.2)', () => {
+  it('ln -s passes the target through verbatim, so a relative link stays relative', () => {
+    const fsSymlink = vi.fn(() => ({ ok: true as const }))
+    const fsLink = vi.fn(() => ({ ok: true as const }))
+    const ctx = makeContext({ fsSymlink, fsLink })
+
+    executeCommand('cd /home; ln -s notes.txt link', ctx)
+
+    // The link's own location is resolved against the cwd; the target is
+    // not — resolving it here would freeze the link to this directory.
+    expect(fsSymlink).toHaveBeenCalledWith('notes.txt', '/home/link')
+    expect(fsLink).not.toHaveBeenCalled()
+  })
+
+  it('a hard link still resolves both sides against the cwd', () => {
+    const fsLink = vi.fn(() => ({ ok: true as const }))
+    executeCommand('ln /a.txt /b.txt', makeContext({ fsLink }))
+    expect(fsLink).toHaveBeenCalledWith('/a.txt', '/b.txt')
+  })
+
+  it('rejects ln -s with too few operands rather than treating -s as a filename', () => {
+    const fsSymlink = vi.fn()
+    const ctx = makeContext({ fsSymlink })
+    expect(executeCommand('ln -s /only', ctx)[0]!.isError).toBe(true)
+    expect(fsSymlink).not.toHaveBeenCalled()
+  })
+
+  it('ls marks a symlink and ls -l shows what it points at', () => {
+    const ctx = makeContext({
+      fsList: () => ({
+        ok: true,
+        entries: [
+          { name: 'notes.txt', type: 'file', mode: 0b110, size: 5 },
+          { name: 'link', type: 'symlink', target: '/notes.txt' },
+        ],
+      }),
+    })
+    expect(executeCommand('ls', ctx)[0]!.text).toBe('notes.txt  link@')
+    const long = executeCommand('ls -l', ctx).map((l) => l.text)
+    expect(long[1]).toContain('lrwx')
+    expect(long[1]).toContain('link -> /notes.txt')
+  })
+
+  it('df reports blocks used and free', () => {
+    const ctx = makeContext({
+      fsUsage: () => ({ totalBlocks: 64, usedBlocks: 16, freeBlocks: 48, blockSizeBytes: 64, bitmap: Array(64).fill(false) }),
+    })
+    const lines = executeCommand('df', ctx).map((l) => l.text)
+    expect(lines[0]).toContain('BLOCKS')
+    expect(lines[1]).toContain('64')
+    expect(lines[1]).toContain('25%')
+  })
+
+  it('df -m prints the bit vector itself, one character per block', () => {
+    const bitmap = Array(32).fill(false)
+    bitmap[0] = true
+    bitmap[17] = true
+    const ctx = makeContext({
+      fsUsage: () => ({ totalBlocks: 32, usedBlocks: 2, freeBlocks: 30, blockSizeBytes: 64, bitmap }),
+    })
+    const lines = executeCommand('df -m', ctx).map((l) => l.text)
+    expect(lines.some((l) => l.includes('Free-space bitmap'))).toBe(true)
+    expect(lines.at(-2)).toContain('#...............') // block 0 allocated
+    expect(lines.at(-1)).toContain('.#..............') // block 17 allocated
   })
 })

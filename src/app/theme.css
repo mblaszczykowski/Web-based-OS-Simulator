@@ -1363,3 +1363,27 @@ button {
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
 }
+
+
+/* Free-space bit vector (roadmap-v5.md §2.2) — one thin cell per block,
+   laid out on the same 16-wide grid as the block map above it so the two
+   read as the same disk. Deliberately much shorter than the block grid:
+   it carries one bit, not an owner, and shouldn't compete with the grid
+   that carries more. */
+.bitmap-strip {
+  display: grid;
+  grid-template-columns: repeat(16, 1fr);
+  gap: 2px;
+}
+
+.bitmap-bit {
+  height: 6px;
+  border-radius: 1px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+}
+
+.bitmap-bit.allocated {
+  background: var(--accent-fs);
+  border-color: var(--accent-fs);
+}
