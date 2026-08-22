@@ -19,9 +19,49 @@ export interface AccessResult {
   victim: { pid: number; page: number } | null
   /** Whether the page just installed had previously been swapped out — the coordinator uses this to know to swap it back in. */
   wasSwapped: boolean
+  /**
+   * Whether this exact (pid, page) mapping was already cached in the TLB
+   * (roadmap-v4.md §2.2) — always false on a fault, since a page that just
+   * faulted wasn't resident and therefore can't have had a legitimate
+   * cached translation for it.
+   */
+  tlbHit: boolean
 }
 
 let blockIdCounter = 1
+
+/** A translation-lookaside-buffer entry — one cached (pid, page) -> frame mapping. */
+interface TlbEntry {
+  pid: number
+  page: number
+  frame: number
+}
+
+/**
+ * Real TLBs hold tens to low thousands of entries, far fewer than the
+ * frame table — small on purpose, so its hit rate actually demonstrates
+ * *why* it helps despite the indirection (roadmap-v4.md §2.2), rather than
+ * just mirroring the page table 1:1.
+ */
+const TLB_CAPACITY = 8
+
+/** Sliding window of the most recent accesses' fault/hit outcomes, used by isThrashing() below. */
+const THRASHING_WINDOW = 20
+/**
+ * Fraction of the last THRASHING_WINDOW accesses that were faults, above
+ * which the system is considered to be thrashing — Silberschatz's own
+ * informal definition (fault rate high enough that the system spends more
+ * time paging than running processes), not a working-set-size formula:
+ * this simulator only ever services one access per tick from whichever
+ * single process is RUNNING (see app/engines.ts's stepSimulation()), so a
+ * recent-fault-rate window is the simplest honest proxy for "thrashing" a
+ * uniprocessor step function like this one can actually exhibit.
+ */
+const THRASHING_FAULT_RATE_THRESHOLD = 0.7
+
+function tlbKey(pid: number, page: number): string {
+  return `${pid}:${page}`
+}
 
 /**
  * Demand-paged memory manager using Clock (Second-Chance) replacement —
@@ -49,6 +89,18 @@ export class MemoryEngine {
   private pageFaultCount = 0
   private accessCount = 0
   private swappedCount = 0
+
+  // TLB (roadmap-v4.md §2.2) — a Map so an existing key can be
+  // delete()+set() back in to move it to the most-recently-used end;
+  // iteration order then gives eviction (oldest = tlb.keys().next()) for
+  // free, no separate LRU bookkeeping structure needed.
+  private tlb = new Map<string, TlbEntry>()
+  private tlbAccessCount = 0
+  private tlbHitCount = 0
+
+  // Thrashing indicator (roadmap-v4.md §2.2) — see THRASHING_WINDOW/
+  // THRESHOLD above for what this actually measures.
+  private recentFaultWindow: boolean[] = []
 
   constructor(config: MemoryConfig = DEFAULT_MEMORY_CONFIG) {
     this.frames = Array.from({ length: config.frameCount }, (_, index) => ({ index, owner: null }))
@@ -100,14 +152,41 @@ export class MemoryEngine {
     this.swappedCount -= this.getSwappedPages(pid).length
     this.pageTables.delete(pid)
     this.freeContiguous(pid)
+    for (const [key, entry] of this.tlb) {
+      if (entry.pid === pid) this.tlb.delete(key)
+    }
     return freed
+  }
+
+  /** Records a real TLB lookup, moving a hit to the MRU end or inserting a fresh entry (LRU-evicting the oldest if full) either way. Returns whether it was a hit. */
+  private touchTlb(pid: number, page: number, frame: number): boolean {
+    const key = tlbKey(pid, page)
+    const hit = this.tlb.has(key)
+    this.tlb.delete(key)
+    this.tlb.set(key, { pid, page, frame })
+    if (this.tlb.size > TLB_CAPACITY) {
+      this.tlb.delete(this.tlb.keys().next().value!)
+    }
+    this.tlbAccessCount++
+    if (hit) this.tlbHitCount++
+    return hit
+  }
+
+  /** A page just left the page table (evicted, or its process freed) — any cached translation for it is now a dangling pointer into someone else's frame. */
+  private invalidateTlb(pid: number, page: number): void {
+    this.tlb.delete(tlbKey(pid, page))
+  }
+
+  private recordFaultOutcome(faulted: boolean): void {
+    this.recentFaultWindow.push(faulted)
+    if (this.recentFaultWindow.length > THRASHING_WINDOW) this.recentFaultWindow.shift()
   }
 
   /** Simulate one memory reference by `pid` to a page in its own address space. */
   access(pid: number, page: number, isWrite = false): AccessResult {
     const table = this.pageTables.get(pid)
     if (!table || page < 0 || page >= table.length) {
-      return { fault: false, victimFrame: null, victim: null, wasSwapped: false }
+      return { fault: false, victimFrame: null, victim: null, wasSwapped: false, tlbHit: false }
     }
 
     this.accessCount++
@@ -117,17 +196,21 @@ export class MemoryEngine {
       entry.referenced = true
       this.frameRefBit[entry.frame] = true
       if (isWrite) entry.modified = true
-      return { fault: false, victimFrame: null, victim: null, wasSwapped: false }
+      const tlbHit = this.touchTlb(pid, page, entry.frame)
+      this.recordFaultOutcome(false)
+      return { fault: false, victimFrame: null, victim: null, wasSwapped: false, tlbHit }
     }
 
     this.pageFaultCount++
+    this.recordFaultOutcome(true)
     const wasSwapped = entry.swapped
     if (wasSwapped) this.swappedCount--
 
     const freeFrame = this.frames.find((f) => f.owner === null)
     if (freeFrame) {
       this.installPage(freeFrame.index, pid, entry, isWrite)
-      return { fault: true, victimFrame: null, victim: null, wasSwapped }
+      this.touchTlb(pid, page, freeFrame.index) // a page fault is never a TLB hit — see AccessResult.tlbHit's doc
+      return { fault: true, victimFrame: null, victim: null, wasSwapped, tlbHit: false }
     }
 
     // Clock sweep: give every frame a second chance before evicting it.
@@ -160,16 +243,24 @@ export class MemoryEngine {
         victimEntry.modified = false
         victimEntry.swapped = true
         this.swappedCount++
+        // The evicted mapping no longer points at a frame it actually
+        // owns — any cached TLB entry for it must go too, or a later
+        // access to this exact (pid, page) could be misreported as a TLB
+        // hit for a page that isn't even resident (found while
+        // implementing roadmap-v4.md §2.2).
+        this.invalidateTlb(victimOwner.pid, victimOwner.page)
       }
     }
 
     this.installPage(victimIndex, pid, entry, isWrite)
+    this.touchTlb(pid, page, victimIndex) // a page fault is never a TLB hit — see AccessResult.tlbHit's doc
     this.clockHand = (victimIndex + 1) % this.frames.length
     return {
       fault: true,
       victimFrame: victimIndex,
       victim: victimOwner && victimOwner.pid !== 0 ? { pid: victimOwner.pid, page: victimOwner.page } : null,
       wasSwapped,
+      tlbHit: false,
     }
   }
 
@@ -241,6 +332,26 @@ export class MemoryEngine {
     return this.blocks
   }
 
+  /** Current TLB contents, oldest (next to be evicted) first — roadmap-v4.md §2.2. */
+  getTlbEntries(): TlbEntry[] {
+    return [...this.tlb.values()]
+  }
+
+  /**
+   * Fraction of the last (up to) THRASHING_WINDOW accesses that faulted.
+   * Not meaningful until the window has actually filled — returns 0 before
+   * that, same as an idle system's true fault rate.
+   */
+  getRecentFaultRate(): number {
+    if (this.recentFaultWindow.length === 0) return 0
+    return this.recentFaultWindow.filter(Boolean).length / this.recentFaultWindow.length
+  }
+
+  /** See THRASHING_FAULT_RATE_THRESHOLD's doc for what this actually measures and why. */
+  isThrashing(): boolean {
+    return this.recentFaultWindow.length >= THRASHING_WINDOW && this.getRecentFaultRate() >= THRASHING_FAULT_RATE_THRESHOLD
+  }
+
   getMetrics() {
     const freeBlocks = this.blocks.filter((b) => b.owner === null)
     const totalFree = freeBlocks.reduce((sum, b) => sum + b.size, 0)
@@ -252,6 +363,9 @@ export class MemoryEngine {
       hitRatio: this.accessCount > 0 ? 1 - this.pageFaultCount / this.accessCount : 0,
       externalFragmentation,
       swappedPages: this.swappedCount,
+      tlbHitRatio: this.tlbAccessCount > 0 ? this.tlbHitCount / this.tlbAccessCount : 0,
+      thrashing: this.isThrashing(),
+      recentFaultRate: this.getRecentFaultRate(),
     }
   }
 }

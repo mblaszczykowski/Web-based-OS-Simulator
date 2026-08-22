@@ -11,10 +11,11 @@ describe('MemoryEngine — Clock (Second-Chance) replacement', () => {
     const engine = new MemoryEngine({ frameCount: 3, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 5) // pages 0..4, all invalid to start
 
-    expect(engine.access(1, 0)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false })
-    expect(engine.access(1, 1)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false })
-    expect(engine.access(1, 2)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false })
-    expect(engine.access(1, 0)).toEqual({ fault: false, victimFrame: null, victim: null, wasSwapped: false }) // hit, refreshes its ref bit
+    expect(engine.access(1, 0)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false, tlbHit: false })
+    expect(engine.access(1, 1)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false, tlbHit: false })
+    expect(engine.access(1, 2)).toEqual({ fault: true, victimFrame: null, victim: null, wasSwapped: false, tlbHit: false })
+    // hit, refreshes its ref bit — and a TLB hit too, since page 0's translation is still cached from its fault above
+    expect(engine.access(1, 0)).toEqual({ fault: false, victimFrame: null, victim: null, wasSwapped: false, tlbHit: true })
 
     const result = engine.access(1, 3)
     expect(result.fault).toBe(true)
@@ -169,5 +170,85 @@ describe('MemoryEngine — First-Fit contiguous allocation', () => {
       { id: expect.any(String), start: 20, size: 80, owner: null },
     ])
     expect(engine.getMetrics().externalFragmentation).toBeCloseTo(0) // back to one free run
+  })
+})
+
+describe('MemoryEngine — TLB (roadmap-v4.md §2.2)', () => {
+  it('a repeated access to a still-resident page is a TLB hit; the first touch never is', () => {
+    const engine = new MemoryEngine({ frameCount: 4, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 4)
+
+    expect(engine.access(1, 0).tlbHit).toBe(false) // cold fault — nothing to have cached yet
+    expect(engine.access(1, 0).tlbHit).toBe(true) // still resident, and now cached
+    expect(engine.getMetrics().tlbHitRatio).toBeCloseTo(0.5)
+  })
+
+  it('evicts the least-recently-touched entry once the TLB is full — a page-table hit can still be a TLB miss', () => {
+    // TLB_CAPACITY is 8 (see the module constant); 10 frames is plenty so
+    // none of these 9 distinct pages ever gets evicted from the page
+    // table itself — only the TLB fills up.
+    const engine = new MemoryEngine({ frameCount: 10, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 9)
+
+    for (let page = 0; page < 9; page++) engine.access(1, page) // 9 cold faults, each inserted into the TLB
+    expect(engine.getTlbEntries()).toHaveLength(8) // capacity-bounded — page 0's entry was evicted for page 8's
+
+    const table = engine.getPageTable(1)!
+    expect(table[0]).toMatchObject({ valid: true, frame: expect.any(Number) }) // still resident...
+    expect(engine.access(1, 0).tlbHit).toBe(false) // ...but the TLB had to re-walk the page table for it
+  })
+
+  it('invalidates a page\'s TLB entry when Clock evicts it, so a later re-fault is never misreported as a hit', () => {
+    const engine = new MemoryEngine({ frameCount: 1, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 2)
+
+    engine.access(1, 0) // installs page 0, caches it in the TLB
+    engine.access(1, 1) // only 1 frame -> evicts page 0 (and must invalidate its TLB entry)
+    const result = engine.access(1, 0) // re-faults page 0 back in
+    expect(result.fault).toBe(true)
+    expect(result.tlbHit).toBe(false) // never true on a fault — see AccessResult.tlbHit's doc
+  })
+
+  it('freeProcess purges every TLB entry belonging to that pid', () => {
+    const engine = new MemoryEngine({ frameCount: 4, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 2)
+    engine.access(1, 0)
+    engine.access(1, 1)
+    expect(engine.getTlbEntries().filter((e) => e.pid === 1)).toHaveLength(2)
+
+    engine.freeProcess(1)
+    expect(engine.getTlbEntries().filter((e) => e.pid === 1)).toHaveLength(0)
+  })
+})
+
+describe('MemoryEngine — thrashing indicator (roadmap-v4.md §2.2)', () => {
+  it('reports not-thrashing before the sliding window has even filled, regardless of fault rate so far', () => {
+    const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 30)
+
+    for (let page = 0; page < 10; page++) engine.access(1, page) // 10 cold faults in a row — 100% so far
+    expect(engine.isThrashing()).toBe(false) // but the window (20) hasn't filled yet
+  })
+
+  it('flags thrashing once the recent fault rate crosses the threshold over a full window', () => {
+    const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 30)
+
+    for (let page = 0; page < 20; page++) engine.access(1, page) // 20 distinct pages, 2 frames — every access faults
+    expect(engine.getRecentFaultRate()).toBe(1)
+    expect(engine.isThrashing()).toBe(true)
+  })
+
+  it('stops reporting thrashing once enough recent accesses are hits — it is a sliding window, not sticky', () => {
+    const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
+    engine.allocateProcess(1, 30)
+
+    for (let page = 0; page < 20; page++) engine.access(1, page)
+    expect(engine.isThrashing()).toBe(true)
+
+    // The most recent access installed page 19 into one of the 2 frames;
+    // repeatedly re-accessing it is a hit every time, diluting the window.
+    for (let i = 0; i < 20; i++) engine.access(1, 19)
+    expect(engine.isThrashing()).toBe(false)
   })
 })
