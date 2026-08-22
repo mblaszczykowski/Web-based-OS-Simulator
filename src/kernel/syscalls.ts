@@ -39,6 +39,15 @@ export interface SyscallTrace {
   drain(): string[]
 }
 
+/**
+ * Sockets are pure visualisation in this simulator (ADR-0007) — no
+ * connection is opened, so no descriptor is taken and the number shown is
+ * a fixed stand-in rather than one from the fd table. Kept explicit, and
+ * declared here beside the other helpers rather than trailing the file, so
+ * the one place this trace is still illustrative is impossible to miss.
+ */
+const FIRST_SOCKET_FD = 3
+
 function quote(value: string): string {
   return `"${value}"`
 }
@@ -302,7 +311,12 @@ export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTra
 
     syncSetUnsafe: (unsafe) => {
       ctx.syncSetUnsafe(unsafe)
-      emit(`sem_destroy(&mutex) = ${unsafe ? '0' : '-1 EBUSY'}`)
+      // Two different operations, not one call that sometimes fails:
+      // turning the race demo on tears the mutex down, turning it off
+      // builds a fresh one. An earlier version reported the second as
+      // `sem_destroy = -1 EBUSY`, which read as an error where nothing
+      // had gone wrong.
+      emit(unsafe ? 'sem_destroy(&mutex) = 0' : 'sem_init(&mutex, 0, 1) = 0')
     },
 
     networkPing: (host) => {
@@ -325,11 +339,3 @@ export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTra
     drain: () => lines.splice(0, lines.length),
   }
 }
-
-/**
- * Sockets are pure visualisation in this simulator (ADR-0007) — no real
- * connection is opened, so no descriptor is taken and the number shown is
- * a fixed stand-in rather than one from the fd table. Kept explicit here
- * so the one place the trace is still illustrative is obvious.
- */
-const FIRST_SOCKET_FD = 3

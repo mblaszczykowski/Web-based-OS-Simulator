@@ -421,6 +421,40 @@ describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => 
     expect(child[2]).toMatchObject({ valid: false, frame: null, cow: false, swapped: false })
   })
 
+  it('terminates instead of spinning when there is no frame it may copy into', () => {
+    // Two frames, one kernel-reserved: the Clock sweep's only candidate is
+    // the shared source frame, which copyOnWrite() excludes. An unbounded
+    // sweep hangs here forever looking for a victim that cannot exist.
+    const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
+    engine.reserveKernelFrames(1)
+    engine.allocateProcess(1, 1)
+    engine.access(1, 0)
+    engine.forkAddressSpace(1, 2)
+    const sharedFrame = engine.getPageTable(1)![0]!.frame!
+
+    const write = engine.access(2, 0, true)
+
+    expect(write.cowCopy).toBe(true)
+    // The writer ends up holding the frame outright; the other sharer was
+    // pushed out to swap and will fault its own copy back in.
+    expect(engine.getPageTable(2)![0]!.frame).toBe(sharedFrame)
+    expect(engine.getPageTable(2)![0]!.cow).toBe(false)
+    expect(engine.getPageTable(1)![0]!.valid).toBe(false)
+    expect(engine.getPageTable(1)![0]!.swapped).toBe(true)
+    expect(write.victims).toEqual([{ pid: 1, page: 0 }])
+  })
+
+  it('reports an unservicable fault rather than sweeping forever when every frame is reserved', () => {
+    const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
+    engine.reserveKernelFrames(2) // the whole frame table
+    engine.allocateProcess(1, 1)
+
+    const result = engine.access(1, 0)
+    expect(result.fault).toBe(true)
+    expect(result.victimFrame).toBeNull()
+    expect(engine.getPageTable(1)![0]!.valid).toBe(false) // stays non-resident
+  })
+
   it('the copy never lands on the frame it is copying from', () => {
     // One usable frame beyond the kernel's: the Clock sweep's only
     // candidate would be the shared source frame itself, which must be

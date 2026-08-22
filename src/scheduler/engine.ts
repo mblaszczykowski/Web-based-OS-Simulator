@@ -721,10 +721,14 @@ export class SchedulerEngine {
    * processes between cores and destroying the very affinity per-core
    * queues exist to model.
    *
-   * The victim is taken from the *lowest-priority* non-empty queue on the
-   * busiest core: those are its batch processes, the ones least likely to
-   * be holding warm cache state, which is the same instinct a real
-   * balancer's "least recently run" heuristic encodes.
+   * The victim is taken from the *front* of the busiest core's
+   * lowest-priority non-empty queue. Both halves of that matter: the
+   * lowest-priority queue holds its batch work rather than its
+   * interactive processes, and the front of a queue is the process that
+   * has been waiting longest — the coldest cache on that core, and the
+   * one with most to gain from running somewhere else now. Taking the
+   * back instead would migrate whichever process ran most recently, which
+   * is precisely the warmest one.
    */
   private balanceLoad(): void {
     const interval = this.config.balanceInterval ?? 0
@@ -743,7 +747,7 @@ export class SchedulerEngine {
 
     const levels = this.queues[busiest]!
     for (const level of [2, 1, 0] as const) {
-      const pid = levels[level].pop()
+      const pid = levels[level].shift()
       if (pid === undefined) continue
       const process = this.processes.get(pid)
       if (!process) continue

@@ -308,6 +308,14 @@ export class MemoryEngine {
 
     // Clock sweep: give every frame a second chance before evicting it.
     const victimIndex = this.selectVictimFrame()
+    if (victimIndex === -1) {
+      // Every frame is kernel-reserved: there is nowhere to put this page,
+      // so it stays non-resident and the caller sees a fault it can't
+      // service. Only reachable by reserving the whole frame table, but
+      // reporting it beats spinning the sweep forever looking for a
+      // victim that cannot exist.
+      return { fault: true, victimFrame: null, victims: [], wasSwapped, tlbHit: false, cowCopy: false }
+    }
     const victims = this.evictFrame(victimIndex)
 
     this.installPage(victimIndex, pid, entry, isWrite)
@@ -387,6 +395,15 @@ export class MemoryEngine {
       targetIndex = free.index
     } else {
       targetIndex = this.selectVictimFrame(sourceIndex)
+      if (targetIndex === -1) {
+        // Nowhere else to put the copy — the source frame is the only one
+        // this engine may touch. Evicting it is still correct and still
+        // terminates: detachMapping() above already took this writer's
+        // mapping off the frame, so this pushes out the *other* sharers
+        // and leaves the writer holding what is now genuinely its own
+        // private copy. They fault their copies back in from swap.
+        targetIndex = sourceIndex
+      }
       victims = this.evictFrame(targetIndex)
       this.clockHand = (targetIndex + 1) % this.frames.length
     }
@@ -428,13 +445,22 @@ export class MemoryEngine {
   }
 
   /**
-   * One Clock sweep, returning the frame to evict. `exclude` is never
-   * chosen — copyOnWrite() needs a destination that isn't the frame it is
-   * copying *from*, which the sweep would otherwise be free to pick.
+   * One Clock sweep, returning the frame to evict, or -1 if this engine
+   * holds no frame it is allowed to take. `exclude` is never chosen —
+   * copyOnWrite() needs a destination that isn't the frame it is copying
+   * *from*, which the sweep would otherwise be free to pick.
+   *
+   * The sweep is bounded at two full passes: one to clear reference bits,
+   * a second to find the frame that first pass demoted. An unbounded
+   * `while (true)` reads fine while *some* frame is always eligible, but
+   * spins forever the moment none is — reachable with `exclude` on a
+   * two-frame engine whose other frame is kernel-reserved, and reachable
+   * even without it if every frame were reserved. Returning -1 makes that
+   * the caller's decision rather than a hang.
    */
   private selectVictimFrame(exclude?: number): number {
     let index = this.clockHand
-    while (true) {
+    for (let step = 0; step < this.frames.length * 2; step++) {
       const candidate = this.frames[index]!
       // Kernel-reserved frames (owner.pid === 0) are permanently exempt —
       // nothing ever re-references them to keep their bit alive, so
@@ -448,6 +474,7 @@ export class MemoryEngine {
       this.frameRefBit[index] = false
       index = (index + 1) % this.frames.length
     }
+    return -1
   }
 
   private installPage(frameIndex: number, pid: number, entry: PageTableEntry, isWrite: boolean): void {

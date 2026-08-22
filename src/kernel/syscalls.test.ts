@@ -183,6 +183,18 @@ describe('syscall trace — a log of the real boundary, not a description beside
     expect(trace('echo $HOME')).toEqual([])
   })
 
+  it('reports the two directions of the race demo as the two different calls they are', () => {
+    // Not one call that succeeds one way and fails the other: turning the
+    // demo on tears the mutex down, turning it off builds a fresh one.
+    expect(trace('race on')).toEqual(['sem_destroy(&mutex) = 0'])
+    expect(trace('race off')).toEqual(['sem_init(&mutex, 0, 1) = 0'])
+    expect(trace('race sideways')).toEqual([]) // rejected by the parser, never reached the kernel
+  })
+
+  it('records the symlink target as written, not as resolved', () => {
+    expect(trace('ln -s notes.txt /home/link')).toEqual(['symlink("notes.txt", "/home/link") = 0'])
+  })
+
   it('records one clone() per thread actually created, and none for a rejected flag', () => {
     const lines = trace('run --threads=3 worker')
     expect(lines.filter((l) => l.startsWith('clone('))).toHaveLength(3)
