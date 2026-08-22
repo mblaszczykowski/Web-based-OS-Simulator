@@ -4,7 +4,7 @@ An interactive, in-browser simulation of an operating system's core subsystems �
 
 **[Live demo →](#)** _(link goes live once this repo is pushed and Pages is enabled — see [Deployment](#deployment--ci))_
 
-![bundle size (gzip)](https://img.shields.io/badge/bundle_size_(gzip)-~85_kB-blue) ![lighthouse](https://img.shields.io/badge/lighthouse-runs_in_CI-4c1)
+![bundle size (gzip)](https://img.shields.io/badge/bundle_size_(gzip)-~95_kB-blue) ![lighthouse](https://img.shields.io/badge/lighthouse-runs_in_CI-4c1)
 _Bundle size is measured straight from the latest `npm run build` (JS + CSS, gzipped) — see [Tech stack](#tech-stack). A Lighthouse audit (performance/accessibility/best-practices/SEO) runs against the production build in `.github/workflows/ci.yml` on every push and is written to the job summary — not a hardcoded badge number, since this repo isn't deployed yet and a stale score would be worse than none._
 
 ![screenshot placeholder](docs/screenshot.png)
@@ -14,10 +14,10 @@ _(add a screenshot or a ~30s GIF of the desktop here for the README — see plan
 
 OS.SIM is not a playground for comparing scheduling algorithms against each other. It's a demonstration of **one well-justified system**, running continuously, that you observe and poke at the way you would a real machine — through a terminal, not a settings panel.
 
-- **Scheduler**: Multi-Level Feedback Queue (MLFQ) — the algorithm real general-purpose kernels approximate, chosen specifically because it adapts to interactive vs. batch workloads without manual tuning. Its window can export the current run's full Gantt history and metrics as a CSV.
-- **Memory**: Clock (Second-Chance) page replacement — the cheap, hardware-realistic approximation of LRU that production kernels actually run — plus a First-Fit contiguous allocator shown alongside it purely as a historical reference point. Evicted pages are actually swapped to a `/swap` file on the simulated disk (and read back on the next fault) — the one place two subsystems are wired together directly, coordinated from `app/engines.ts` rather than either engine depending on the other. An 8-entry TLB sits in front of the page table (own hit ratio, LRU-evicted, invalidated on every real eviction) so it's visible *why* paging is cheap despite the indirection; a sliding-window fault-rate indicator flags thrashing when paging starts crowding out real work (`stress <n>` for a large `n` is the easiest way to trigger it). A process's threads (`run --threads=<n>`) share one such address space while still being scheduled independently — each is its own row in `ps`/the Gantt chart.
-- **Filesystem**: a small inode-based filesystem with a write-ahead log, so a simulated crash mid-write can be replayed back to a consistent state on the next `fsck`. Every real block access queues an I/O request serviced by a SCAN (elevator) disk-head scheduler — one justified algorithm, no FCFS/C-SCAN picker — with its own head-sweep visualization next to the block grid and an `iostat` command for its metrics.
-- **Process sync**: a classic bounded-buffer producer/consumer, guarded by a counting semaphore pair and a mutex — the one correct, synchronized mechanism by default. A "show race condition" mode exists purely to demonstrate the bug the mutex prevents, the same before/after narrative as crash → `fsck`. A second tab extends this into **deadlock detection**: a scripted circular-wait scenario (two processes, two resources) drives a real wait-for-graph DFS cycle detector, with a resource-allocation graph and a "break the deadlock" resolution step. A third tab adds **deadlock avoidance** — Banker's Algorithm over Silberschatz's own 5-process/3-resource worked example, running the safety algorithm before granting any request instead of detecting trouble after the fact.
+- **Scheduler**: Multi-Level Feedback Queue (MLFQ) — the algorithm real general-purpose kernels approximate, chosen specifically because it adapts to interactive vs. batch workloads without manual tuning. It runs across **two logical CPUs**, each with its own complete set of run queues: a process is assigned to a core on admission and keeps it across preemption, demotion and I/O (processor affinity), while a load balancer migrates one across when the imbalance outweighs the lost cache locality. The Gantt chart draws a row per core; the window can export the current run's full history and metrics as a CSV, one column per CPU. Concurrency is still interleaved rather than parallel — the *scheduling* is real, the hardware isn't (see [ADR-0015](docs/adr/0015-multiprocessor-scheduling.md)).
+- **Memory**: Clock (Second-Chance) page replacement — the cheap, hardware-realistic approximation of LRU that production kernels actually run — plus a First-Fit contiguous allocator shown alongside it purely as a historical reference point. Evicted pages are actually swapped to a `/swap` file on the simulated disk (and read back on the next fault) — the one place two subsystems are wired together directly, coordinated from `app/engines.ts` rather than either engine depending on the other. An 8-entry TLB sits in front of the page table (own hit ratio, LRU-evicted, invalidated on every real eviction) so it's visible *why* paging is cheap despite the indirection; a sliding-window fault-rate indicator flags thrashing when paging starts crowding out real work (`stress <n>` for a large `n` is the easiest way to trigger it). A process's threads (`run --threads=<n>`) share one such address space while still being scheduled independently — each is its own row in `ps`/the Gantt chart. `fork <pid>` duplicates a process **copy-on-write**: parent and child share every resident frame read-only, and only the first write to a page copies it, so `free` shows unchanged memory right after the fork and climbs only as the two diverge.
+- **Filesystem**: a small inode-based filesystem with a write-ahead log, so a simulated crash mid-write can be replayed back to a consistent state on the next `fsck`. Every real block access queues an I/O request serviced by a SCAN (elevator) disk-head scheduler — one justified algorithm, no FCFS/C-SCAN picker — with its own head-sweep visualization next to the block grid and an `iostat` command for its metrics. **A process's I/O burst is a real request to that disk**: it stays blocked until the head actually reaches its cylinder, which is what finally connects the scheduler and the disk into one system rather than two that happen to share a clock ([ADR-0010](docs/adr/0010-io-burst-is-a-device-request.md)). Free space is managed as an explicit **bit vector** (`df`, `df -m`), and **symbolic links** sit beside the existing hard links — a name pointing at a path, so it may dangle, and `rm` on it removes the link rather than the target.
+- **Process sync**: a classic bounded-buffer producer/consumer, guarded by a counting semaphore pair and a mutex — the one correct, synchronized mechanism by default. A "show race condition" mode exists purely to demonstrate the bug the mutex prevents, the same before/after narrative as crash → `fsck`. A second tab extends this into **deadlock detection**: a scripted circular-wait scenario (two processes, two resources) drives a real wait-for-graph DFS cycle detector, with a resource-allocation graph and a "break the deadlock" resolution step. A third tab adds **deadlock avoidance** — Banker's Algorithm over Silberschatz's own 5-process/3-resource worked example, running the safety algorithm before granting any request instead of detecting trouble after the fact. A fourth covers **IPC**: `pipe <writer> <reader>` connects two genuine scheduled processes with an anonymous pipe, where the writer blocks when the buffer fills, the reader when it empties, and each wakes the other. (The shell's `|` is a different thing and says so — a filter over one command's rendered output, with no processes involved.)
 - **Network**: two simulated hosts and a pure packet-flow visualisation — `ping`/`curl` in the terminal launch packets that animate across a fixed link over a few ticks. No real TCP/IP stack or sockets, by design (plan.md §3).
 
 No algorithm picker, no "add process" button. Workload is generated automatically and through the terminal (`run <name>`), the same way you'd interact with a real shell.
@@ -37,7 +37,9 @@ src/
   scheduler/    MLFQ engine + Gantt chart window        (pure logic + React)
   memory/       Clock paging + First-Fit engine + window
   filesystem/   inode fs + journal/WAL engine + window
-  sync/         bounded-buffer producer/consumer + deadlock detection/avoidance, engine + window
+  sync/         bounded-buffer producer/consumer + deadlock detection/avoidance + pipe panel
+  ipc/          anonymous pipes as kernel objects (pure logic)
+  kernel/       the syscall boundary + the open file-descriptor table
   network/      packet-flow visualisation engine + window
   terminal/     command parser, terminal window, syscall trace window
   shared/       cross-module types + a small typed event bus
@@ -56,6 +58,10 @@ top                   live scheduler summary
 run <name>            spawn a new process
 run --threads=<n> <name>  spawn n (2-8) threads of one process, sharing one address space
 stress [n]            spawn n (default 6) CPU-bound processes at once
+fork <pid>            duplicate a process, sharing its memory copy-on-write
+pipe <w> <r>          spawn two processes joined by a real kernel pipe
+pipe                  list open pipes and their buffer occupancy
+lsof                  list open file descriptors, per process
 kill <pid>            terminate a process
 kill -STOP <pid>      pause a process (SIGSTOP) without terminating it
 kill -CONT <pid>      resume a stopped process (SIGCONT)
@@ -70,12 +76,14 @@ mkdir <dir>           create a directory
 mv <src> <dest>       move/rename a file
 cp <src> <dest>       copy a file
 ln <target> <link>    create a hard link (shares content with target)
+ln -s <target> <link>  create a symbolic link (a name pointing at a path)
 chmod <mode> <file>   set permissions (1-3 octal digits, e.g. 644 or 6)
 rm <file>             delete a file, supports * wildcards
 crash                 simulate a power loss mid-write
 fsck                  replay the journal and recover the filesystem
 reset-fs              wipe the disk (in memory and the persisted copy)
 iostat                I/O scheduler (SCAN) metrics — head position, queue depth, avg seek/wait
+df [-m]               disk block usage; -m also prints the free-space bitmap
 sync                  bounded-buffer producer/consumer status
 race on|off           toggle the unsynchronized (racy) demo mode
 ping [host]           send simulated ICMP echo packets to a host
@@ -87,9 +95,9 @@ clear                 clear the screen
 help                  show this message
 ```
 
-Paths are relative to the current directory unless they start with `/`. Commands chain with `;` (always run the next), `&&` (only on success), and pipe through `|` (only `grep <pattern>` is a supported filter) — e.g. `ls | grep .log` or `mkdir /tmp && write /tmp/x.txt hi`. `$VAR`/`${VAR}` are substituted with an exported value (empty if unset), per-segment right before that segment runs — so `export X=1 && echo $X` sees the value just set. This is composition of existing commands plus a plain key-value store, not a real shell scripting language (no loops, conditionals, or functions).
+Paths are relative to the current directory unless they start with `/`. Commands chain with `;` (always run the next), `&&` (only on success), and filter through `|` (only `grep <pattern>` is supported) — e.g. `ls | grep .log` or `mkdir /tmp && write /tmp/x.txt hi`. That `|` is a *shell-level* filter over a command's rendered output, deliberately **not** a kernel pipe: none of these commands is a long-running process with a stdout to connect. `pipe <writer> <reader>` is the kernel object, and `man pipe` says so. `$VAR`/`${VAR}` are substituted with an exported value (empty if unset), per-segment right before that segment runs — so `export X=1 && echo $X` sees the value just set. This is composition of existing commands plus a plain key-value store, not a real shell scripting language (no loops, conditionals, or functions).
 
-Every command also appends a line to the **syscall trace** window — a fictional but realistic `open()`/`read()`/`execve()`-style log, purely for flavour (no new domain logic — it's just a relabeling of what the command already did).
+Every command also appends to the **syscall trace** window — and that log is the real kernel boundary, not a description written beside it. `CommandContext` is the only seam between the terminal and the rest of the simulator, so it *is* this program's system-call interface; it's wrapped, and each line is emitted by an actual crossing. Byte counts are the content's real length, pids are the pids really created, a failure reports the errno its real error distinguishes (`EACCES` vs `ENOENT`), and a command rejected before it reaches the kernel produces no trace at all. File descriptors are real too — `open()` takes the lowest free number at or above 3 and `close()` gives it back, which `lsof` lists ([ADR-0013](docs/adr/0013-syscall-trace-from-the-real-boundary.md)).
 
 Tab-completes commands and filesystem paths (relative to the current directory), persists command history to `localStorage` across reloads, and supports bash/zsh-style reverse history search: **Ctrl+R** live-filters to the most recent matching entry as you type, a repeated Ctrl+R steps to the next older match, Enter runs it, Escape restores whatever you'd been typing before the search started. Command history is one of a small set of pieces of state that are *not* wiped on refresh (see [Model trwałości](plan.md#25-model-trwałości-i-restart) and "State & robustness" below).
 
@@ -97,14 +105,15 @@ Tab-completes commands and filesystem paths (relative to the current directory),
 
 React + TypeScript, Zustand, Vite, Vitest (+ React Testing Library/jsdom for component tests) — no D3/Recharts, no backend. All visualisations (Gantt chart, RAM/disk grids, allocation strip) are hand-built CSS/flex/grid. The filesystem's "disk" persists across reloads via IndexedDB — scheduler and memory still reset on refresh, deliberately (see `plan.md` §2.5).
 
-`npm run build`'s current output is the whole app in one JS chunk + one CSS file: **266.73 kB JS / 81.79 kB gzipped**, **20.63 kB CSS / 4.37 kB gzipped** — no charting library, no UI framework, no icon font is why that number stays small as the simulator grows (roadmap-v4.md §2.5). Re-run `npm run build` yourself to see the current number for the actual code in this tree.
+`npm run build`'s current output is the whole app in one JS chunk + one CSS file: **294.63 kB JS / 90.34 kB gzipped**, **21.15 kB CSS / 4.46 kB gzipped** — no charting library, no UI framework, no icon font is why that number stays small as the simulator grows (roadmap-v4.md §2.5). Re-run `npm run build` yourself to see the current number for the actual code in this tree.
 
 ## State & robustness
 
 - **Window layout** (position/size/open/z-order) persists to `localStorage`, debounced on every drag/resize/focus — the same medium as terminal history, since it's UI chrome, not simulated system state.
 - **Cross-tab consistency**: opening the app in two tabs no longer means one silently overwrites the other's disk on the next save. Tabs announce a successful filesystem save over a `BroadcastChannel`; on hearing another tab's announcement, a tab cancels its own pending save and re-hydrates from the newer persisted state, logging it to the terminal so the reconciliation is visible. Best-effort, not full multi-tab consistency — memory/scheduler state stays tab-local by design.
 - **Small screens**: the desktop metaphor (overlapping draggable windows) has nowhere sensible to degrade to on a phone. Below ~860px wide, a small feature-detected notice replaces the boot sequence and desktop entirely, rather than a horizontally-clipped layout.
-- **Hard links, permissions**: `Inode.links` and a real rwx mode bit are actually enforced — `rm` only frees a file's blocks once every hard-linked name pointing at it is gone, and `write`/`rm`/`cat`/`cp` reject a file missing the relevant permission bit, not just cosmetically.
+- **Hard links, symlinks, permissions**: `Inode.links` and a real rwx mode bit are actually enforced — `rm` only frees a file's blocks once every hard-linked name pointing at it is gone, and `write`/`rm`/`cat`/`cp` reject a file missing the relevant permission bit, not just cosmetically. A symbolic link is the deliberate contrast: it stores a *path*, so it may dangle, `rm` on it removes the link rather than the target, and following a cycle stops at 8 levels with `ELOOP`.
+- **Blocked processes are never lost**: a process parked on the disk is released even if the queue holding its request is thrown away (`reset-fs`, a cross-tab import), a crashed disk declines requests instead of accepting ones it can never service, and a terminating pipe endpoint releases whoever was waiting on the other end. Each of those is a way a process could otherwise sit in `WAITING` forever, and each has its own test.
 - **Shareable session link**: which Sync window tab is open, and whether the unsafe/race-condition demo is on, live in the URL's query string (`src/app/urlState.ts`) and update via `history.replaceState` — copy the address bar to send someone straight to a specific scenario. Front-end only, no backend (see `docs/adr/0003-no-backend.md`); window layout and everything else stay out of it, on purpose — see that module's own comment for why.
 
 ## Accessibility
