@@ -139,11 +139,24 @@ function clearSwapFiles(): void {
 // doing it twice). This is the event bus plan.md §5 actually describes —
 // scheduler and memory stay decoupled through it, not through this
 // module knowing both engines' internals.
-simBus.on('process:terminated', ({ pid }) => {
+//
+// A thread group (roadmap-v4.md §2.1, spawnThreadGroup() below) complicates
+// this: several pids share one memoryOwnerPid's allocation, so the shared
+// address space can only be freed once every one of them has terminated —
+// freeing it on the first thread to exit would yank memory out from under
+// its still-running siblings. For an ordinary process, memoryOwnerPid is
+// just its own pid and no other process ever shares it, so this reduces to
+// exactly the old immediate-free behavior.
+simBus.on('process:terminated', ({ memoryOwnerPid }) => {
+  const groupStillAlive = scheduler
+    .getProcesses()
+    .some((p) => p.memoryOwnerPid === memoryOwnerPid && p.state !== 'TERMINATED')
+  if (groupStillAlive) return
+
   // Read the swapped pages *before* freeProcess() drops the page table —
   // it's the only record of which pages still have a page file to clean up.
-  for (const page of memory.getSwappedPages(pid)) swapIn(pid, page)
-  memory.freeProcess(pid)
+  for (const page of memory.getSwappedPages(memoryOwnerPid)) swapIn(memoryOwnerPid, page)
+  memory.freeProcess(memoryOwnerPid)
 })
 
 // Real filesystem persistence (roadmap.md §1.5) — the disk is the one
@@ -268,6 +281,43 @@ export function spawnStressLoad(count: number): Process[] {
   return Array.from({ length: count }, () => spawnProcess(randomName(), 'cpu-bound', SHELL_PID))
 }
 
+/**
+ * Lightweight processes (roadmap-v4.md §2.1) — `run --threads=n <name>` in
+ * the terminal. `count` Process entries, each with its own independent
+ * bursts/queue level/state (its own row in `ps`/the Gantt chart, exactly
+ * like a real thread has its own kernel scheduling context), but ONE
+ * shared address space: memory.allocateProcess() is called exactly once,
+ * sized by a single pageCount generated for the whole group and stamped
+ * onto every thread's Process.pageCount, so stepSimulation()'s per-tick
+ * random memory access (`Math.random() * running.pageCount`) always lands
+ * inside the one page table they all actually share.
+ *
+ * Follower threads get parentPid = the leader's pid rather than SHELL_PID
+ * directly — a deliberate reuse of ProcessTree.tsx's existing
+ * parent/child nesting (roadmap.md §2.2) to show the group hierarchy for
+ * free, with no new UI plumbing: they render nested under their leader
+ * instead of as SHELL_PID's direct siblings.
+ */
+export function spawnThreadGroup(name: string, count: number, parentPid: number = SHELL_PID): Process[] {
+  const kind = randomKind()
+  const sharedPageCount = 2 + Math.floor(Math.random() * 5)
+
+  const threads: Process[] = []
+  for (let i = 0; i < count; i++) {
+    const leader = threads[0]
+    const process = createProcess(`${name}:t${i + 1}`, kind, undefined, i === 0 ? parentPid : leader!.pid, {
+      memoryOwnerPid: leader?.memoryOwnerPid,
+      pageCount: sharedPageCount,
+    })
+    scheduler.spawn(process)
+    threads.push(process)
+  }
+
+  memory.allocateProcess(threads[0]!.memoryOwnerPid, sharedPageCount)
+  for (const t of threads) simBus.emit('process:spawned', { pid: t.pid, name: t.name, kind: t.kind })
+  return threads
+}
+
 const AUTO_SPAWN_INTERVAL = 23
 const AUTO_SPAWN_CAP = 7
 
@@ -278,17 +328,21 @@ export function stepSimulation() {
   sync.tick()
   network.tick()
 
-  // Whoever is running this tick touches one page of its own address space —
-  // this is what actually drives page faults / Clock evictions over time.
+  // Whoever is running this tick touches one page of its own address
+  // space — this is what actually drives page faults / Clock evictions
+  // over time. Accessed by memoryOwnerPid, not pid: for an ordinary
+  // process those are the same value, but a thread (roadmap-v4.md §2.1)
+  // must access its *group's* shared page table, not one keyed by its own
+  // pid (which memory/engine.ts never allocated anything under).
   const running = scheduler.getRunning()
   if (running) {
     const page = Math.floor(Math.random() * running.pageCount)
     const isWrite = Math.random() < 0.3 // most memory references are reads
-    const access = memory.access(running.pid, page, isWrite)
+    const access = memory.access(running.memoryOwnerPid, page, isWrite)
     if (access.fault) {
-      simBus.emit('memory:page-fault', { pid: running.pid, page, victimFrame: access.victimFrame })
+      simBus.emit('memory:page-fault', { pid: running.memoryOwnerPid, page, victimFrame: access.victimFrame })
       if (access.victim) swapOut(access.victim.pid, access.victim.page)
-      if (access.wasSwapped) swapIn(running.pid, page)
+      if (access.wasSwapped) swapIn(running.memoryOwnerPid, page)
     }
   }
 
