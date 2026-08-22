@@ -21,6 +21,18 @@ export interface Process {
   queueLevel: QueueLevel
   /** SHELL_PID for anything spawned via the terminal's `run`, INIT_PID for the automatic workload, or another process's pid. */
   parentPid: number
+  /**
+   * Which pid's address space (memory/engine.ts allocation) this one
+   * actually uses. Equal to its own pid for every ordinary process — a
+   * process owns its own memory. A thread (roadmap-v4.md §2.1,
+   * `run --threads=n`) instead points at its thread group's leader pid:
+   * several Process entries, each with its own scheduler/Gantt presence
+   * (own bursts, own queue level, own state), sharing one allocation. See
+   * app/engines.ts's spawnThreadGroup() and its `process:terminated`
+   * subscriber, which only frees memory once every pid sharing a given
+   * memoryOwnerPid has terminated.
+   */
+  memoryOwnerPid: number
 
   /** Tick the process became READY for the first time. */
   arrivalTick: number

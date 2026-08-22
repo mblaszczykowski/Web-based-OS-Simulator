@@ -301,6 +301,42 @@ describe('SchedulerEngine — process:terminated event', () => {
       { pid: p2.pid, reason: 'natural' },
     ])
   })
+
+  it('carries the process\'s memoryOwnerPid — roadmap-v4.md §2.1, so a thread-group-aware subscriber can tell whether shared memory is safe to free', () => {
+    const engine = new SchedulerEngine({ quanta: [100, 100, Infinity], boostInterval: 0 })
+    const events: { pid: number; memoryOwnerPid: number }[] = []
+    const unsubscribe = simBus.on('process:terminated', (e) => events.push({ pid: e.pid, memoryOwnerPid: e.memoryOwnerPid }))
+
+    const leader = createProcess('leader', 'cpu-bound', [1])
+    const thread = createProcess('thread', 'cpu-bound', [1], SHELL_PID, { memoryOwnerPid: leader.pid })
+    engine.spawn(leader)
+    engine.spawn(thread)
+    engine.kill(leader.pid)
+    engine.kill(thread.pid)
+
+    unsubscribe()
+    expect(events).toEqual([
+      { pid: leader.pid, memoryOwnerPid: leader.pid },
+      { pid: thread.pid, memoryOwnerPid: leader.pid },
+    ])
+  })
+})
+
+describe('createProcess — memoryOwnerPid/pageCount options (roadmap-v4.md §2.1)', () => {
+  it('defaults memoryOwnerPid to its own pid and pageCount to a random 2-6 when no opts are given', () => {
+    const p = createProcess('solo', 'cpu-bound', [5])
+    expect(p.memoryOwnerPid).toBe(p.pid)
+    expect(p.pageCount).toBeGreaterThanOrEqual(2)
+    expect(p.pageCount).toBeLessThanOrEqual(6)
+  })
+
+  it('honors an explicit memoryOwnerPid and pageCount — a thread pointing at its group leader\'s shared allocation', () => {
+    const leader = createProcess('leader', 'cpu-bound', [5])
+    const thread = createProcess('leader:t2', 'cpu-bound', [5], SHELL_PID, { memoryOwnerPid: leader.pid, pageCount: 4 })
+    expect(thread.memoryOwnerPid).toBe(leader.pid)
+    expect(thread.memoryOwnerPid).not.toBe(thread.pid)
+    expect(thread.pageCount).toBe(4)
+  })
 })
 
 describe('SchedulerEngine — priority boost reaches I/O-blocked processes too', () => {

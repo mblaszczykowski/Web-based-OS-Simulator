@@ -52,19 +52,29 @@ export function generateBursts(kind: ProcessKind): number[] {
   return bursts
 }
 
+export interface CreateProcessOptions {
+  /** Defaults to this process's own pid (a normal process owns its own address space) — pass the group leader's pid for a thread, roadmap-v4.md §2.1. */
+  memoryOwnerPid?: number
+  /** Defaults to a fresh random page count. A thread must instead pass its group's single shared value, so every thread's random memory access in app/engines.ts's stepSimulation() lands inside the one address space they all actually share. */
+  pageCount?: number
+}
+
 export function createProcess(
   name: string,
   kind: ProcessKind,
   bursts = generateBursts(kind),
   parentPid: number = INIT_PID,
+  opts: CreateProcessOptions = {},
 ): Process {
+  const pid = nextPid()
   return {
-    pid: nextPid(),
+    pid,
     name,
     kind,
     state: 'NEW',
     queueLevel: 0,
     parentPid,
+    memoryOwnerPid: opts.memoryOwnerPid ?? pid,
     arrivalTick: 0,
     finishTick: null,
     bursts,
@@ -74,7 +84,7 @@ export function createProcess(
     totalWaitingTicks: 0,
     totalBurstTicks: 0,
     contextSwitches: 0,
-    pageCount: 2 + Math.floor(Math.random() * 5),
+    pageCount: opts.pageCount ?? 2 + Math.floor(Math.random() * 5),
   }
 }
 
@@ -133,7 +143,12 @@ export class SchedulerEngine {
       this.processes.delete(this.terminatedHistory.shift()!)
     }
 
-    simBus.emit('process:terminated', { pid: process.pid, name: process.name, reason })
+    simBus.emit('process:terminated', {
+      pid: process.pid,
+      name: process.name,
+      reason,
+      memoryOwnerPid: process.memoryOwnerPid,
+    })
   }
 
   get currentTick(): number {

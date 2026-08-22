@@ -6,7 +6,7 @@
 
 export type SimEventMap = {
   'process:spawned': { pid: number; name: string; kind: string }
-  'process:terminated': { pid: number; name: string; reason: 'natural' | 'killed' }
+  'process:terminated': { pid: number; name: string; reason: 'natural' | 'killed'; memoryOwnerPid: number }
   'process:state-changed': { pid: number; from: string; to: string }
   'memory:page-fault': { pid: number; page: number; victimFrame: number | null }
   'memory:allocated': { pid: number; frames: number[] }
