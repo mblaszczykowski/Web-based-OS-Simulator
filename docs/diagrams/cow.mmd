@@ -1,0 +1,21 @@
+graph TB
+  subgraph after_fork["Right after fork() — nothing copied"]
+    direction LR
+    pt1["parent page table<br/>page 0 → frame 7, cow"]
+    ct1["child page table<br/>page 0 → frame 7, cow"]
+    f1(["frame 7"])
+    pt1 --> f1
+    ct1 --> f1
+  end
+
+  subgraph after_write["After the child writes page 0"]
+    direction LR
+    pt2["parent page table<br/>page 0 → frame 7"]
+    ct2["child page table<br/>page 0 → frame 12"]
+    f2(["frame 7 · original"])
+    f3(["frame 12 · private copy"])
+    pt2 --> f2
+    ct2 --> f3
+  end
+
+  after_fork -- "first write traps: copy one frame, clear the flag" --> after_write

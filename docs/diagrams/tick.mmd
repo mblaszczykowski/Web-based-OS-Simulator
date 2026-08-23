@@ -1,0 +1,31 @@
+sequenceDiagram
+  autonumber
+  participant C as coordinator
+  participant S as SchedulerEngine
+  participant D as Disk (SCAN)
+  participant M as MemoryEngine
+  participant P as PipeEngine
+
+  Note over C: one simulated tick
+
+  C->>S: tick()
+  activate S
+  S->>S: admit arrivals onto the least-loaded CPU
+  S->>S: count down self-timed I/O waits
+  S->>S: priority boost / load balance
+  S->>D: submit(pid) when a CPU burst ends on an I/O burst
+  D-->>S: accepted — process goes WAITING(disk)
+  S-->>C: what each CPU ran this tick
+  deactivate S
+
+  C->>D: advanceTick()
+  D-->>C: requests the head serviced
+  C->>S: wake(pid, 'device') for each waiter
+
+  loop for each busy CPU
+    C->>M: access(page)
+    M-->>C: fault / eviction / copy-on-write
+    C->>P: stepEndpoint(pid)
+    P-->>C: transferred, or must block
+    C->>S: blockOn(pid,'pipe') or wake(counterpart,'pipe')
+  end

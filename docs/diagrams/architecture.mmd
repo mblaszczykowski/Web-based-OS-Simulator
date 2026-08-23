@@ -1,0 +1,31 @@
+graph TD
+  win["Windows<br/>scheduler · memory · filesystem · sync<br/>network · terminal · trace"]
+  store["Zustand store<br/>tick + version counter, UI state only"]
+  ctx["CommandContext<br/>the one seam between shell and system"]
+  trace["traceSyscalls<br/>records every crossing"]
+  fds["FdTable"]
+  coord["app/engines.ts — coordinator<br/>the only module that knows two engines at once"]
+  bus["EventBus"]
+
+  sched["SchedulerEngine<br/>MLFQ over N cores"]
+  mem["MemoryEngine<br/>Clock · TLB · copy-on-write"]
+  fs["FilesystemEngine<br/>inodes · journal · SCAN"]
+  ipc["PipeEngine"]
+  sync["SyncEngine"]
+  net["NetworkEngine"]
+
+  win --> store
+  store --> ctx
+  ctx --> trace
+  trace --> fds
+  ctx --> coord
+  coord --> sched
+  coord --> mem
+  coord --> fs
+  coord --> ipc
+  coord --> sync
+  coord --> net
+  sched -. "process:terminated" .-> bus
+  fs -. "fs:mutated" .-> bus
+  bus -. subscriber .-> coord
+  win -. "reads engine state at render" .-> sched

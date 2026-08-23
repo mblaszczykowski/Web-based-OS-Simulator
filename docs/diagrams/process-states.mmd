@@ -1,0 +1,23 @@
+stateDiagram-v2
+  direction LR
+  [*] --> NEW: spawn()
+  NEW --> READY: admitted, assigned a CPU
+
+  READY --> RUNNING: dispatched (front of its core's highest queue)
+  RUNNING --> READY: quantum expired (demote one level)
+  RUNNING --> READY: preempted by a higher queue on the same core
+
+  RUNNING --> WAITING: CPU burst ended, I/O submitted
+  RUNNING --> WAITING: pipe full (writer) or empty (reader)
+  WAITING --> READY: wake() — same queue level, no demotion
+
+  RUNNING --> TERMINATED: last burst finished
+  READY --> TERMINATED: kill()
+  WAITING --> TERMINATED: kill()
+
+  READY --> STOPPED: SIGSTOP
+  RUNNING --> STOPPED: SIGSTOP
+  WAITING --> STOPPED: SIGSTOP (stays blocked)
+  STOPPED --> READY: SIGCONT
+  STOPPED --> WAITING: SIGCONT, if it was blocked
+  TERMINATED --> [*]
