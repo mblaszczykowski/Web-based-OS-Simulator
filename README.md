@@ -1,143 +1,270 @@
-# OS.SIM — Web-based OS Simulator
+# OS.SIM
 
-An interactive, in-browser simulation of an operating system's core subsystems — a **process scheduler, memory manager and filesystem** whose algorithms are real, tested implementations from *Operating System Concepts* (Silberschatz), not decorative animations.
+An operating system's core subsystems, running in a browser tab: a multi-core MLFQ scheduler, a demand-paged memory manager, a journaling filesystem on a simulated disk, pipes, semaphores and a shell to poke at all of it.
 
-**[Live demo →](#)** _(link goes live once this repo is pushed and Pages is enabled — see [Deployment](#deployment--ci))_
+The algorithms are real implementations, not animations with a timer behind them. The environment they run in is simulated.
 
-![bundle size (gzip)](https://img.shields.io/badge/bundle_size_(gzip)-~95_kB-blue) ![lighthouse](https://img.shields.io/badge/lighthouse-runs_in_CI-4c1)
-_Bundle size is measured straight from the latest `npm run build` (JS + CSS, gzipped) — see [Tech stack](#tech-stack). A Lighthouse audit (performance/accessibility/best-practices/SEO) runs against the production build in `.github/workflows/ci.yml` on every push and is written to the job summary — not a hardcoded badge number, since this repo isn't deployed yet and a stale score would be worse than none._
-
-![screenshot placeholder](docs/screenshot.png)
-_(add a screenshot or a ~30s GIF of the desktop here for the README — see plan.md §7)_
+![The OS.SIM desktop](docs/screenshot-desktop.png)
 
 ## What this is
 
-OS.SIM is not a playground for comparing scheduling algorithms against each other. It's a demonstration of **one well-justified system**, running continuously, that you observe and poke at the way you would a real machine — through a terminal, not a settings panel.
+I wanted to understand operating systems by building one rather than reading about one, and I wanted the result to be something you could look at. So the scheduler is an actual Multi-Level Feedback Queue with real demotion rules, the pager is an actual Clock replacement algorithm with a real TLB in front of it, and the filesystem has a write-ahead log you can crash and recover.
 
-- **Scheduler**: Multi-Level Feedback Queue (MLFQ) — the algorithm real general-purpose kernels approximate, chosen specifically because it adapts to interactive vs. batch workloads without manual tuning. It runs across **two logical CPUs**, each with its own complete set of run queues: a process is assigned to a core on admission and keeps it across preemption, demotion and I/O (processor affinity), while a load balancer migrates one across when the imbalance outweighs the lost cache locality. The Gantt chart draws a row per core; the window can export the current run's full history and metrics as a CSV, one column per CPU. Concurrency is still interleaved rather than parallel — the *scheduling* is real, the hardware isn't (see [ADR-0015](docs/adr/0015-multiprocessor-scheduling.md)).
-- **Memory**: Clock (Second-Chance) page replacement — the cheap, hardware-realistic approximation of LRU that production kernels actually run — plus a First-Fit contiguous allocator shown alongside it purely as a historical reference point. Evicted pages are actually swapped to a `/swap` file on the simulated disk (and read back on the next fault) — the one place two subsystems are wired together directly, coordinated from `app/engines.ts` rather than either engine depending on the other. An 8-entry TLB sits in front of the page table (own hit ratio, LRU-evicted, invalidated on every real eviction) so it's visible *why* paging is cheap despite the indirection; a sliding-window fault-rate indicator flags thrashing when paging starts crowding out real work (`stress <n>` for a large `n` is the easiest way to trigger it). A process's threads (`run --threads=<n>`) share one such address space while still being scheduled independently — each is its own row in `ps`/the Gantt chart. `fork <pid>` duplicates a process **copy-on-write**: parent and child share every resident frame read-only, and only the first write to a page copies it, so `free` shows unchanged memory right after the fork and climbs only as the two diverge.
-- **Filesystem**: a small inode-based filesystem with a write-ahead log, so a simulated crash mid-write can be replayed back to a consistent state on the next `fsck`. Every real block access queues an I/O request serviced by a SCAN (elevator) disk-head scheduler — one justified algorithm, no FCFS/C-SCAN picker — with its own head-sweep visualization next to the block grid and an `iostat` command for its metrics. **A process's I/O burst is a real request to that disk**: it stays blocked until the head actually reaches its cylinder, which is what finally connects the scheduler and the disk into one system rather than two that happen to share a clock ([ADR-0010](docs/adr/0010-io-burst-is-a-device-request.md)). Free space is managed as an explicit **bit vector** (`df`, `df -m`), and **symbolic links** sit beside the existing hard links — a name pointing at a path, so it may dangle, and `rm` on it removes the link rather than the target.
-- **Process sync**: a classic bounded-buffer producer/consumer, guarded by a counting semaphore pair and a mutex — the one correct, synchronized mechanism by default. A "show race condition" mode exists purely to demonstrate the bug the mutex prevents, the same before/after narrative as crash → `fsck`. A second tab extends this into **deadlock detection**: a scripted circular-wait scenario (two processes, two resources) drives a real wait-for-graph DFS cycle detector, with a resource-allocation graph and a "break the deadlock" resolution step. A third tab adds **deadlock avoidance** — Banker's Algorithm over Silberschatz's own 5-process/3-resource worked example, running the safety algorithm before granting any request instead of detecting trouble after the fact. A fourth covers **IPC**: `pipe <writer> <reader>` connects two genuine scheduled processes with an anonymous pipe, where the writer blocks when the buffer fills, the reader when it empties, and each wakes the other. (The shell's `|` is a different thing and says so — a filter over one command's rendered output, with no processes involved.)
-- **Network**: two simulated hosts and a pure packet-flow visualisation — `ping`/`curl` in the terminal launch packets that animate across a fixed link over a few ticks. No real TCP/IP stack or sockets, by design (plan.md §3).
+What you get is a desktop with a window per subsystem, all driven by one shared clock. Type `stress 8` and watch processes get demoted through the queue levels. Type `crash` then `fsck` and watch the journal replay. Type `fork 3` and watch two processes share memory until one of them writes.
 
-No algorithm picker, no "add process" button. Workload is generated automatically and through the terminal (`run <name>`), the same way you'd interact with a real shell.
+There is no algorithm picker and no "add process" button. You interact with it the way you'd interact with a machine: through a shell.
 
-Don't know what to type? Click **▶ Watch demo** in the menu bar — it types and runs a scripted tour (`ps` → `run compiler` → `top` → file write/read → a simulated crash + recovery → `kill`) across every subsystem, with a typewriter effect and no manual interaction required.
+**Don't know what to type?** Click **▶ Watch demo** in the menu bar. It types and runs a scripted tour through every subsystem.
 
-## Real algorithm, simulated environment
-
-The **environment** is simulated — there is no real hardware, no ring 0/ring 3 isolation, no physical multi-core scheduling or interrupts, and the filesystem lives entirely inside IndexedDB rather than being a mountable POSIX filesystem. See [`plan.md` §3](plan.md#3-czego-projekt-świadomie-nie-symuluje) for the full, explicit list of what's out of scope by design.
-
-The **algorithms** are not. `src/scheduler/engine.ts`, `src/memory/engine.ts` and `src/filesystem/engine.ts` are plain, dependency-free TypeScript with no React or store coupling — each is unit-tested against hand-traced reference scenarios (see `*.test.ts` next to each engine) the way you'd check a textbook example by hand: exact tick-by-tick MLFQ demotion/preemption traces, a classic Second-Chance reference string, and a crash → journal replay round-trip.
-
-## Architecture
-
-```
-src/
-  scheduler/    MLFQ engine + Gantt chart window        (pure logic + React)
-  memory/       Clock paging + First-Fit engine + window
-  filesystem/   inode fs + journal/WAL engine + window
-  sync/         bounded-buffer producer/consumer + deadlock detection/avoidance + pipe panel
-  ipc/          anonymous pipes as kernel objects (pure logic)
-  kernel/       the syscall boundary + the open file-descriptor table
-  network/      packet-flow visualisation engine + window
-  terminal/     command parser, terminal window, syscall trace window
-  shared/       cross-module types + a small typed event bus
-  app/          desktop shell: store, window manager, menu bar, dock, boot screen
-```
-
-Modules only ever talk through the narrow `CommandContext` interface (terminal → engines) and the `EventBus` (engines → anything listening) — the scheduler engine has no idea the terminal exists, and it doesn't know memory exists either. `SchedulerEngine` emits `process:terminated` from the one place a process's state actually flips to `TERMINATED` (`kill()` or a burst running out); `src/app/engines.ts` is just a subscriber that reacts by freeing that process's memory. Spawning (`run` allocates memory as well as scheduling a process) is coordinated the more direct way, one level up in `engines.ts`, since it isn't a state transition an engine owns on its own.
-
-State management is deliberately thin: the Zustand store (`src/app/store.ts`) holds only UI-relevant state (window positions, terminal history, a `version` counter). The simulation engines are plain singleton class instances; components read from them directly on render and re-render whenever `version` changes. This sidesteps the classic "mutated nested state doesn't trigger a re-render" class of bugs that comes from trying to mirror deeply-mutated engine state into a separate reactive snapshot.
-
-## Terminal commands
-
-```
-ps                    list processes
-top                   live scheduler summary
-run <name>            spawn a new process
-run --threads=<n> <name>  spawn n (2-8) threads of one process, sharing one address space
-stress [n]            spawn n (default 6) CPU-bound processes at once
-fork <pid>            duplicate a process, sharing its memory copy-on-write
-pipe <w> <r>          spawn two processes joined by a real kernel pipe
-pipe                  list open pipes and their buffer occupancy
-lsof                  list open file descriptors, per process
-kill <pid>            terminate a process
-kill -STOP <pid>      pause a process (SIGSTOP) without terminating it
-kill -CONT <pid>      resume a stopped process (SIGCONT)
-free                  memory usage summary (frames, page faults, TLB hit ratio, thrashing warning)
-cd [dir]              change working directory (no arg -> /)
-pwd                   print working directory
-ls [-l] [path]        list a directory (default: cwd), supports * wildcards
-cat <file>            print a file
-write <file> <text>   append text to a file (creates it if missing)
-touch <file>          create an empty file (no-op if it already exists)
-mkdir <dir>           create a directory
-mv <src> <dest>       move/rename a file
-cp <src> <dest>       copy a file
-ln <target> <link>    create a hard link (shares content with target)
-ln -s <target> <link>  create a symbolic link (a name pointing at a path)
-chmod <mode> <file>   set permissions (1-3 octal digits, e.g. 644 or 6)
-rm <file>             delete a file, supports * wildcards
-crash                 simulate a power loss mid-write
-fsck                  replay the journal and recover the filesystem
-reset-fs              wipe the disk (in memory and the persisted copy)
-iostat                I/O scheduler (SCAN) metrics — head position, queue depth, avg seek/wait
-df [-m]               disk block usage; -m also prints the free-space bitmap
-sync                  bounded-buffer producer/consumer status
-race on|off           toggle the unsynchronized (racy) demo mode
-ping [host]           send simulated ICMP echo packets to a host
-curl [host]           simulate one HTTP request/response round trip
-export [KEY=VALUE]    set an environment variable, or list all if no argument
-echo [args...]        print arguments, after $VAR substitution
-man <command>         short usage + example for a command
-clear                 clear the screen
-help                  show this message
-```
-
-Paths are relative to the current directory unless they start with `/`. Commands chain with `;` (always run the next), `&&` (only on success), and filter through `|` (only `grep <pattern>` is supported) — e.g. `ls | grep .log` or `mkdir /tmp && write /tmp/x.txt hi`. That `|` is a *shell-level* filter over a command's rendered output, deliberately **not** a kernel pipe: none of these commands is a long-running process with a stdout to connect. `pipe <writer> <reader>` is the kernel object, and `man pipe` says so. `$VAR`/`${VAR}` are substituted with an exported value (empty if unset), per-segment right before that segment runs — so `export X=1 && echo $X` sees the value just set. This is composition of existing commands plus a plain key-value store, not a real shell scripting language (no loops, conditionals, or functions).
-
-Every command also appends to the **syscall trace** window — and that log is the real kernel boundary, not a description written beside it. `CommandContext` is the only seam between the terminal and the rest of the simulator, so it *is* this program's system-call interface; it's wrapped, and each line is emitted by an actual crossing. Byte counts are the content's real length, pids are the pids really created, a failure reports the errno its real error distinguishes (`EACCES` vs `ENOENT`), and a command rejected before it reaches the kernel produces no trace at all. File descriptors are real too — `open()` takes the lowest free number at or above 3 and `close()` gives it back, which `lsof` lists ([ADR-0013](docs/adr/0013-syscall-trace-from-the-real-boundary.md)).
-
-Tab-completes commands and filesystem paths (relative to the current directory), persists command history to `localStorage` across reloads, and supports bash/zsh-style reverse history search: **Ctrl+R** live-filters to the most recent matching entry as you type, a repeated Ctrl+R steps to the next older match, Enter runs it, Escape restores whatever you'd been typing before the search started. Command history is one of a small set of pieces of state that are *not* wiped on refresh (see [Model trwałości](plan.md#25-model-trwałości-i-restart) and "State & robustness" below).
-
-## Tech stack
-
-React + TypeScript, Zustand, Vite, Vitest (+ React Testing Library/jsdom for component tests) — no D3/Recharts, no backend. All visualisations (Gantt chart, RAM/disk grids, allocation strip) are hand-built CSS/flex/grid. The filesystem's "disk" persists across reloads via IndexedDB — scheduler and memory still reset on refresh, deliberately (see `plan.md` §2.5).
-
-`npm run build`'s current output is the whole app in one JS chunk + one CSS file: **294.63 kB JS / 90.34 kB gzipped**, **21.15 kB CSS / 4.46 kB gzipped** — no charting library, no UI framework, no icon font is why that number stays small as the simulator grows (roadmap-v4.md §2.5). Re-run `npm run build` yourself to see the current number for the actual code in this tree.
-
-## State & robustness
-
-- **Window layout** (position/size/open/z-order) persists to `localStorage`, debounced on every drag/resize/focus — the same medium as terminal history, since it's UI chrome, not simulated system state.
-- **Cross-tab consistency**: opening the app in two tabs no longer means one silently overwrites the other's disk on the next save. Tabs announce a successful filesystem save over a `BroadcastChannel`; on hearing another tab's announcement, a tab cancels its own pending save and re-hydrates from the newer persisted state, logging it to the terminal so the reconciliation is visible. Best-effort, not full multi-tab consistency — memory/scheduler state stays tab-local by design.
-- **Small screens**: the desktop metaphor (overlapping draggable windows) has nowhere sensible to degrade to on a phone. Below ~860px wide, a small feature-detected notice replaces the boot sequence and desktop entirely, rather than a horizontally-clipped layout.
-- **Hard links, symlinks, permissions**: `Inode.links` and a real rwx mode bit are actually enforced — `rm` only frees a file's blocks once every hard-linked name pointing at it is gone, and `write`/`rm`/`cat`/`cp` reject a file missing the relevant permission bit, not just cosmetically. A symbolic link is the deliberate contrast: it stores a *path*, so it may dangle, `rm` on it removes the link rather than the target, and following a cycle stops at 8 levels with `ELOOP`.
-- **Blocked processes are never lost**: a process parked on the disk is released even if the queue holding its request is thrown away (`reset-fs`, a cross-tab import), a crashed disk declines requests instead of accepting ones it can never service, and a terminating pipe endpoint releases whoever was waiting on the other end. Each of those is a way a process could otherwise sit in `WAITING` forever, and each has its own test.
-- **Shareable session link**: which Sync window tab is open, and whether the unsafe/race-condition demo is on, live in the URL's query string (`src/app/urlState.ts`) and update via `history.replaceState` — copy the address bar to send someone straight to a specific scenario. Front-end only, no backend (see `docs/adr/0003-no-backend.md`); window layout and everything else stay out of it, on purpose — see that module's own comment for why.
-
-## Accessibility
-
-A skip link, a screen-reader-announced terminal (`aria-live`), a per-window Tab focus trap, keyboard-movable/resizable windows (focus a titlebar, then use arrow keys), and labeled controls throughout. The color palette's contrast was formally verified against WCAG AA — that check found and fixed two real gaps: `--text-muted` was ~2.9:1 against panel backgrounds (needs 4.5:1), and one categorical PID color failed against a fixed dark label, so cell/segment labels now pick whichever of a dark/light label actually has higher contrast against that specific swatch (see `src/app/colors.ts`).
-
-## Getting started
+## Running it
 
 ```bash
 npm install
-npm run dev        # start the dev server
-npm test           # engine unit/property tests + React component tests
-npm run test:e2e     # Playwright smoke test against a real Chromium, on the production build
-npm run lint        # eslint
-npm run typecheck   # tsc --noEmit
+npm run dev          # dev server
 npm run build        # production build to dist/
+npm test             # unit, property and component tests
+npm run test:e2e     # Playwright smoke test against the built app
+npm run lint
+npm run typecheck
 ```
 
-`npm test`'s jsdom component tests cover interaction logic; `npm run test:e2e` (Playwright, `e2e/smoke.spec.ts`) exists specifically for what jsdom can't — a real pointer-drag on a window, real layout, a full boot → desktop → terminal round trip against the actual built `dist/`. First run needs browser binaries: `npx playwright install chromium`.
+The E2E run needs browser binaries once: `npx playwright install chromium`.
 
-## Deployment & CI
+## What's real and what isn't
 
-`.github/workflows/ci.yml` runs lint, typecheck, tests, a production build, the Playwright smoke test against that build, and a Lighthouse audit (performance/accessibility/best-practices/SEO against the built `dist/`, served locally in the CI job — written to the run's job summary, and the raw JSON report uploaded as a build artifact) on every push/PR, and deploys `dist/` to GitHub Pages on every push to `main`. To enable it on your fork: push this repo to GitHub, then turn on **Settings → Pages → Source: GitHub Actions**.
+This matters, so it's worth being blunt about.
+
+**Real:** every algorithm. MLFQ, Clock/Second-Chance, SCAN elevator scheduling, the write-ahead log and its replay, counting semaphores, wait-for-graph deadlock detection, Banker's safety algorithm, copy-on-write page sharing, the free-space bit vector. Each is plain TypeScript with no React or store coupling, unit-tested against hand-traced scenarios the way you'd check a textbook example on paper.
+
+**Simulated:** the machine. There is no hardware, no ring 0, no MMU translating addresses per instruction, no real parallelism. Every "CPU" is dispatched inside one single-threaded tick, so there are no true data races. (The race-condition demo in the sync module is an explicit model of one, not an actual race.) The filesystem lives in IndexedDB, not on a block device. The network module animates packets; there's no TCP/IP stack under it.
+
+What I've tried hard to avoid is the middle ground: something that looks like a mechanism but is really a lookup table. When I found one, I removed it. The syscall trace used to be a static map from command name to plausible-looking output. Now it wraps the actual boundary and reports what really crossed it, byte counts and pids included.
+
+## Concepts and mechanisms
+
+### Process scheduling
+
+**Multi-Level Feedback Queue.** Three levels with quanta of 4, 8 and unbounded (FCFS at the bottom). The rules:
+
+1. A higher queue always preempts a lower one.
+2. Processes at the same level round-robin on that level's quantum.
+3. A process that blocks for I/O before its slice expires keeps its level. Yielding voluntarily isn't punished.
+4. A process that burns a whole slice without blocking drops one level.
+5. Every 50 ticks everything returns to the top, so a long batch job can't starve an interactive one forever.
+
+MLFQ is here rather than round-robin or SJF because it's what general-purpose kernels actually approximate, and because it adapts to interactive versus batch workloads without anyone tuning it.
+
+**Multiple CPUs.** The scheduler runs over two logical CPUs, each with its own complete set of queues. A process is assigned a CPU when admitted and stays there through preemption, demotion, I/O and priority boosts. That's processor affinity, and it's why per-CPU queues beat one shared queue here: a shared queue needs neither affinity nor balancing, so it demonstrates neither.
+
+Pulling against affinity is a load balancer. Every 20 ticks it compares how many runnable processes each CPU has and migrates one if the difference is 2 or more. Moving on a difference of 1 would leave two cores swapping the same process back and forth, since the move just inverts the imbalance. The process it takes comes from the front of the busiest CPU's lowest-priority queue: batch work that has waited longest, so the coldest cache and the least lost by moving it.
+
+**Process states.**
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/process-states-dark.svg">
+  <img alt="Process state transitions" src="docs/diagrams/process-states.svg">
+</picture>
+
+The interesting state is `WAITING`, because a process can be waiting for genuinely different things and it matters which. `ps` shows `WAITING(disk)`, `WAITING(pipe)` or `WAITING(io)` rather than a bare state, and the reason is recorded on the process rather than inferred. That sounds like a detail but isn't: the original code worked out what a process was waiting for from the parity of its burst index, which held only while a self-timed I/O burst was the sole possible reason to wait.
+
+### Blocking on a real device
+
+A process's I/O burst is a request to the disk, not a countdown. When a CPU burst ends and the next burst is an I/O one, the scheduler hands it to the disk, and the process sits in `WAITING` until the SCAN head reaches its cylinder and something wakes it.
+
+This is the seam that turns the project from four parallel simulations into one system. Before it, the scheduler counted I/O bursts down by itself while the disk queue was fed only by file operations. `cat` moved the head but blocked nothing, and a process in `WAITING` produced no disk activity. The Gantt chart and `iostat` described two unrelated worlds that happened to share a clock.
+
+`SchedulerEngine` stays free of any knowledge of disks. It takes a port:
+
+```ts
+export interface IoPort {
+  submit(pid: number, sizeHint: number): boolean
+}
+```
+
+Return `true` and the device owns the wait. Return `false` — a crashed disk does — and the scheduler falls back to its own countdown, so a process can never be lost. The real implementation is installed by the coordinator, not by either engine.
+
+### Virtual memory
+
+**Demand paging with Clock replacement.** 24 frames, a page table per process, pages faulted in on first touch. Clock (Second-Chance) is the replacement policy: a sweeping hand gives every frame one reprieve before evicting it. Real kernels use it because exact LRU needs reference tracking that hardware doesn't cheaply provide.
+
+**TLB.** An 8-entry translation cache in front of the page table, LRU-evicted, invalidated whenever a page is really evicted. It's small on purpose. A TLB that mirrored the page table 1:1 would sit at a 100% hit rate and demonstrate nothing; at 8 entries you can watch the ratio move and see why the indirection is affordable.
+
+**Swap.** An evicted page is written to a real file under `/swap` on the simulated disk and read back on the next fault. `MemoryEngine` only records *that* a page is swapped; writing the file is the coordinator's job, so memory and filesystem stay unaware of each other.
+
+**Thrashing.** A sliding window over the last 20 accesses. When more than 70% of them fault, the system is spending more time paging than working, and the Memory window says so. `stress 12` is the quickest way to trigger it.
+
+**fork() and copy-on-write.** `fork <pid>` gives the child its own page table pointing at the parent's frames, marked read-only on both sides. Nothing is copied. The first write by either process traps, copies that one frame, and clears the flag:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/cow-dark.svg">
+  <img alt="Copy-on-write after fork" src="docs/diagrams/cow.svg">
+</picture>
+
+Run `free` right after a fork and memory usage hasn't moved; run it again once both have been scheduled a while and it climbs. Three consequences of sharing are easy to get wrong, so each has its own test: evicting a shared frame has to invalidate *every* mapping of it, not just the owner's; freeing one process must not free a frame another still reads; and a frame down to one mapping stops being copy-on-write, or that process pays a second pointless copy.
+
+### Filesystem
+
+**Inodes over a block device.** 64 blocks, files as inodes with block lists, directories as a tree. Hard links are real: `Inode.links` is a count, and blocks are freed only when the last name pointing at an inode goes away.
+
+**Journaling.** Every mutation is written to a write-ahead log as pending, applied, then marked committed. `crash` simulates power loss by logging an entry and never applying it, leaving a filesystem that rejects further writes. `fsck` replays what's pending. This is the idea of journaling rather than the crash-consistency guarantees of a production filesystem, and it's demonstrable in two commands.
+
+**Free space as a bit vector.** One bit per block packed into 32-bit words, so finding a free block skips a fully allocated word with a single comparison instead of 32 tests. The filesystem always knew which blocks were free, but until this existed it knew implicitly, by scanning every block for a null owner, which left the actual subject — how free space is *represented* — unmodelled. `df -m` prints the vector.
+
+**Symbolic links** sit next to hard links deliberately, because the contrast is the point. A hard link is a second name for one inode. A symlink stores a *path*, so it can dangle, `rm` on it removes the link rather than the target, and following a cycle stops at 8 levels with `ELOOP`. All of it lives in one function that rewrites a path with links resolved, which is why nothing below it needed to change.
+
+**Disk scheduling: SCAN.** Every physical block access queues a request. The head sweeps end to end, servicing everything it passes and reversing only at the ends. An idle disk parks rather than sweeping for nothing, which keeps the average-seek figure meaningful. `iostat` reports head position, queue depth, seek and wait averages, and which processes are blocked on it right now.
+
+### Interprocess communication
+
+`pipe <writer> <reader>` spawns two real processes and connects them with a bounded buffer. The writer blocks when it fills, the reader when it empties, and each wakes the other. Both appear in `ps` and the Gantt chart like any other process; they just spend a lot of their lives in `WAITING(pipe)`.
+
+The shell's `|` is a different thing, and the docs say so. It's a filter over one command's rendered output, with no processes and no channel involved. Making `|` a real pipe would need these commands to be long-running processes with a stdout, which is a much bigger project. Overloading the symbol quietly would have been worse than having two.
+
+A terminating endpoint closes its end and releases whoever was parked on the other. Without that, a reader blocked on an empty pipe whose writer just exited waits forever for data that can never arrive.
+
+### Synchronization
+
+**Bounded buffer** with two producers, two consumers, a counting semaphore pair for empty and full slots, and a mutex around the critical section. Since there's no real concurrency to race, the race is modelled explicitly: entering the critical section captures a slot, and committing it happens a tick later. The mutex guarantees only one actor is ever between those two steps. Toggle `race on` and it doesn't, so two producers capture the same slot and you get the textbook lost update, counted and logged.
+
+**Deadlock detection** runs a DFS cycle search over a wait-for graph, driven by a scripted circular-wait scenario. The resource-allocation graph is drawn, and there's a resolution step that breaks the cycle.
+
+**Deadlock avoidance** is Banker's Algorithm over Silberschatz's 5-process/3-resource worked example, running the safety check before granting a request instead of detecting trouble afterwards.
+
+### Syscalls and file descriptors
+
+`CommandContext` is the only seam between the shell and everything else. Every file operation, spawn and signal goes through it, which makes it this program's system-call boundary. The trace window wraps it, so each line comes from a call that actually happened: byte counts are the content's real length, pids are the pids really created, and a failure reports the errno its real error distinguishes. A command rejected before it reaches the kernel produces no trace at all, which is correct, and which a static map got wrong.
+
+Descriptors are real too. `open()` returns the lowest free number at or above 3 and `close()` gives it back, so the trace shows fd 3 reused across commands rather than a counter climbing forever. `lsof` lists what each live process holds: standard streams, plus a pipe end if it has one.
+
+## Architecture
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/architecture-dark.svg">
+  <img alt="Module architecture" src="docs/diagrams/architecture.svg">
+</picture>
+
+```
+src/
+  scheduler/    MLFQ engine, Gantt chart, process tree
+  memory/       Clock paging, TLB, copy-on-write, First-Fit reference allocator
+  filesystem/   inodes, journal, free-space bitmap, SCAN disk scheduler
+  ipc/          anonymous pipes
+  sync/         bounded buffer, deadlock detection and avoidance, pipe panel
+  kernel/       the syscall boundary and the open-descriptor table
+  network/      packet-flow visualisation
+  terminal/     command parser and terminal window
+  shared/       cross-module types and a small typed event bus
+  app/          desktop shell: store, window manager, engine coordination
+```
+
+Two rules hold the whole thing together.
+
+**No engine imports another.** The scheduler doesn't know memory exists. Memory doesn't know about the filesystem. Anything spanning two of them — swapping a page to disk, blocking a process on the disk head, connecting two processes with a pipe, duplicating an address space — is coordinated in `app/engines.ts`, the only module that knows about more than one. Engines announce things on a typed event bus; whoever cares subscribes.
+
+**State lives in the engines, not in React.** The Zustand store holds window positions, terminal history and a version counter, and nothing else. Windows read engine state directly at render and re-render when the counter ticks. Mirroring deeply-mutated engine state into a reactive snapshot is a reliable source of stale-render bugs, and this sidesteps the category.
+
+### One tick
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/tick-dark.svg">
+  <img alt="What happens in one simulated tick" src="docs/diagrams/tick.svg">
+</picture>
+
+Order matters here. The disk advances after the scheduler, so a request submitted this tick can be serviced this tick if the head happens to be passing. Memory is accessed once per *busy CPU* rather than once per tick: with two CPUs running, twice as much memory is being referenced, and pretending otherwise would halve the observed fault rate and put the thrashing indicator out of reach.
+
+## The terminal
+
+36 commands. `help` lists them, `man <command>` explains one.
+
+```
+ps                        list processes, with state, CPU and queue level
+top                       scheduler summary: utilization, per-CPU load, migrations
+run <name>                spawn a process
+run --threads=<n> <name>  spawn n threads sharing one address space
+fork <pid>                duplicate a process, sharing memory copy-on-write
+pipe <writer> <reader>    two processes joined by a real pipe
+pipe                      list open pipes
+stress [n]                spawn n CPU-bound processes at once
+kill <pid>                terminate; -STOP and -CONT send SIGSTOP/SIGCONT
+free                      frames, faults, hit ratio, TLB, COW, thrashing warning
+lsof                      open file descriptors per process
+
+cd / pwd / ls [-l] [path] / cat / write / touch / mkdir / mv / cp / rm
+ln <target> <link>        hard link
+ln -s <target> <link>     symbolic link
+chmod <mode> <file>       rwx permission bits, actually enforced
+df [-m]                   block usage; -m prints the free-space bitmap
+iostat                    SCAN head position, queue depth, seek and wait averages
+crash / fsck / reset-fs   power loss, journal replay, wipe the disk
+
+sync                      bounded-buffer status
+race on|off               toggle the unsynchronized demo
+ping / curl [host]        simulated packet flow
+export [KEY=VALUE]        environment variables
+echo / man / clear / help
+```
+
+Paths are relative to the working directory unless they start with `/`. Commands chain with `;` and `&&`, and `|` filters output through `grep`. `$VAR` is substituted per segment right before that segment runs, so `export X=1 && echo $X` sees the value just set. That's variables plus composition, not a scripting language: no loops, no conditionals, no functions.
+
+The terminal tab-completes commands and paths, keeps history in `localStorage` across reloads, and supports **Ctrl+R** reverse search the way bash does.
+
+![Terminal and syscall trace](docs/screenshot-terminal.png)
+
+## More screenshots
+
+| Scheduler | Memory |
+|---|---|
+| ![Scheduler](docs/screenshot-scheduler.png) | ![Memory](docs/screenshot-memory.png) |
+| Two CPUs with per-core Gantt rows, MLFQ queue levels, live metrics | Frame grid, page table with COW flags, TLB contents, fault rate |
+
+| Filesystem | Pipes |
+|---|---|
+| ![Filesystem](docs/screenshot-filesystem.png) | ![Pipes](docs/screenshot-ipc.png) |
+| Inode tree with a symlink, block map, free-space bitmap, SCAN head | A pipe between two processes, with both endpoints' states |
+
+## State and persistence
+
+The disk is the only thing that survives a reload; it persists to IndexedDB. Scheduler and memory reset on refresh on purpose, since a half-restored process table is more confusing than a fresh one.
+
+Window layout and terminal history persist to `localStorage`. Opening the app in two tabs doesn't corrupt anything: tabs announce filesystem saves over a `BroadcastChannel`, and a tab hearing another's announcement re-hydrates instead of overwriting. A tab with unsaved edits of its own doesn't sync until it goes idle.
+
+Which sync tab is open, and whether the race demo is running, live in the query string, so you can send someone a link to a specific scenario.
+
+## Testing
+
+372 tests across 26 files.
+
+- **Engine tests** hand-trace textbook scenarios: exact tick-by-tick MLFQ demotion traces, a classic Second-Chance reference string, a crash-and-replay round trip, SCAN sweeps with reversals.
+- **Property tests** (fast-check) cover invariants that break quietly. Block accounting always reconciles across arbitrary operation sequences. Clock never evicts a kernel frame. After a fork, every frame mapping is live and points back at the page table entry that points at it.
+- **Component tests** (Testing Library, jsdom) cover interaction: window dragging, keyboard window movement, tab-completion, terminal history.
+- **A soak test** runs 3000 ticks with commands interleaved and checks cross-subsystem invariants every tick: no process queued twice or running on two CPUs, no stale frame mapping, the free-space bitmap always agreeing with the block owners, no descriptor outliving its process.
+- **An E2E smoke test** (Playwright) covers what jsdom can't: real layout, a real pointer drag, a full boot against the production build.
+
+## Accessibility
+
+A skip link, an `aria-live` terminal, per-window focus traps, keyboard-movable and resizable windows (focus a titlebar, then use the arrow keys), labelled controls throughout. The palette was checked against WCAG AA, which turned up two real failures: muted text at 2.9:1 against panel backgrounds, and one process colour that failed against a fixed label colour. Labels now pick whichever of a dark or light foreground has more contrast against the specific swatch behind them.
+
+Below roughly 860px there's nowhere sensible for a desktop metaphor to degrade to, so a notice replaces it rather than shipping a clipped layout.
+
+## Tech stack
+
+React, TypeScript, Zustand, Vite, Vitest. No D3, no charting library, no component framework, no icon font. Every visualisation — the Gantt chart, the frame grid, the disk map, the allocation strip — is CSS grid and flexbox.
+
+That restraint is why the whole app is **295 kB of JavaScript, 90 kB gzipped**, plus 21 kB of CSS, for around 7,700 lines of application code.
+
+CI runs lint, typecheck, tests, a production build, the Playwright smoke test and a Lighthouse audit on every push, and deploys to GitHub Pages from `main`.
+
+## Regenerating the docs
+
+Screenshots and diagrams are checked in, but both are generated:
+
+```bash
+npm run build
+npx vite preview --port 4173 &
+npm run screenshots     # docs/screenshot-*.png
+npm run diagrams        # docs/diagrams/*.svg, light and dark
+```
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
