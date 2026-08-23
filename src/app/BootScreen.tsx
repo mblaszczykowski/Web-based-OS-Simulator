@@ -1,8 +1,5 @@
 import { useEffect, useState } from 'react'
 
-// Purely cosmetic boot animation (roadmap.md §1.2) — a fixed, hand-timed
-// sequence of lines with no relation to real hydration work, which App.tsx
-// runs concurrently and waits on independently before mounting the desktop.
 const BOOT_LINES = [
   'OS.SIM v0.1 booting…',
   'POST: scheduler unit ....... OK',

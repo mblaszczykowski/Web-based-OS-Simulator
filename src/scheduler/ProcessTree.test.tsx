@@ -1,12 +1,4 @@
 // @vitest-environment jsdom
-//
-// Component test for a bug found by code review: a thread group's
-// followers (roadmap-v4.md §2.1) point parentPid at their leader's pid,
-// not at SHELL_PID/INIT_PID directly. If the leader's own Process entry
-// later ages out of SchedulerEngine's bounded terminated-process history
-// while its followers are still running, the followers used to become
-// permanently unreachable in this tree (nothing ever recursed into the
-// vanished leader's pid). See ProcessTree.tsx's memoryOwnerPid-grouping logic.
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
@@ -36,11 +28,6 @@ describe('ProcessTree', () => {
   })
 
   it('still shows a thread-group follower when its leader has aged out of `processes` entirely', async () => {
-    // No Process with pid 10 exists at all — only its two followers, whose
-    // parentPid AND memoryOwnerPid still point at it (exactly what happens
-    // once the leader itself terminates and is later pruned from the
-    // bounded history — spawnThreadGroup() stamps every follower's
-    // memoryOwnerPid with the leader's pid, roadmap-v4.md §2.1).
     const follower1 = makeProcess({ pid: 11, name: 'worker:t2', parentPid: 10, memoryOwnerPid: 10 })
     const follower2 = makeProcess({ pid: 12, name: 'worker:t3', parentPid: 10, memoryOwnerPid: 10 })
     render(<ProcessTree processes={[follower1, follower2]} />)
@@ -55,7 +42,6 @@ describe('ProcessTree', () => {
     render(<ProcessTree processes={[p]} />)
     await open()
 
-    // Exactly one "solo" row — no duplicate orphan-branch rendering of the same process.
     expect(screen.getAllByText(/solo/)).toHaveLength(1)
   })
 })

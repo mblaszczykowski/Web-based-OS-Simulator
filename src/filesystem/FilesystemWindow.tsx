@@ -8,11 +8,6 @@ import { colorForPid, labelColorForPid } from '../app/colors'
 
 function TreeNode({ entry, depth }: { entry: DirEntry; depth: number }) {
   if (entry.type === 'symlink') {
-    // roadmap-v5.md §2.2 — shown with the target rather than as a plain
-    // name, because the target is the only thing that distinguishes a
-    // symlink from the hard link beside it (a hard link is genuinely
-    // indistinguishable from the original name, and correctly renders as
-    // an ordinary file here).
     return (
       <div className="tree-row file" style={{ paddingLeft: depth * 16 }} title={`symbolic link → ${entry.target ?? '?'}`}>
         <FileIcon />
@@ -45,16 +40,6 @@ function TreeNode({ entry, depth }: { entry: DirEntry; depth: number }) {
 
 type IoCellKind = 'head' | 'pending' | 'owned' | 'free'
 
-/**
- * A block can hold real file data with no I/O request in flight for it
- * right now — that's not the same as never having been allocated at all
- * (found by code review: both used to render as an identical "free" cell
- * here, even though the disk-blocks grid directly above already shows this
- * same block as owned). Priority order (head > pending > owned > free)
- * lives in exactly this one place, instead of being repeated across
- * separate class/title/glyph ternary chains that could silently drift
- * apart from each other.
- */
 function ioCellKind(block: DiskBlock, headPosition: number, pendingBlocks: Set<number>): IoCellKind {
   if (block.index === headPosition) return 'head'
   if (pendingBlocks.has(block.index)) return 'pending'
@@ -73,7 +58,7 @@ const IO_CELL_STYLE: Record<
 }
 
 export function FilesystemWindow() {
-  useSimStore((s) => s.version) // subscribed purely so this window re-renders on every tick/command
+  useSimStore((s) => s.version)
   const runCommand = useSimStore((s) => s.runCommand)
 
   const tree = filesystem.getTree()
@@ -145,7 +130,7 @@ export function FilesystemWindow() {
                 </span>
               </div>
             </div>
-            {/* roadmap-v5.md §2.2 — the free-space bit vector the allocator
+            {/* — the free-space bit vector the allocator
                 actually consults, next to the block grid it describes. One
                 cell per block, so the two line up row for row. */}
             <div className="bitmap-strip" style={{ marginTop: 8 }} title="Free-space bitmap: filled = allocated">
@@ -192,9 +177,6 @@ export function FilesystemWindow() {
             </div>
             <div className="disk-grid" style={{ marginTop: 8 }}>
               {(() => {
-                // One Set built once per render, not one `.some()` scan of
-                // the whole pending queue per block (found by code review:
-                // that made this O(blocks × pending) every ~450ms tick).
                 const pendingBlocks = new Set(ioState.pending.map((r) => r.blockIndex))
                 return blocks.map((b) => {
                   const kind = ioCellKind(b, ioState.headPosition, pendingBlocks)
@@ -209,7 +191,7 @@ export function FilesystemWindow() {
             <div className="algo-desc" style={{ marginTop: 6 }}>
               Avg seek: {ioMetrics.avgSeekDistance.toFixed(1)} cylinders &middot; Avg wait: {ioMetrics.avgWaitTicks.toFixed(1)}{' '}
               ticks &middot; Completed: {ioMetrics.completedCount}
-              {/* roadmap-v5.md §1.1 — the point of the whole integration: these
+              {/* — the point of the whole integration: these
                   are real processes sitting in WAITING until this head reaches
                   them, not a queue of anonymous block numbers. */}
               {blockedOnDisk.length > 0 && (

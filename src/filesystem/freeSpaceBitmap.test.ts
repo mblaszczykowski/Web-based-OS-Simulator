@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { FreeSpaceBitmap } from './freeSpaceBitmap'
 
-describe('FreeSpaceBitmap — free-space management as a bit vector (roadmap-v5.md §2.2)', () => {
+describe('FreeSpaceBitmap — free-space management as a bit vector', () => {
   it('starts entirely free and tracks claims and releases', () => {
     const bitmap = new FreeSpaceBitmap(8)
     expect(bitmap.freeCount).toBe(8)
@@ -52,18 +52,15 @@ describe('FreeSpaceBitmap — free-space management as a bit vector (roadmap-v5.
   })
 
   it('skips an entirely-allocated word instead of testing its 32 blocks one by one', () => {
-    // The whole reason a bit vector is the classic representation: a full
-    // word is rejected with one comparison. Observable only as the right
-    // answer, but this is the case that exercises the skip path.
-    const bitmap = new FreeSpaceBitmap(96) // three 32-bit words
-    for (let i = 0; i < 64; i++) bitmap.claim(i) // words 0 and 1 completely full
+    const bitmap = new FreeSpaceBitmap(96)
+    for (let i = 0; i < 64; i++) bitmap.claim(i)
     expect(bitmap.findFirstFree()).toBe(64)
   })
 
   it('handles a partial trailing word — the bits past the end are not free blocks', () => {
-    const bitmap = new FreeSpaceBitmap(40) // 8 blocks into the second word
+    const bitmap = new FreeSpaceBitmap(40)
     for (let i = 0; i < 40; i++) bitmap.claim(i)
-    expect(bitmap.findFirstFree()).toBe(-1) // not 40, 41, ... which don't exist
+    expect(bitmap.findFirstFree()).toBe(-1)
     expect(bitmap.freeCount).toBe(0)
   })
 

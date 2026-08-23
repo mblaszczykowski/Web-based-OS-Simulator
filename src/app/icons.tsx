@@ -1,7 +1,3 @@
-// Small stroke-based icon set, 20px viewBox, used across the desktop shell
-// and every window's titlebar. Deliberately hand-drawn rather than an icon
-// font/library — the whole app has no other runtime dependency either.
-
 type IconProps = { size?: number }
 
 export function SchedulerIcon({ size = 14 }: IconProps) {

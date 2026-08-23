@@ -1,9 +1,3 @@
-// Deadlock detection — roadmap.md §3.1, an extension of the sync module
-// (1.3), not a separate topic. A scripted two-process, two-resource
-// scenario (the textbook circular-wait case) drives a real wait-for-graph
-// cycle detector via DFS, exactly the classic algorithm — this isn't a
-// hardcoded "if both want each other's resource" check.
-
 export type DeadlockActorId = 1 | 2
 export type ResourceId = 'R1' | 'R2'
 
@@ -39,7 +33,6 @@ export class DeadlockEngine {
     return { ...this.wants }
   }
 
-  /** The wait-for graph as edges: actor -> the actor holding what it wants. */
   getWaitForGraph(): WaitForEdge[] {
     const edges: WaitForEdge[] = []
     for (const actor of [1, 2] as const) {
@@ -50,7 +43,6 @@ export class DeadlockEngine {
     return edges
   }
 
-  /** DFS cycle detection over the wait-for graph — the general algorithm, not special-cased for 2 actors. */
   hasCycle(): boolean {
     const edges = new Map(this.getWaitForGraph().map((e) => [e.from, e.to]))
     for (const start of [1, 2] as const) {
@@ -65,7 +57,6 @@ export class DeadlockEngine {
     return false
   }
 
-  /** One step through the scripted scenario. No-op once deadlocked/resolved — call reset() to run it again. */
   advance(): void {
     switch (this.step) {
       case 'idle':
@@ -77,20 +68,19 @@ export class DeadlockEngine {
         this.step = 'p2-acquired-r2'
         return
       case 'p2-acquired-r2':
-        this.wants[1] = 'R2' // P1 requests R2 — held by P2, blocks
+        this.wants[1] = 'R2'
         this.step = 'p1-blocked-on-r2'
         return
       case 'p1-blocked-on-r2':
-        this.wants[2] = 'R1' // P2 requests R1 — held by P1, blocks
+        this.wants[2] = 'R1'
         this.step = this.hasCycle() ? 'deadlocked' : 'p1-blocked-on-r2'
         return
       case 'deadlocked':
       case 'resolved':
-        return // terminal states — call reset() or breakDeadlock()
+        return
     }
   }
 
-  /** Kill `victim` to break the cycle: release what it holds, hand the survivor whatever it was waiting on. */
   breakDeadlock(victim: DeadlockActorId): void {
     if (this.step !== 'deadlocked') return
     const survivor = OTHER[victim]

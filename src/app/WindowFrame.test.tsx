@@ -1,11 +1,4 @@
 // @vitest-environment jsdom
-//
-// Component test — roadmap-v3.md §2.4. WindowFrame's drag/resize/focus-trap
-// logic (Phase 2 §2.3 and §2.5) had zero coverage beyond "nobody's broken
-// it yet by accident" — exactly the kind of interaction the roadmap calls
-// out as silently rotting without a test. This covers the keyboard paths
-// (arrow-key move/resize, Tab focus trap, the close button) — the ones
-// jsdom can exercise deterministically, unlike pointer-drag.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { act, cleanup, render, screen } from '@testing-library/react'
@@ -20,10 +13,6 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  // Unmount BEFORE restoring state — otherwise a still-mounted component
-  // re-renders off of this store write outside of any act() batch (real
-  // React state updates always are), which is exactly the "not wrapped in
-  // act" warning this ordering avoids.
   cleanup()
   useSimStore.setState(snapshot, true)
 })
@@ -61,24 +50,20 @@ describe('WindowFrame', () => {
     expect(useSimStore.getState().windows.terminal).toMatchObject({ x: 110, y: 100 })
 
     await user.keyboard('{Shift>}{ArrowDown}{/Shift}')
-    expect(useSimStore.getState().windows.terminal).toMatchObject({ x: 110, y: 130 }) // fast step (30) while stepping down
+    expect(useSimStore.getState().windows.terminal).toMatchObject({ x: 110, y: 130 })
   })
 
-  it('regression: cannot be moved off-screen — a window is never left permanently unreachable (found by code review)', async () => {
+  it('regression: cannot be moved off-screen — a window is never left permanently unreachable', async () => {
     const user = userEvent.setup()
-    renderWindow() // starts at x:100,y:100, w:400 — well within the viewport
+    renderWindow()
     const titlebar = screen.getByRole('button', { name: 'Maximize' }).closest('.titlebar') as HTMLElement
     titlebar.focus()
 
-    // Way more ArrowLeft/ArrowUp presses than needed to drive x/y deeply
-    // negative if nothing clamped it — this used to persist to
-    // localStorage and get restored on every future load, permanently
-    // hiding the window and its only drag handle.
     for (let i = 0; i < 100; i++) await user.keyboard('{Shift>}{ArrowLeft}{ArrowUp}{/Shift}')
 
     const { x, y } = useSimStore.getState().windows.terminal
-    expect(y).toBeGreaterThanOrEqual(0) // top edge never goes above the viewport
-    expect(x + 400).toBeGreaterThan(0) // some part of the 400px-wide window stays on-screen
+    expect(y).toBeGreaterThanOrEqual(0)
+    expect(x + 400).toBeGreaterThan(0)
   })
 
   it('resizes the window with arrow keys on the resize handle, clamped to a minimum size', async () => {
@@ -109,12 +94,10 @@ describe('WindowFrame', () => {
     )
     const first = focusable[0]!
     const last = focusable[focusable.length - 1]!
-    expect(first).not.toBe(last) // sanity: there really is more than one focusable element to trap between
+    expect(first).not.toBe(last)
 
     last.focus()
     expect(document.activeElement).toBe(last)
-    // jsdom doesn't natively move focus on Tab — this only passes if
-    // WindowFrame's own keydown handler calls first.focus() itself.
     last.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
     expect(document.activeElement).toBe(first)
 
@@ -125,7 +108,7 @@ describe('WindowFrame', () => {
   it('does not trap Tab focus when this window is not the focused one', () => {
     renderWindow()
     act(() => {
-      useSimStore.setState({ focusedWindow: 'scheduler' }) // some other window has focus now
+      useSimStore.setState({ focusedWindow: 'scheduler' })
     })
     const region = screen.getByRole('region', { name: 'Terminal window' })
     const focusable = region.querySelectorAll<HTMLElement>(
@@ -136,6 +119,6 @@ describe('WindowFrame', () => {
     last.focus()
     const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
     last.dispatchEvent(event)
-    expect(event.defaultPrevented).toBe(false) // not intercepted — this window isn't the one with focus
+    expect(event.defaultPrevented).toBe(false)
   })
 })

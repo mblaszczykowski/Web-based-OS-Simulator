@@ -7,7 +7,7 @@ afterEach(() => {
   window.history.replaceState(null, '', '/')
 })
 
-describe('readSharedSessionState (roadmap-v4.md §3.1)', () => {
+describe('readSharedSessionState', () => {
   it('reads a recognized sync tab and race value from the query string', () => {
     window.history.replaceState(null, '', '/?sync=deadlock&race=on')
     expect(readSharedSessionState()).toEqual({ syncTab: 'deadlock', raceOn: true })
@@ -27,13 +27,13 @@ describe('readSharedSessionState (roadmap-v4.md §3.1)', () => {
   })
 })
 
-describe('writeSharedSessionState (roadmap-v4.md §3.1)', () => {
+describe('writeSharedSessionState', () => {
   it('sets query params without touching fields left undefined', () => {
     writeSharedSessionState({ syncTab: 'banker' })
     expect(window.location.search).toBe('?sync=banker')
 
     writeSharedSessionState({ raceOn: true })
-    expect(new URLSearchParams(window.location.search).get('sync')).toBe('banker') // untouched
+    expect(new URLSearchParams(window.location.search).get('sync')).toBe('banker')
     expect(new URLSearchParams(window.location.search).get('race')).toBe('on')
   })
 

@@ -6,10 +6,6 @@ import { useSimStore } from '../app/store'
 import { filesystem } from '../app/engines'
 import { COMMAND_NAMES } from './commands'
 
-// Command history intentionally persists across reload (unlike every other
-// piece of simulator state, which resets on refresh — see plan.md §2.5 /
-// roadmap.md §1.4): it's harmless, session-scoped convenience, not
-// simulated system state.
 const HISTORY_KEY = 'ossim.terminal.history'
 const HISTORY_LIMIT = 200
 
@@ -28,11 +24,10 @@ function saveHistory(history: string[]): void {
   try {
     window.localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(-HISTORY_LIMIT)))
   } catch {
-    // localStorage unavailable (private mode / quota) — history just won't persist, not fatal.
+    // localStorage unavailable — history just won't survive the reload.
   }
 }
 
-/** Every absolute path in the tree, directories suffixed with `/` (so completion can tell them apart). */
 function collectPaths(node: DirEntry, prefix: string, acc: string[]): void {
   for (const child of node.children ?? []) {
     const path = prefix === '/' ? `/${child.name}` : `${prefix}/${child.name}`
@@ -45,14 +40,12 @@ function collectPaths(node: DirEntry, prefix: string, acc: string[]): void {
   }
 }
 
-/** Rewrites an absolute path onto `cwd`, e.g. ('/home/notes.txt', '/home') -> 'notes.txt'. `null` if it isn't under cwd at all (no '../' support in completion — see roadmap-v3.md §1.1). */
 function toRelative(absPath: string, cwd: string): string | null {
   if (cwd === '/') return absPath.slice(1)
   if (absPath.startsWith(`${cwd}/`)) return absPath.slice(cwd.length + 1)
   return null
 }
 
-/** Completion candidates for `query`, relative to `cwd` unless `query` is itself absolute (leading `/`) — roadmap-v3.md §1.1. */
 function pathCandidates(query: string, cwd: string): string[] {
   const absolute: string[] = []
   collectPaths(filesystem.getTree(), '/', absolute)
@@ -72,11 +65,9 @@ function longestCommonPrefix(strs: string[]): string {
 
 interface SearchState {
   query: string
-  /** Index into `history` of the entry currently shown, or null if `query` matches nothing. */
   matchIndex: number | null
 }
 
-/** Most recent entry at or before `fromIndex` (inclusive) containing `query` as a substring — bash/zsh-style reverse-i-search (roadmap-v4.md §1.3). An empty query never matches (nothing to search for yet). */
 function findMatch(history: string[], query: string, fromIndex: number): number | null {
   if (!query) return null
   for (let i = Math.min(fromIndex, history.length - 1); i >= 0; i--) {
@@ -97,10 +88,6 @@ export function TerminalWindow() {
   const [search, setSearch] = useState<SearchState | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  // Whatever was typed but not yet submitted when Ctrl+R was pressed — real
-  // bash/zsh restore this on an aborted (Escape) search rather than
-  // discarding it (found by code review: this used to just be wiped with
-  // no way back).
   const preSearchValueRef = useRef('')
 
   useEffect(() => {
@@ -139,16 +126,6 @@ export function TerminalWindow() {
     setValue([...prefixParts, completion].join(' ') + trailer)
   }
 
-  /**
-   * Re-runs the search for `query` and, only on an actual match, mirrors it
-   * into the normal input buffer (so Enter can just reuse submit()). On no
-   * match, `value` is deliberately left alone — real bash/zsh keep showing
-   * the last successful match with a "failed" label rather than blanking
-   * the line, whether that's from typing a character with no match at all
-   * or from stepping past the oldest match with a repeated Ctrl+R (found
-   * by code review: this used to unconditionally blank `value` on a null
-   * `matchIndex`, wiping the visible match in both cases).
-   */
   function updateSearch(query: string, fromIndex: number) {
     const matchIndex = findMatch(history, query, fromIndex)
     setSearch({ query, matchIndex })
@@ -160,32 +137,20 @@ export function TerminalWindow() {
     if (e.key === 'Escape') {
       setSearch(null)
       setValue(preSearchValueRef.current)
-      setHistoryIndex(null) // found by code review: left stale otherwise, so a post-abort ArrowUp resumed from wherever it was before the search instead of the most recent entry
+      setHistoryIndex(null)
     } else if (e.key === 'Enter') {
-      if (current.matchIndex === null) return // nothing matched — stay in search rather than submit a blank line
+      if (current.matchIndex === null) return
       setSearch(null)
       submit()
     } else if (e.key === 'Backspace') {
-      // Continues from the currently displayed match, not always the
-      // newest entry — real bash doesn't fully "undo" a step on Backspace
-      // either, and re-searching from the current position (rather than
-      // restarting from the top) is the closer approximation of the two
-      // (found by code review, alongside the identical bug in the
-      // character-typed branch below).
       updateSearch(current.query.slice(0, -1), current.matchIndex ?? history.length - 1)
     } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
-      // Same fix: narrowing the query from an older match must not silently
-      // jump the display forward to a newer, unrelated command (found by
-      // code review: this used to always restart from `history.length - 1`,
-      // the newest entry, on every keystroke regardless of where the
-      // search currently was).
       updateSearch(current.query + e.key, current.matchIndex ?? history.length - 1)
     }
-    // Any other key (Shift, arrows, etc.) while searching is swallowed — see the unconditional preventDefault above.
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (demo.active) return // input is read-only during the scripted demo — ignore stray keystrokes/Enter
+    if (demo.active) return
 
     if (e.ctrlKey && e.key === 'r') {
       e.preventDefault()
@@ -194,7 +159,6 @@ export function TerminalWindow() {
         setSearch({ query: '', matchIndex: null })
         setValue('')
       } else {
-        // Ctrl+R again with the same query: step to the next older match.
         updateSearch(search.query, (search.matchIndex ?? history.length) - 1)
       }
       return

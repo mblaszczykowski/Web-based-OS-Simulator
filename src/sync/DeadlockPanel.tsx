@@ -14,7 +14,6 @@ const STEP_LABEL: Record<string, string> = {
   resolved: 'Resolved',
 }
 
-// Fixed layout for a fixed 2-actor/2-resource graph — no reason to compute this dynamically.
 const POS = { p1: { x: 50, y: 34 }, p2: { x: 230, y: 34 }, r1: { x: 50, y: 130 }, r2: { x: 230, y: 130 } }
 const NODE_R = 20
 
@@ -33,7 +32,6 @@ function Arrow({
   dashed?: boolean
   active?: boolean
 }) {
-  // Shorten the line so the arrowhead lands just outside the target node's circle/rect.
   const dx = x2 - x1
   const dy = y2 - y1
   const len = Math.hypot(dx, dy) || 1
@@ -62,17 +60,6 @@ export function DeadlockPanel() {
 
   const rerender = () => forceRender((n) => n + 1)
 
-  /**
-   * Drives `engine.advance()` forward on a timer until it reaches
-   * 'deadlocked'. The engine itself is a shared app-level singleton
-   * (app/engines.ts) whose progress survives this component unmounting —
-   * but the setTimeout chain that was advancing it does not: `token`
-   * becomes stale the moment this component unmounts (see the effect
-   * below), so a scenario left mid-way (switch sync tabs, close the
-   * window) used to freeze there permanently — 'Run scenario' and 'Break
-   * deadlock' are both disabled for any step that isn't idle/resolved/
-   * deadlocked, so only Reset could ever recover it (found by code review).
-   */
   function stepLoop(token: number) {
     const step = () => {
       if (runTokenRef.current !== token) return
@@ -87,21 +74,13 @@ export function DeadlockPanel() {
 
   useEffect(() => {
     const token = ++runTokenRef.current
-    // Resume driving the scenario if we're mounting onto one already
-    // left mid-way by an earlier unmount (see stepLoop()'s docs above) —
-    // 'deadlocked' needs no resuming, it's a stable state waiting on the
-    // user's "Break deadlock" click, same as 'idle'/'resolved' need no
-    // resuming since nothing is running.
     const step = engine.getStep()
     if (step !== 'idle' && step !== 'resolved' && step !== 'deadlocked') {
       stepLoop(token)
     }
     return () => {
-      // Deliberately reads/increments whatever the CURRENT value is, not
-      // a stale snapshot from when the effect ran — the lint rule's
-      // concern doesn't apply to a ref used as a mutable counter.
       // eslint-disable-next-line react-hooks/exhaustive-deps
-      runTokenRef.current++ // unmounting — invalidate any pending timer from this instance
+      runTokenRef.current++
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -128,10 +107,6 @@ export function DeadlockPanel() {
   const held = engine.getHeldBy()
   const wants = engine.getWants()
   const deadlocked = step === 'deadlocked'
-  // Gated on the actual detected cycle, not just "the wait-for graph has
-  // any edges" — one actor waiting on another (e.g. the 'p1-blocked-on-r2'
-  // step) is a real edge but not yet a cycle, and shouldn't render as
-  // critical/red before hasCycle() actually says so.
   const cycleEdges = new Set(deadlocked ? engine.getWaitForGraph().map((e) => `${e.from}-${e.to}`) : [])
 
   return (

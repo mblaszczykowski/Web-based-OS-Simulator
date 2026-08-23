@@ -5,7 +5,6 @@ const PRODUCER_COUNT = 2
 const CONSUMER_COUNT = 2
 const LOG_LIMIT = 40
 
-/** A classic counting semaphore — capped at `capacity` so release() can never over-signal past it. */
 class CountingSemaphore {
   constructor(
     public count: number,
@@ -26,11 +25,8 @@ class CountingSemaphore {
 export interface SyncMetrics {
   producedTotal: number
   consumedTotal: number
-  /** Slots actually holding an item right now — ground truth, read straight off the buffer. */
   realOccupancy: number
-  /** What occupancy the semaphore bookkeeping *thinks* it is (capacity - empty permits available). */
   expectedOccupancy: number
-  /** Times a producer overwrote an unconsumed slot or a consumer read an empty one — only possible in unsafe mode. */
   corruptionEvents: number
   mutexLocked: boolean
   semEmptyCount: number
@@ -38,24 +34,14 @@ export interface SyncMetrics {
 }
 
 /**
- * Bounded-buffer producer/consumer — roadmap.md §1.3. Two producers, two
- * consumers, a circular buffer guarded by a counting semaphore pair
- * (empty/full slots) plus a mutex around the actual slot write/read. This
- * is the module's only mechanism in "safe" mode (per ADR-0001's spirit —
- * one well-justified approach, not a comparison of options); `unsafe`
- * exists solely to *demonstrate* the bug the mutex prevents, the same
- * narrative pattern as crash/fsck in the filesystem module ("here's what
- * breaks, here's the fix"), not as a second, equally-valid mode.
+ * Bounded-buffer producer/consumer: two producers, two consumers, a
+ * circular buffer guarded by an empty/full semaphore pair plus a mutex.
  *
- * Deliberately single-threaded/synchronous like the rest of this
- * simulator (see plan.md §3) — there's no real concurrency to race. The
- * "race condition" is instead modelled explicitly: entering the critical
- * section captures the buffer slot to act on, and committing it (writing
- * the slot, advancing the shared pointer, releasing the lock) happens a
- * tick later. In safe mode the mutex guarantees only one actor is ever
- * between those two steps. In unsafe mode it doesn't, so two producers can
- * both capture the same slot before either commits — exactly the
- * textbook lost-update race.
+ * There is no real concurrency to race here, so the race is modelled
+ * explicitly: entering the critical section captures a slot, and
+ * committing it happens a tick later. The mutex is what guarantees only
+ * one actor is ever between those two steps; `unsafe` removes it so two
+ * producers can capture the same slot — the textbook lost update.
  */
 export class SyncEngine {
   private actors: SyncActor[] = []
@@ -95,7 +81,6 @@ export class SyncEngine {
 
   tick(): void {
     this.tickCount++
-    // Rotate who goes first each tick so no single actor perpetually wins contested resources.
     const n = this.actors.length
     const start = this.tickCount % n
     const order = [...this.actors.slice(start), ...this.actors.slice(0, start)]

@@ -1,12 +1,5 @@
 import type { FilesystemState } from './engine'
 
-// Real filesystem persistence — roadmap.md §1.5. Deliberately the *only*
-// engine that persists: scheduler and memory still reset on every reload
-// (plan.md §2.5, unchanged by this). All I/O here is best-effort — a
-// failure (quota, private browsing, an old browser, corrupt data) falls
-// back to a fresh empty disk rather than breaking the app; see
-// hydrateAndBootstrap() in app/engines.ts for that fallback.
-
 const DB_NAME = 'os-sim'
 const DB_VERSION = 1
 const STORE_NAME = 'filesystem'
@@ -57,7 +50,7 @@ export async function saveFilesystemState(state: FilesystemState): Promise<void>
     })
     db.close()
   } catch {
-    // best-effort — see file header
+    // IndexedDB unavailable or blocked — the disk just won't persist.
   }
 }
 
@@ -73,22 +66,10 @@ export async function clearFilesystemState(): Promise<void> {
     })
     db.close()
   } catch {
-    // best-effort — see file header
+    // IndexedDB unavailable or blocked — the disk just won't persist.
   }
 }
 
-// Cross-tab consistency (roadmap-v3.md §2.5): opening this app in two tabs
-// means two independent FilesystemEngine instances, each unaware of the
-// other, both writing to the same IndexedDB record. Without this, the last
-// tab to save always silently wins and the other's edits vanish. A
-// BroadcastChannel lets every tab announce "I just persisted a change";
-// app/engines.ts reacts by re-hydrating its live engine from the new
-// record — the simpler of the two options the roadmap calls out (the other
-// being a "disk changed elsewhere" warning), chosen to keep this a
-// same-page correctness fix rather than new UI surface. It's still
-// best-effort: a save already in flight when another tab's change arrives
-// can't be cancelled, so a narrow last-write-wins window remains — the
-// same category of limitation ADR-0005 accepts for crash recovery.
 const CHANNEL_NAME = 'os-sim-filesystem'
 
 function hasBroadcastChannel(): boolean {
@@ -102,19 +83,10 @@ function getChannel(): BroadcastChannel | null {
   return channel
 }
 
-/** Tell other tabs the persisted disk just changed — call once a save has actually landed in IndexedDB. */
 export function announceFilesystemChange(): void {
   getChannel()?.postMessage('changed')
 }
 
-/**
- * Subscribe to *other* tabs announcing a change (a BroadcastChannel never
- * delivers a tab's own postMessage back to itself, so this can't fire from
- * this tab's own saves). Returns an unsubscribe function; a no-op one if
- * BroadcastChannel isn't available (older browsers, some test/SSR
- * environments) — that tab just doesn't get cross-tab updates, same
- * graceful-degradation posture as the rest of this file.
- */
 export function onExternalFilesystemChange(listener: () => void): () => void {
   const ch = getChannel()
   if (!ch) return () => {}

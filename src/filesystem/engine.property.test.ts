@@ -2,25 +2,6 @@ import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
 import { FilesystemEngine } from './engine'
 
-// roadmap.md §2.4 — block accounting across arbitrary sequences of
-// create/write/delete/mkdir/mv/cp/ln/chmod, including ones the engine
-// rejects (wrong type, no space, crashed, permission denied) — a rejected
-// op must never partially mutate the block table. `link` (roadmap-v3.md
-// §2.1) is included specifically because it's the one op that can make a
-// block "used by two directory entries at once" without allocating
-// anything new; `chmod` (§2.3) is included because it's the one op that
-// can turn a *later* write/delete in the same sequence into a rejection
-// that must still leave the block table untouched — exactly the kind of
-// accounting edge case this test exists to catch. `symlink` (roadmap-v5.md
-// §2.2) is included for the mirror-image reason: it allocates nothing at
-// all, but it redirects where every *later* op in the sequence lands, so a
-// mistake in resolution shows up here as blocks going missing.
-//
-// Since usedBlocks/freeBlocks are now read from the free-space bit vector
-// while `blocks[].owner` is what the grid renders, the "ground truth"
-// assertions below double as the check that those two representations
-// never drift apart.
-
 const PATHS = ['/a.txt', '/b.txt', '/c.txt'] as const
 const opArb = fc.oneof(
   fc.record({ kind: fc.constant('create' as const), path: fc.constantFrom(...PATHS) }),
@@ -74,9 +55,6 @@ describe('FilesystemEngine — property: block accounting always reconciles', ()
           const m = fs.getMetrics()
           expect(m.usedBlocks + m.freeBlocks).toBe(m.totalBlocks)
 
-          // Ground truth: the block array itself, and the sum of every
-          // inode's blockIds, must both match the reported counts — not
-          // just agree with each other by coincidence.
           const blocks = fs.getBlocks()
           const actuallyUsed = blocks.filter((b) => b.owner !== null).length
           expect(actuallyUsed).toBe(m.usedBlocks)
@@ -84,7 +62,6 @@ describe('FilesystemEngine — property: block accounting always reconciles', ()
           const blocksOwnedByInodes = fs.getInodes().reduce((sum, inode) => sum + inode.blockIds.length, 0)
           expect(blocksOwnedByInodes).toBe(actuallyUsed)
 
-          // No two inodes ever claim the same block.
           const usedBlockIndices = blocks.filter((b) => b.owner !== null).map((b) => b.index)
           expect(new Set(usedBlockIndices).size).toBe(usedBlockIndices.length)
         }

@@ -10,7 +10,7 @@ describe('NetworkEngine — ping', () => {
 
     for (let i = 0; i < 60 && engine.getPackets().length > 0; i++) engine.tick()
 
-    expect(engine.getPackets()).toHaveLength(0) // every packet arrived and was cleaned up
+    expect(engine.getPackets()).toHaveLength(0)
     expect(engine.getStats().pingsReceived).toBe(3)
   })
 
@@ -49,10 +49,10 @@ describe('NetworkEngine — log', () => {
     expect(texts.some((t) => t.includes('reply from host'))).toBe(true)
   })
 
-  it('attributes each packet to the host it was launched against, even when a second call overwrites the engine\'s "current host" before the first resolves (found by code review)', () => {
+  it('attributes each packet to the host it was launched against, even when a second call overwrites the engine\'s "current host" before the first resolves', () => {
     const engine = new NetworkEngine()
-    engine.ping('alpha', 1) // seq=1, still in flight when...
-    engine.ping('beta', 1) // ...this launches a second burst and would overwrite a shared "current host" field
+    engine.ping('alpha', 1)
+    engine.ping('beta', 1)
 
     for (let i = 0; i < 30 && engine.getPackets().length > 0; i++) engine.tick()
 
@@ -61,7 +61,6 @@ describe('NetworkEngine — log', () => {
     expect(texts).toContain('client: reply from alpha: seq=1 time=10t')
     expect(texts).toContain('beta: echo reply (seq=2)')
     expect(texts).toContain('client: reply from beta: seq=2 time=10t')
-    // Neither burst's reply is ever misattributed to the other host.
     expect(texts.some((t) => t.includes('seq=1') && t.includes('beta'))).toBe(false)
     expect(texts.some((t) => t.includes('seq=2') && t.includes('alpha'))).toBe(false)
   })

@@ -2,88 +2,34 @@ import { SHELL_PID } from '../shared/types'
 import type { CommandContext } from '../terminal/commands'
 import { FIRST_USER_FD, FdTable } from './fdTable'
 
-/**
- * The syscall trace, as an actual log of the kernel boundary being crossed
- * — roadmap-v5.md §2.1.
- *
- * What this replaces: a static `command name -> plausible-looking syscall
- * lines` map that ran *after* a command finished and re-described it from
- * the outside. It was honest about being cosmetic, and it worked, but it
- * had the failure mode every parallel description has — it could disagree
- * with reality and nothing would notice. It printed `read(fd, buf, 4096) =
- * N` for a file whose real size it never asked for, `fork() = <pid>` for a
- * pid that already existed, and it had to re-parse the command line to
- * guess what had happened.
- *
- * `CommandContext` is already the one narrow seam between the terminal and
- * the rest of the simulator (plan.md §5) — every file operation, every
- * spawn, every signal goes through it and nothing else. That makes it the
- * real system-call boundary of this program, so wrapping it is enough:
- * each trace line is now emitted by an actual crossing, with the real
- * arguments and the real return value. Byte counts are the content's real
- * length, pids are the pids that were really created, and a command
- * rejected before it ever reached the kernel produces no trace at all —
- * which is correct, and which the old map got wrong.
- *
- * What this is NOT: a change to *when* anything happens. A syscall here
- * still returns synchronously; it cannot block the calling process the way
- * roadmap-v5.md §1.1 made a process's I/O burst block. The shell is not a
- * scheduled process in this simulator (see SHELL_PID), so there is nothing
- * to block — that boundary is real for processes, and this one is real for
- * the terminal.
- */
 export interface SyscallTrace {
-  /** The wrapped context to hand to runCommandLine(). */
   ctx: CommandContext
-  /** Every syscall line recorded since the last drain, clearing the buffer. */
   drain(): string[]
 }
 
-/**
- * Sockets are pure visualisation in this simulator (ADR-0007) — no
- * connection is opened, so no descriptor is taken and the number shown is
- * a fixed stand-in rather than one from the fd table. Kept explicit, and
- * declared here beside the other helpers rather than trailing the file, so
- * the one place this trace is still illustrative is impossible to miss.
- */
 const FIRST_SOCKET_FD = 3
 
 function quote(value: string): string {
   return `"${value}"`
 }
 
-/** Renders a list of arguments the way strace does: a few, then an ellipsis. */
 function argv(name: string): string {
   return `[${quote(name)}, ...], [...]`
 }
 
 /**
- * Wraps a CommandContext so that every crossing of it is recorded as the
- * syscall it really is.
+ * Wraps a CommandContext so every crossing of it is recorded as the call it
+ * really is, with the real arguments and the real return value.
  *
- * `fdTable` is shared with the rest of the kernel so the numbers here are
- * the same ones `lsof` reports (roadmap-v5.md §2.2) — an open/close pair
- * inside one command really does take and release a descriptor, which is
- * why the trace shows fd 3 being reused rather than climbing forever.
- *
- * Read-only accessors that exist purely so the parser can resolve a path
- * or a variable — `getCwd`, `getEnv`, `listEnv` — are deliberately NOT
- * recorded. In a real shell the working directory and the environment are
- * process state, not kernel state: `cd` makes a `chdir()` call and `export`
- * mutates a local map, but resolving `./notes.txt` costs no syscall at all.
- * Recording them would bury every real line under one `getcwd()` per
- * argument.
+ * getCwd/getEnv/listEnv are deliberately not recorded: in a real shell the
+ * working directory and environment are process state, so resolving a
+ * relative path costs no syscall. Logging them would bury every real line
+ * under one getcwd() per argument.
  */
 export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTrace {
   const lines: string[] = []
   const emit = (...entries: string[]) => lines.push(...entries)
 
-  /**
-   * open() + one operation + close(), the shape almost every file command
-   * really has. The descriptor is genuinely taken and released against the
-   * shared table, which is why the trace shows fd 3 being reused across
-   * commands rather than a number that climbs forever.
-   */
   function withFd(path: string, openCall: string, body: (fd: number) => string[]): void {
     const fd = fdTable.open(SHELL_PID, 'file', path)
     emit(`${openCall} = ${fd}`, ...body(fd), `close(${fd}) = 0`)
@@ -99,9 +45,6 @@ export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTra
 
     listProcesses: () => {
       const processes = ctx.listProcesses()
-      // The real count, from the real list — `ps` and `top` both read
-      // /proc, because in this simulator they genuinely do go through the
-      // same call.
       emit('openat(AT_FDCWD, "/proc", O_DIRECTORY) = 3', `getdents64(3, ...) = ${processes.length}`, 'close(3) = 0')
       return processes
     },
@@ -144,9 +87,6 @@ export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTra
 
     spawnPipeline: (writerName, readerName) => {
       const [writer, reader] = ctx.spawnPipeline(writerName, readerName)
-      // The descriptors were registered by the coordinator that actually
-      // created the pipe (app/engines.ts) — this only reports them, so the
-      // fd table never depends on whether anything is being traced.
       const readEnd = fdTable.forPid(reader.pid).find((d) => d.kind === 'pipe-read')?.fd ?? FIRST_USER_FD
       const writeEnd = fdTable.forPid(writer.pid).find((d) => d.kind === 'pipe-write')?.fd ?? FIRST_USER_FD
       emit(
@@ -161,8 +101,6 @@ export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTra
 
     forkProcess: (pid) => {
       const child = ctx.forkProcess(pid)
-      // The one line in the old map that was pure invention now reports a
-      // pid that genuinely exists — see ADR-0012.
       emit(child ? `fork() = ${child.pid}  /* pages shared copy-on-write */` : 'fork() = -1 ESRCH')
       return child
     },
@@ -200,12 +138,9 @@ export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTra
       const result = ctx.fsRead(path)
       const call = `open(${quote(path)}, O_RDONLY)`
       if (!result.ok) {
-        // The real error, distinguished the way a real open() does —
-        // the old map reported a bare `-1` for both.
         openFailed(call, result.error.includes('Permission denied') ? 'EACCES' : 'ENOENT')
         return result
       }
-      // A real byte count, taken from the content actually returned.
       withFd(path, call, (fd) => [`read(${fd}, buf, 4096) = ${result.content.length}`])
       return result
     },
@@ -311,11 +246,6 @@ export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTra
 
     syncSetUnsafe: (unsafe) => {
       ctx.syncSetUnsafe(unsafe)
-      // Two different operations, not one call that sometimes fails:
-      // turning the race demo on tears the mutex down, turning it off
-      // builds a fresh one. An earlier version reported the second as
-      // `sem_destroy = -1 EBUSY`, which read as an error where nothing
-      // had gone wrong.
       emit(unsafe ? 'sem_destroy(&mutex) = 0' : 'sem_init(&mutex, 0, 1) = 0')
     },
 

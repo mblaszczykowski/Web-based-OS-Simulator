@@ -7,21 +7,21 @@ describe('DeadlockEngine — scripted circular-wait scenario', () => {
     expect(engine.getStep()).toBe('idle')
     expect(engine.hasCycle()).toBe(false)
 
-    engine.advance() // P1 acquires R1
+    engine.advance()
     expect(engine.getStep()).toBe('p1-acquired-r1')
     expect(engine.getHeldBy()).toEqual({ R1: 1, R2: null })
 
-    engine.advance() // P2 acquires R2
+    engine.advance()
     expect(engine.getStep()).toBe('p2-acquired-r2')
     expect(engine.getHeldBy()).toEqual({ R1: 1, R2: 2 })
-    expect(engine.hasCycle()).toBe(false) // no one's blocked yet
+    expect(engine.hasCycle()).toBe(false)
 
-    engine.advance() // P1 requests R2 -> blocks
+    engine.advance()
     expect(engine.getStep()).toBe('p1-blocked-on-r2')
     expect(engine.getWaitForGraph()).toEqual([{ from: 1, to: 2 }])
-    expect(engine.hasCycle()).toBe(false) // one-way wait isn't a cycle yet
+    expect(engine.hasCycle()).toBe(false)
 
-    engine.advance() // P2 requests R1 -> blocks -> circular wait -> deadlock detected
+    engine.advance()
     expect(engine.getStep()).toBe('deadlocked')
     expect(engine.hasCycle()).toBe(true)
     const graph = engine.getWaitForGraph()
@@ -35,7 +35,7 @@ describe('DeadlockEngine — scripted circular-wait scenario', () => {
     expect(engine.getStep()).toBe('deadlocked')
     engine.advance()
     engine.advance()
-    expect(engine.getStep()).toBe('deadlocked') // still deadlocked, not corrupted by extra advances
+    expect(engine.getStep()).toBe('deadlocked')
   })
 })
 
@@ -45,18 +45,18 @@ describe('DeadlockEngine — breaking the deadlock', () => {
     for (let i = 0; i < 4; i++) engine.advance()
     expect(engine.getStep()).toBe('deadlocked')
 
-    engine.breakDeadlock(2) // kill P2
+    engine.breakDeadlock(2)
     expect(engine.getStep()).toBe('resolved')
     expect(engine.hasCycle()).toBe(false)
-    expect(engine.getHeldBy()).toEqual({ R1: 1, R2: 1 }) // P1 now holds both — R2 handed over
+    expect(engine.getHeldBy()).toEqual({ R1: 1, R2: 1 })
     expect(engine.getWants()).toEqual({ 1: null, 2: null })
   })
 
   it('is a no-op before a deadlock actually exists', () => {
     const engine = new DeadlockEngine()
-    engine.advance() // p1-acquired-r1, not deadlocked
+    engine.advance()
     engine.breakDeadlock(1)
-    expect(engine.getStep()).toBe('p1-acquired-r1') // unaffected
+    expect(engine.getStep()).toBe('p1-acquired-r1')
   })
 
   it('reset() clears everything so the scenario can run again from scratch', () => {

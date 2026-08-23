@@ -1,9 +1,4 @@
 // @vitest-environment jsdom
-//
-// Component test — roadmap-v3.md §2.4. Covers the terminal's actual React
-// wiring (typing, submit, history, tab-completion) rather than just the
-// pure command parser (commands.test.ts already covers that in isolation)
-// — the seam roadmap-v3.md calls out as having zero coverage today.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
@@ -15,11 +10,10 @@ let snapshot: ReturnType<typeof useSimStore.getState>
 
 beforeEach(() => {
   snapshot = useSimStore.getState()
-  window.localStorage.clear() // command history is seeded from here on mount (roadmap-v3.md §1.4's sibling feature)
+  window.localStorage.clear()
 })
 
 afterEach(() => {
-  // Unmount BEFORE restoring state — see the identical note in WindowFrame.test.tsx.
   cleanup()
   useSimStore.setState(snapshot, true)
 })
@@ -36,9 +30,9 @@ describe('TerminalWindow', () => {
     await user.type(getInput(), 'help')
     await user.keyboard('{Enter}')
 
-    expect(screen.getByText('help')).toBeInTheDocument() // the echoed prompt
-    expect(screen.getByText('Available commands:')).toBeInTheDocument() // its output
-    expect(getInput()).toHaveValue('') // input cleared after submit
+    expect(screen.getByText('help')).toBeInTheDocument()
+    expect(screen.getByText('Available commands:')).toBeInTheDocument()
+    expect(getInput()).toHaveValue('')
   })
 
   it('ArrowUp/ArrowDown cycle through submitted command history', async () => {
@@ -52,16 +46,16 @@ describe('TerminalWindow', () => {
     await user.keyboard('{Enter}')
 
     fireEvent.keyDown(input, { key: 'ArrowUp' })
-    expect(input).toHaveValue('help') // most recent command first
+    expect(input).toHaveValue('help')
 
     fireEvent.keyDown(input, { key: 'ArrowUp' })
-    expect(input).toHaveValue('pwd') // then the one before it
+    expect(input).toHaveValue('pwd')
 
     fireEvent.keyDown(input, { key: 'ArrowDown' })
     expect(input).toHaveValue('help')
 
     fireEvent.keyDown(input, { key: 'ArrowDown' })
-    expect(input).toHaveValue('') // past the end of history — back to a blank line
+    expect(input).toHaveValue('')
   })
 
   it('Tab completes a unique command-name prefix, with a trailing space', async () => {
@@ -89,14 +83,14 @@ describe('TerminalWindow', () => {
     expect(screen.getByLabelText('Reverse history search')).toBe(input)
 
     fireEvent.keyDown(input, { key: 'p' })
-    expect(input).toHaveValue('help') // most recent history entry containing 'p'
+    expect(input).toHaveValue('help')
 
-    fireEvent.keyDown(input, { key: 'r', ctrlKey: true }) // step to the next older match
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true })
     expect(input).toHaveValue('pwd')
 
     fireEvent.keyDown(input, { key: 'Enter' })
-    expect(screen.getByLabelText('Terminal input')).toBe(input) // search closed
-    expect(input).toHaveValue('') // and the match was submitted
+    expect(screen.getByLabelText('Terminal input')).toBe(input)
+    expect(input).toHaveValue('')
   })
 
   it('Ctrl+R with no match shows a failed search and Escape restores the prompt', async () => {
@@ -128,7 +122,7 @@ describe('TerminalWindow', () => {
     fireEvent.keyDown(input, { key: 'p' })
     expect(input).toHaveValue('pwd')
 
-    fireEvent.keyDown(input, { key: 'r', ctrlKey: true }) // no older match than 'pwd' — should stay put, not clear
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true })
     expect(input).toHaveValue('pwd')
     expect(screen.getByText("(failed reverse-i-search)`p':")).toBeInTheDocument()
   })
@@ -159,13 +153,13 @@ describe('TerminalWindow', () => {
 
     fireEvent.keyDown(input, { key: 'ArrowUp' })
     fireEvent.keyDown(input, { key: 'ArrowUp' })
-    expect(input).toHaveValue('bbb') // two steps back from the end
+    expect(input).toHaveValue('bbb')
 
     fireEvent.keyDown(input, { key: 'r', ctrlKey: true })
     fireEvent.keyDown(input, { key: 'Escape' })
 
     fireEvent.keyDown(input, { key: 'ArrowUp' })
-    expect(input).toHaveValue('ccc') // most recent again, not resuming from the stale mid-history position
+    expect(input).toHaveValue('ccc')
   })
 
   it('narrowing the query after stepping to an older match does not jump forward to a newer one', async () => {
@@ -182,22 +176,16 @@ describe('TerminalWindow', () => {
 
     fireEvent.keyDown(input, { key: 'r', ctrlKey: true })
     fireEvent.keyDown(input, { key: 'l' })
-    expect(input).toHaveValue('man ls') // newest entry containing 'l'
+    expect(input).toHaveValue('man ls')
 
-    fireEvent.keyDown(input, { key: 'r', ctrlKey: true }) // step to the next older match
+    fireEvent.keyDown(input, { key: 'r', ctrlKey: true })
     expect(input).toHaveValue('ls -la home')
 
-    fireEvent.keyDown(input, { key: 's' }) // narrow the query to 'ls' — found by code review: this used
-    // to always re-search from the newest entry, silently jumping back to 'man ls' and discarding the
-    // user's explicit older-match navigation, instead of continuing from where the search already was.
+    fireEvent.keyDown(input, { key: 's' })
     expect(input).toHaveValue('ls -la home')
   })
 
   it('echo $VAR for a name never exported, that collides with an inherited Object.prototype member, substitutes to empty', async () => {
-    // Found by code review: the env store is a plain object, and a plain
-    // `env[name]` lookup at the real store (not this test's own mock
-    // context) resolves `$constructor` to Object's constructor function
-    // instead of undefined, printing its source text.
     const user = userEvent.setup()
     render(<TerminalWindow />)
     const input = getInput()
@@ -210,16 +198,13 @@ describe('TerminalWindow', () => {
   })
 
   it('clear reached via a chained $VAR substitution actually clears the screen', async () => {
-    // Found by code review: a previous store-level fast path string-matched
-    // the RAW, unsubstituted line against 'clear' before running it, so
-    // `export X=clear && $X` never matched and silently never cleared.
     const user = userEvent.setup()
     render(<TerminalWindow />)
     const input = getInput()
 
     await user.type(input, 'pwd')
     await user.keyboard('{Enter}')
-    expect(screen.getByText('pwd')).toBeInTheDocument() // sanity check: something is on screen first
+    expect(screen.getByText('pwd')).toBeInTheDocument()
 
     await user.type(input, 'export X=clear && $X')
     await user.keyboard('{Enter}')

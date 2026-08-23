@@ -4,13 +4,6 @@ import { makeProcess } from '../scheduler/testHelpers'
 import { FdTable } from './fdTable'
 import { traceSyscalls } from './syscalls'
 
-// roadmap-v5.md §2.1. The point of these is not that the lines look
-// plausible — the old static map managed that — but that each one is
-// produced by a real crossing of CommandContext and carries the real
-// arguments and the real return value. So every test here drives a real
-// command through the wrapped context, rather than calling the tracer
-// directly.
-
 function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
   let cwd = '/'
   const env: Record<string, string> = {}
@@ -74,7 +67,6 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
   }
 }
 
-/** Runs `input` through a traced context and returns the syscall lines it produced. */
 function trace(input: string, overrides: Partial<CommandContext> = {}, fdTable = new FdTable()): string[] {
   const tracer = traceSyscalls(makeContext(overrides), fdTable)
   executeCommand(input, tracer.ctx)
@@ -86,14 +78,14 @@ describe('syscall trace — a log of the real boundary, not a description beside
     const lines = trace('cat /notes.txt', { fsRead: () => ({ ok: true, content: 'hello world' }) })
     expect(lines).toEqual([
       'open("/notes.txt", O_RDONLY) = 3',
-      'read(3, buf, 4096) = 11', // the real length of "hello world"
+      'read(3, buf, 4096) = 11',
       'close(3) = 0',
     ])
   })
 
   it('reports the byte count a write actually passed', () => {
     const lines = trace('write /notes.txt hello there')
-    expect(lines).toContain('write(3, buf, 11) = 11') // "hello there"
+    expect(lines).toContain('write(3, buf, 11) = 11')
   })
 
   it('distinguishes the real errno instead of a bare -1', () => {
@@ -116,8 +108,6 @@ describe('syscall trace — a log of the real boundary, not a description beside
   })
 
   it('emits nothing for a command rejected before it ever reached the kernel', () => {
-    // The old map keyed off the command name, so it happily printed a
-    // kill() line for a `kill` that never called anything.
     const killProcess = vi.fn(() => true)
     expect(trace('kill', { killProcess })).toEqual([])
     expect(trace('fork abc', {})).toEqual([])
@@ -142,7 +132,7 @@ describe('syscall trace — a log of the real boundary, not a description beside
     const fdTable = new FdTable()
     expect(trace('cat /a', {}, fdTable)[0]).toBe('open("/a", O_RDONLY) = 3')
     expect(trace('cat /b', {}, fdTable)[0]).toBe('open("/b", O_RDONLY) = 3')
-    expect(fdTable.all()).toEqual([]) // and nothing is leaked between commands
+    expect(fdTable.all()).toEqual([])
   })
 
   it('traces every stage of a chained line, in the order they really ran', () => {
@@ -169,26 +159,21 @@ describe('syscall trace — a log of the real boundary, not a description beside
 
   it('records chdir only when the directory really changed', () => {
     expect(trace('cd /home')).toEqual(['openat(AT_FDCWD, "/home", O_DIRECTORY) = 3', 'getdents64(3, ...) = 0', 'close(3) = 0', 'chdir("/home") = 0'])
-    // A `cd` into a directory that doesn't exist never reaches setCwd.
     expect(trace('cd /nope', { fsList: () => ({ ok: false, error: 'no' }) })).toEqual([
       'openat(AT_FDCWD, "/nope", O_DIRECTORY) = -1 ENOENT',
     ])
   })
 
   it('does not record path resolution or variable lookups as syscalls', () => {
-    // getCwd/getEnv are shell-local state, not kernel state — recording
-    // them would bury every real line under one getcwd() per argument.
     expect(trace('pwd')).toEqual([])
     expect(trace('export HOME=/home/guest')).toEqual([])
     expect(trace('echo $HOME')).toEqual([])
   })
 
   it('reports the two directions of the race demo as the two different calls they are', () => {
-    // Not one call that succeeds one way and fails the other: turning the
-    // demo on tears the mutex down, turning it off builds a fresh one.
     expect(trace('race on')).toEqual(['sem_destroy(&mutex) = 0'])
     expect(trace('race off')).toEqual(['sem_init(&mutex, 0, 1) = 0'])
-    expect(trace('race sideways')).toEqual([]) // rejected by the parser, never reached the kernel
+    expect(trace('race sideways')).toEqual([])
   })
 
   it('records the symlink target as written, not as resolved', () => {

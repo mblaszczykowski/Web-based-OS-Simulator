@@ -4,15 +4,6 @@ import { useSimStore } from '../app/store'
 import { colorForPid } from '../app/colors'
 import type { PipeState, Process } from '../shared/types'
 
-/**
- * Anonymous pipes between real processes — roadmap-v5.md §1.2. Sits in the
- * Sync window rather than getting one of its own for the same reason
- * Banker's Algorithm does (roadmap-v3.md §3.1): it's the same subject
- * (processes coordinating over a bounded buffer) reached from a different
- * direction, not a separate topic. The tab next door shows *how* a
- * semaphore pair makes such a buffer safe; this one shows what the buffer
- * is actually for.
- */
 function endpointState(process: Process | undefined): { label: string; pill: string } {
   if (!process) return { label: 'gone', pill: 'pill--terminated' }
   if (process.state === 'WAITING' && process.blockedOn === 'pipe') return { label: 'blocked (pipe)', pill: 'pill--waiting' }
@@ -69,9 +60,6 @@ export function PipePanel() {
 
   const open = pipes.getPipes()
   const log = pipes.getLog()
-  // Same reasoning as BoundedBufferPanel's: getLog() returns the engine's
-  // own in-place-mutated array, and its length stops changing once the ring
-  // buffer caps — the newest id is the only dependency that keeps moving.
   const latestLogId = log.at(-1)?.id
 
   useEffect(() => {

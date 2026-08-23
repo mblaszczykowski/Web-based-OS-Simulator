@@ -1,36 +1,18 @@
-// Validated dark-mode categorical palette (adjacent-pair CVD-safe, see the
-// dataviz method this project's design pass used) — reused everywhere a
-// process needs a consistent identity color: the Gantt chart, the process
-// list, ready-queue chips and the RAM grid all call this same function so
-// "P3" is always the same aqua everywhere on screen.
-//
-// All 8 validated slots are used (not just the first 5) because up to
-// AUTO_SPAWN_CAP (7) processes can be alive at once, and a `run` command
-// can push it higher still — cycling through only 5 would start handing
-// two live processes the same color well within normal use.
 const PALETTE = [
-  '#3987e5', // blue
-  '#d95926', // orange
-  '#199e70', // aqua
-  '#c98500', // yellow
-  '#d55181', // magenta
-  '#008300', // green
-  '#9085e9', // violet
-  '#e66767', // red
+  '#3987e5',
+  '#d95926',
+  '#199e70',
+  '#c98500',
+  '#d55181',
+  '#008300',
+  '#9085e9',
+  '#e66767',
 ]
 
 export function colorForPid(pid: number): string {
   return PALETTE[(pid - 1) % PALETTE.length]!
 }
 
-// roadmap.md §2.5 — formally verifying the palette's contrast turned up
-// one real gap: a fixed dark label color (as every cell/segment/chip that
-// renders a "P3"-style label directly on a colorForPid() swatch used to
-// do) clears WCAG AA (4.5:1) against 7 of the 8 palette colors but not
-// the darker green (#008300, ~4.1:1) — and a fixed light label would fail
-// the other 7. Rather than retune the validated categorical palette
-// itself (risking its CVD-safety), labels adapt per-swatch: whichever of
-// dark/light actually has higher contrast against that specific color.
 const DARK_LABEL = '#05070a'
 const LIGHT_LABEL = '#f5f7fa'
 
@@ -48,15 +30,10 @@ function contrastRatio(hexA: string, hexB: string): number {
   return (lLight! + 0.05) / (lDark! + 0.05)
 }
 
-// The palette is fixed, so there are only PALETTE.length possible
-// results — computed once here rather than re-running the contrast math
-// on every call (this runs on every render of every colored cell in the
-// Gantt chart, RAM grid, disk grid, and allocation strip).
 const LABEL_BY_PALETTE_INDEX = PALETTE.map((bg) =>
   contrastRatio(bg, DARK_LABEL) >= contrastRatio(bg, LIGHT_LABEL) ? DARK_LABEL : LIGHT_LABEL,
 )
 
-/** WCAG-contrast-safe label color for text rendered directly on a colorForPid() swatch. */
 export function labelColorForPid(pid: number): string {
   return LABEL_BY_PALETTE_INDEX[(pid - 1) % PALETTE.length]!
 }

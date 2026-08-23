@@ -3,23 +3,17 @@ import { MemoryEngine } from './engine'
 
 describe('MemoryEngine — Clock (Second-Chance) replacement', () => {
   it('matches a hand-traced reference string on a 3-frame arena', () => {
-    // Reference string 0,1,2,0,3 against 3 frames — the textbook
-    // second-chance trace: the three cold faults fill every frame, the
-    // hit on page 0 sets its reference bit, and the fault on page 3 has
-    // to sweep past every bit (clearing each) before landing back on
-    // frame 0 — the only frame whose bit was already cleared.
     const engine = new MemoryEngine({ frameCount: 3, contiguousSizeMb: 100 })
-    engine.allocateProcess(1, 5) // pages 0..4, all invalid to start
+    engine.allocateProcess(1, 5)
 
     expect(engine.access(1, 0)).toEqual({ fault: true, victimFrame: null, victims: [], wasSwapped: false, tlbHit: false, cowCopy: false })
     expect(engine.access(1, 1)).toEqual({ fault: true, victimFrame: null, victims: [], wasSwapped: false, tlbHit: false, cowCopy: false })
     expect(engine.access(1, 2)).toEqual({ fault: true, victimFrame: null, victims: [], wasSwapped: false, tlbHit: false, cowCopy: false })
-    // hit, refreshes its ref bit — and a TLB hit too, since page 0's translation is still cached from its fault above
     expect(engine.access(1, 0)).toEqual({ fault: false, victimFrame: null, victims: [], wasSwapped: false, tlbHit: true, cowCopy: false })
 
     const result = engine.access(1, 3)
     expect(result.fault).toBe(true)
-    expect(result.victimFrame).toBe(0) // page 0 evicted, not 1 or 2
+    expect(result.victimFrame).toBe(0)
     expect(result.victims).toEqual([{ pid: 1, page: 0 }])
     expect(result.wasSwapped).toBe(false)
 
@@ -40,7 +34,7 @@ describe('MemoryEngine — Clock (Second-Chance) replacement', () => {
     engine.allocateProcess(1, 4)
     for (let page = 0; page < 4; page++) {
       const result = engine.access(1, page)
-      expect(result.victimFrame).toBeNull() // plenty of free frames, never an eviction
+      expect(result.victimFrame).toBeNull()
     }
     expect(engine.getFrames().every((f) => f.owner !== null)).toBe(true)
   })
@@ -49,11 +43,11 @@ describe('MemoryEngine — Clock (Second-Chance) replacement', () => {
 describe('MemoryEngine — kernel-reserved frames', () => {
   it('are never evicted by the Clock sweep, even after many wraparounds', () => {
     const engine = new MemoryEngine({ frameCount: 4, contiguousSizeMb: 100 })
-    engine.reserveKernelFrames(1) // frame 0 is permanently "OS" — nothing ever re-references it
-    engine.allocateProcess(1, 10) // far more pages than the 3 frames actually available to it
+    engine.reserveKernelFrames(1)
+    engine.allocateProcess(1, 10)
 
     for (let i = 0; i < 40; i++) {
-      engine.access(1, i % 10) // enough faults to sweep the clock hand around several times
+      engine.access(1, i % 10)
     }
 
     expect(engine.getFrames()[0]).toMatchObject({ owner: { pid: 0, page: 0 } })
@@ -66,36 +60,36 @@ describe('MemoryEngine — dirty (modified) bit', () => {
     const engine = new MemoryEngine({ frameCount: 1, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 2)
 
-    engine.access(1, 0, true) // write-fault installs page 0, dirty
+    engine.access(1, 0, true)
     expect(engine.getPageTable(1)![0]).toMatchObject({ valid: true, modified: true })
 
-    engine.access(1, 0, false) // a plain read hit must not clear an existing dirty bit
+    engine.access(1, 0, false)
     expect(engine.getPageTable(1)![0]!.modified).toBe(true)
 
-    engine.access(1, 1, false) // only 1 frame -> this evicts page 0
-    expect(engine.getPageTable(1)![0]).toMatchObject({ valid: false, modified: false }) // written back, now clean
-    expect(engine.getPageTable(1)![1]).toMatchObject({ valid: true, modified: false }) // fresh read-fault, clean
+    engine.access(1, 1, false)
+    expect(engine.getPageTable(1)![0]).toMatchObject({ valid: false, modified: false })
+    expect(engine.getPageTable(1)![1]).toMatchObject({ valid: true, modified: false })
   })
 })
 
-describe('MemoryEngine — swap bookkeeping (roadmap.md §2.1)', () => {
+describe('MemoryEngine — swap bookkeeping', () => {
   it('marks an evicted page swapped, then reports wasSwapped when it faults back in', () => {
     const engine = new MemoryEngine({ frameCount: 1, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 2)
 
-    engine.access(1, 0) // installs page 0
+    engine.access(1, 0)
     expect(engine.getMetrics().swappedPages).toBe(0)
 
-    const evicting = engine.access(1, 1) // only 1 frame -> evicts page 0
+    const evicting = engine.access(1, 1)
     expect(evicting.victims).toEqual([{ pid: 1, page: 0 }])
     expect(engine.getPageTable(1)![0]!.swapped).toBe(true)
     expect(engine.getMetrics().swappedPages).toBe(1)
     expect(engine.getSwappedPages(1)).toEqual([0])
 
-    const faultingBackIn = engine.access(1, 0) // evicts page 1 this time, brings page 0 back
+    const faultingBackIn = engine.access(1, 0)
     expect(faultingBackIn.wasSwapped).toBe(true)
-    expect(engine.getPageTable(1)![0]!.swapped).toBe(false) // resident again, no longer swapped
-    expect(engine.getMetrics().swappedPages).toBe(1) // page 1 is now the one swapped out
+    expect(engine.getPageTable(1)![0]!.swapped).toBe(false)
+    expect(engine.getMetrics().swappedPages).toBe(1)
     expect(engine.getSwappedPages(1)).toEqual([1])
   })
 
@@ -114,11 +108,11 @@ describe('MemoryEngine — swap bookkeeping (roadmap.md §2.1)', () => {
     const engine = new MemoryEngine({ frameCount: 1, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 2)
     engine.access(1, 0)
-    engine.access(1, 1) // evicts+swaps page 0
+    engine.access(1, 1)
     expect(engine.getMetrics().swappedPages).toBe(1)
 
     engine.freeProcess(1)
-    expect(engine.getMetrics().swappedPages).toBe(0) // no leaked count now that the table is gone
+    expect(engine.getMetrics().swappedPages).toBe(0)
   })
 })
 
@@ -148,9 +142,9 @@ describe('MemoryEngine — First-Fit contiguous allocation', () => {
   it('places and later coalesces blocks exactly like a hand-traced first-fit run', () => {
     const engine = new MemoryEngine({ frameCount: 8, contiguousSizeMb: 100 })
 
-    engine.allocateProcess(1, 2) // size = max(10, 2*10) = 20
-    engine.allocateProcess(2, 3) // size = 30
-    engine.allocateProcess(3, 1) // size = 10
+    engine.allocateProcess(1, 2)
+    engine.allocateProcess(2, 3)
+    engine.allocateProcess(3, 1)
 
     expect(engine.getContiguousBlocks()).toEqual([
       { id: expect.any(String), start: 0, size: 20, owner: 1 },
@@ -158,55 +152,52 @@ describe('MemoryEngine — First-Fit contiguous allocation', () => {
       { id: expect.any(String), start: 50, size: 10, owner: 3 },
       { id: expect.any(String), start: 60, size: 40, owner: null },
     ])
-    expect(engine.getMetrics().externalFragmentation).toBeCloseTo(0) // one contiguous free run
+    expect(engine.getMetrics().externalFragmentation).toBeCloseTo(0)
 
-    engine.freeProcess(2) // punches a hole between pid 1 and pid 3 — not adjacent to the tail yet
+    engine.freeProcess(2)
     const midFrag = engine.getMetrics().externalFragmentation
-    expect(midFrag).toBeGreaterThan(0) // two disjoint free blocks (30 and 40) now exist
+    expect(midFrag).toBeGreaterThan(0)
 
-    engine.freeProcess(3) // frees the block between the two existing free runs — should coalesce all three
+    engine.freeProcess(3)
     expect(engine.getContiguousBlocks()).toEqual([
       { id: expect.any(String), start: 0, size: 20, owner: 1 },
       { id: expect.any(String), start: 20, size: 80, owner: null },
     ])
-    expect(engine.getMetrics().externalFragmentation).toBeCloseTo(0) // back to one free run
+    expect(engine.getMetrics().externalFragmentation).toBeCloseTo(0)
   })
 })
 
-describe('MemoryEngine — TLB (roadmap-v4.md §2.2)', () => {
+describe('MemoryEngine — TLB', () => {
   it('a repeated access to a still-resident page is a TLB hit; the first touch never is', () => {
     const engine = new MemoryEngine({ frameCount: 4, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 4)
 
-    expect(engine.access(1, 0).tlbHit).toBe(false) // cold fault — nothing to have cached yet
-    expect(engine.access(1, 0).tlbHit).toBe(true) // still resident, and now cached
+    expect(engine.access(1, 0).tlbHit).toBe(false)
+    expect(engine.access(1, 0).tlbHit).toBe(true)
     expect(engine.getMetrics().tlbHitRatio).toBeCloseTo(0.5)
   })
 
   it('evicts the least-recently-touched entry once the TLB is full — a page-table hit can still be a TLB miss', () => {
-    // TLB_CAPACITY is 8 (see the module constant); 10 frames is plenty so
-    // none of these 9 distinct pages ever gets evicted from the page
-    // table itself — only the TLB fills up.
     const engine = new MemoryEngine({ frameCount: 10, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 9)
 
-    for (let page = 0; page < 9; page++) engine.access(1, page) // 9 cold faults, each inserted into the TLB
-    expect(engine.getTlbEntries()).toHaveLength(8) // capacity-bounded — page 0's entry was evicted for page 8's
+    for (let page = 0; page < 9; page++) engine.access(1, page)
+    expect(engine.getTlbEntries()).toHaveLength(8)
 
     const table = engine.getPageTable(1)!
-    expect(table[0]).toMatchObject({ valid: true, frame: expect.any(Number) }) // still resident...
-    expect(engine.access(1, 0).tlbHit).toBe(false) // ...but the TLB had to re-walk the page table for it
+    expect(table[0]).toMatchObject({ valid: true, frame: expect.any(Number) })
+    expect(engine.access(1, 0).tlbHit).toBe(false)
   })
 
   it('invalidates a page\'s TLB entry when Clock evicts it, so a later re-fault is never misreported as a hit', () => {
     const engine = new MemoryEngine({ frameCount: 1, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 2)
 
-    engine.access(1, 0) // installs page 0, caches it in the TLB
-    engine.access(1, 1) // only 1 frame -> evicts page 0 (and must invalidate its TLB entry)
-    const result = engine.access(1, 0) // re-faults page 0 back in
+    engine.access(1, 0)
+    engine.access(1, 1)
+    const result = engine.access(1, 0)
     expect(result.fault).toBe(true)
-    expect(result.tlbHit).toBe(false) // never true on a fault — see AccessResult.tlbHit's doc
+    expect(result.tlbHit).toBe(false)
   })
 
   it('freeProcess purges every TLB entry belonging to that pid', () => {
@@ -221,20 +212,20 @@ describe('MemoryEngine — TLB (roadmap-v4.md §2.2)', () => {
   })
 })
 
-describe('MemoryEngine — thrashing indicator (roadmap-v4.md §2.2)', () => {
+describe('MemoryEngine — thrashing indicator', () => {
   it('reports not-thrashing before the sliding window has even filled, regardless of fault rate so far', () => {
     const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 30)
 
-    for (let page = 0; page < 10; page++) engine.access(1, page) // 10 cold faults in a row — 100% so far
-    expect(engine.isThrashing()).toBe(false) // but the window (20) hasn't filled yet
+    for (let page = 0; page < 10; page++) engine.access(1, page)
+    expect(engine.isThrashing()).toBe(false)
   })
 
   it('flags thrashing once the recent fault rate crosses the threshold over a full window', () => {
     const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 30)
 
-    for (let page = 0; page < 20; page++) engine.access(1, page) // 20 distinct pages, 2 frames — every access faults
+    for (let page = 0; page < 20; page++) engine.access(1, page)
     expect(engine.getRecentFaultRate()).toBe(1)
     expect(engine.isThrashing()).toBe(true)
   })
@@ -246,15 +237,12 @@ describe('MemoryEngine — thrashing indicator (roadmap-v4.md §2.2)', () => {
     for (let page = 0; page < 20; page++) engine.access(1, page)
     expect(engine.isThrashing()).toBe(true)
 
-    // The most recent access installed page 19 into one of the 2 frames;
-    // repeatedly re-accessing it is a hit every time, diluting the window.
     for (let i = 0; i < 20; i++) engine.access(1, 19)
     expect(engine.isThrashing()).toBe(false)
   })
 })
 
-describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => {
-  /** A parent with `pages` resident pages, on an engine with plenty of frames. */
+describe('MemoryEngine — fork and copy-on-write', () => {
   function parentWithResidentPages(engine: MemoryEngine, pid: number, pages: number) {
     engine.allocateProcess(pid, pages)
     for (let page = 0; page < pages; page++) engine.access(pid, page)
@@ -269,7 +257,6 @@ describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => 
 
     expect(engine.getFrames().filter((f) => f.owner !== null).length).toBe(usedBefore)
     expect(engine.getSharedFrameCount()).toBe(3)
-    // Both tables point at the same frames, and both sides are marked COW.
     for (let page = 0; page < 3; page++) {
       const parent = engine.getPageTable(1)![page]!
       const child = engine.getPageTable(2)![page]!
@@ -289,7 +276,7 @@ describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => 
     expect(read.cowCopy).toBe(false)
     expect(read.fault).toBe(false)
     expect(engine.getFrames().filter((f) => f.owner !== null).length).toBe(usedBefore)
-    expect(engine.getPageTable(2)![0]!.cow).toBe(true) // still shared
+    expect(engine.getPageTable(2)![0]!.cow).toBe(true)
   })
 
   it('the first write copies the frame, and only for the process that wrote', () => {
@@ -302,13 +289,11 @@ describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => 
     const write = engine.access(2, 0, true)
 
     expect(write.cowCopy).toBe(true)
-    expect(engine.getFrames().filter((f) => f.owner !== null).length).toBe(usedBefore + 1) // one real copy
+    expect(engine.getFrames().filter((f) => f.owner !== null).length).toBe(usedBefore + 1)
     const child = engine.getPageTable(2)![0]!
-    expect(child.frame).not.toBe(sharedFrame) // moved to a private frame
+    expect(child.frame).not.toBe(sharedFrame)
     expect(child.cow).toBe(false)
     expect(child.modified).toBe(true)
-    // The parent keeps the original frame — and, with nobody left sharing
-    // it, no longer needs protecting.
     expect(engine.getPageTable(1)![0]!.frame).toBe(sharedFrame)
     expect(engine.getPageTable(1)![0]!.cow).toBe(false)
     expect(engine.getMetrics().cowFaults).toBe(1)
@@ -331,18 +316,15 @@ describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => 
     engine.forkAddressSpace(1, 2)
     engine.forkAddressSpace(1, 3)
 
-    engine.access(2, 0, true) // P2 diverges
-    // P1 and P3 still share the original, so it stays copy-on-write.
+    engine.access(2, 0, true)
     expect(engine.getPageTable(1)![0]!.cow).toBe(true)
     expect(engine.getPageTable(3)![0]!.cow).toBe(true)
 
-    engine.access(3, 0, true) // P3 diverges too — P1 is alone now
+    engine.access(3, 0, true)
     expect(engine.getPageTable(1)![0]!.cow).toBe(false)
   })
 
   it('evicting a shared frame invalidates every mapping of it, not just the owner’s', () => {
-    // Two frames total, one of them kernel-reserved, so the very next
-    // fault has no choice but to evict the shared frame.
     const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
     engine.allocateProcess(1, 2)
     engine.access(1, 0)
@@ -350,15 +332,11 @@ describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => 
     engine.forkAddressSpace(1, 2)
     const sharedFrame = engine.getPageTable(1)![0]!.frame!
 
-    // Force enough faults that the shared frame is swept up.
     for (let i = 0; i < 6; i++) engine.access(1, i % 2)
 
     const parentEntry = engine.getPageTable(1)![0]!
     const childEntry = engine.getPageTable(2)![0]!
     if (engine.getFrames()[sharedFrame]!.owner?.pid !== 1) {
-      // Whoever ended up holding the frame, the child's stale mapping must
-      // not still claim it — that would be one process reading another's
-      // memory, the one thing paging exists to prevent.
       expect(childEntry.valid && childEntry.frame === sharedFrame && parentEntry.frame === sharedFrame).toBe(false)
     }
     for (const frame of engine.getFrames()) {
@@ -377,14 +355,13 @@ describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => 
     engine.forkAddressSpace(1, 2)
     const sharedFrames = engine.getPageTable(1)!.map((e) => e.frame)
 
-    engine.freeProcess(1) // the parent exits first
+    engine.freeProcess(1)
 
     for (const frameIndex of sharedFrames) {
       const frame = engine.getFrames()[frameIndex!]!
-      expect(frame.owner).not.toBeNull() // still mapped by the child
+      expect(frame.owner).not.toBeNull()
       expect(frame.owner!.pid).toBe(2)
     }
-    // And the child, now alone, no longer carries a pointless COW flag.
     expect(engine.getPageTable(2)!.every((e) => !e.cow)).toBe(true)
     expect(engine.getSharedFrameCount()).toBe(0)
   })
@@ -404,27 +381,22 @@ describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => 
     engine.allocateProcess(1, 2)
     expect(engine.forkAddressSpace(99, 2)).toBe(false)
     engine.allocateProcess(3, 2)
-    expect(engine.forkAddressSpace(1, 3)).toBe(false) // pid 3 already has one
+    expect(engine.forkAddressSpace(1, 3)).toBe(false)
   })
 
   it('gives the child a private, non-resident entry for a parent page that is not resident', () => {
     const engine = new MemoryEngine({ frameCount: 10, contiguousSizeMb: 200 })
     engine.allocateProcess(1, 3)
-    engine.access(1, 0) // only page 0 is ever touched
+    engine.access(1, 0)
     engine.forkAddressSpace(1, 2)
 
     const child = engine.getPageTable(2)!
     expect(child[0]!.cow).toBe(true)
-    // Pages 1 and 2 were never resident: the child faults its own copy in
-    // rather than sharing a page file keyed by the parent's pid.
     expect(child[1]).toMatchObject({ valid: false, frame: null, cow: false, swapped: false })
     expect(child[2]).toMatchObject({ valid: false, frame: null, cow: false, swapped: false })
   })
 
   it('terminates instead of spinning when there is no frame it may copy into', () => {
-    // Two frames, one kernel-reserved: the Clock sweep's only candidate is
-    // the shared source frame, which copyOnWrite() excludes. An unbounded
-    // sweep hangs here forever looking for a victim that cannot exist.
     const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
     engine.reserveKernelFrames(1)
     engine.allocateProcess(1, 1)
@@ -435,8 +407,6 @@ describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => 
     const write = engine.access(2, 0, true)
 
     expect(write.cowCopy).toBe(true)
-    // The writer ends up holding the frame outright; the other sharer was
-    // pushed out to swap and will fault its own copy back in.
     expect(engine.getPageTable(2)![0]!.frame).toBe(sharedFrame)
     expect(engine.getPageTable(2)![0]!.cow).toBe(false)
     expect(engine.getPageTable(1)![0]!.valid).toBe(false)
@@ -446,19 +416,16 @@ describe('MemoryEngine — fork and copy-on-write (roadmap-v5.md §1.3)', () => 
 
   it('reports an unservicable fault rather than sweeping forever when every frame is reserved', () => {
     const engine = new MemoryEngine({ frameCount: 2, contiguousSizeMb: 100 })
-    engine.reserveKernelFrames(2) // the whole frame table
+    engine.reserveKernelFrames(2)
     engine.allocateProcess(1, 1)
 
     const result = engine.access(1, 0)
     expect(result.fault).toBe(true)
     expect(result.victimFrame).toBeNull()
-    expect(engine.getPageTable(1)![0]!.valid).toBe(false) // stays non-resident
+    expect(engine.getPageTable(1)![0]!.valid).toBe(false)
   })
 
   it('the copy never lands on the frame it is copying from', () => {
-    // One usable frame beyond the kernel's: the Clock sweep's only
-    // candidate would be the shared source frame itself, which must be
-    // excluded or the copy would overwrite its own source.
     const engine = new MemoryEngine({ frameCount: 3, contiguousSizeMb: 100 })
     engine.reserveKernelFrames(1)
     engine.allocateProcess(1, 1)

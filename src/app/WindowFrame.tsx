@@ -50,9 +50,6 @@ export function WindowFrame({ id, title, subtitle, accent, icon, children }: Win
     }
   }
 
-  // Tab/Shift+Tab wrap within this window's own focusable elements while
-  // it's the focused window, instead of escaping into whatever window
-  // happens to sit behind it in DOM order (roadmap.md §2.5).
   function handleWindowKeyDown(e: React.KeyboardEvent) {
     if (e.key !== 'Tab' || focusedWindow !== id || !windowRef.current) return
     const focusable = windowRef.current.querySelectorAll<HTMLElement>(
@@ -71,9 +68,6 @@ export function WindowFrame({ id, title, subtitle, accent, icon, children }: Win
   }
 
   function handlePointerDown(e: React.PointerEvent) {
-    // Focusing happens once, via the outer window's own onPointerDown
-    // below (which this bubbles up to) — calling focusWindow(id) here too
-    // would double-fire it on every titlebar click.
     if (maximized) return
     dragRef.current = { startX: e.clientX, startY: e.clientY, origX: win.x, origY: win.y }
     const onMove = (ev: PointerEvent) => {
@@ -110,10 +104,6 @@ export function WindowFrame({ id, title, subtitle, accent, icon, children }: Win
 
   function handleResizePointerDown(e: React.PointerEvent) {
     if (maximized) return
-    // Deliberately does NOT stopPropagation — the outer window's own
-    // onPointerDown (focusWindow) should fire here exactly like it does
-    // for the titlebar's drag handler, so resizing a background window
-    // also raises it to the front.
     resizeRef.current = { startX: e.clientX, startY: e.clientY, origW: win.w, origH: win.h }
     const onMove = (ev: PointerEvent) => {
       const resize = resizeRef.current

@@ -6,7 +6,7 @@ describe('FilesystemEngine — create / write / read / delete', () => {
   it('auto-creates parent directories and grows blocks as content is appended', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
 
-    expect(fs.write('/home/user/notes.txt', 'hello')).toEqual({ ok: true }) // 5 bytes -> ceil(5/4) = 2 blocks
+    expect(fs.write('/home/user/notes.txt', 'hello')).toEqual({ ok: true })
     expect(fs.read('/home/user/notes.txt')).toEqual({ ok: true, content: 'hello' })
 
     const inodes = fs.getInodes()
@@ -20,18 +20,18 @@ describe('FilesystemEngine — create / write / read / delete', () => {
     const user = home.children!.find((c) => c.name === 'user')!
     expect(user.children!.map((c) => c.name)).toEqual(['notes.txt'])
 
-    expect(fs.write('/home/user/notes.txt', 'world')).toEqual({ ok: true }) // now 10 bytes -> ceil(10/4) = 3 blocks
+    expect(fs.write('/home/user/notes.txt', 'world')).toEqual({ ok: true })
     expect(fs.read('/home/user/notes.txt')).toEqual({ ok: true, content: 'helloworld' })
     expect(fs.getInodes()[0]!.blockIds).toHaveLength(3)
 
     expect(fs.delete('/home/user/notes.txt')).toEqual({ ok: true })
     expect(fs.getInodes()).toHaveLength(0)
-    expect(fs.getBlocks().every((b) => b.owner === null)).toBe(true) // every block freed
+    expect(fs.getBlocks().every((b) => b.owner === null)).toBe(true)
     expect(fs.read('/home/user/notes.txt')).toEqual({
       ok: false,
       error: 'cat: /home/user/notes.txt: No such file or directory',
     })
-    expect(fs.delete('/home/user/notes.txt').ok).toBe(false) // deleting twice is an error, not a silent no-op
+    expect(fs.delete('/home/user/notes.txt').ok).toBe(false)
   })
 
   it('rejects creating a file that already exists', () => {
@@ -42,25 +42,23 @@ describe('FilesystemEngine — create / write / read / delete', () => {
 
   it('rejects write/create when the path already exists as a directory', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
-    fs.write('/home/user/notes.txt', 'hi') // auto-creates /home and /home/user as directories
+    fs.write('/home/user/notes.txt', 'hi')
 
     expect(fs.write('/home', 'oops').ok).toBe(false)
     expect(fs.create('/home/user').ok).toBe(false)
     expect(fs.delete('/home').ok).toBe(false)
 
-    // and the tree wasn't corrupted by the attempt — still exactly one entry named "home"
     const root = fs.getTree()
     expect(root.children!.filter((c) => c.name === 'home')).toHaveLength(1)
   })
 
   it('rejects writing through a path where an ANCESTOR segment is a file, not a directory', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
-    fs.write('/var', 'i am a file') // /var is a file at root, not a directory
+    fs.write('/var', 'i am a file')
 
     expect(fs.write('/var/log/x.txt', 'data').ok).toBe(false)
     expect(fs.create('/var/log').ok).toBe(false)
 
-    // still exactly one entry named "var" — the attempt didn't create a shadow directory
     const root = fs.getTree()
     expect(root.children!.filter((c) => c.name === 'var')).toHaveLength(1)
     expect(root.children!.find((c) => c.name === 'var')!.type).toBe('file')
@@ -68,9 +66,9 @@ describe('FilesystemEngine — create / write / read / delete', () => {
 
   it('rejects a write that would need more blocks than the disk has free', () => {
     const fs = new FilesystemEngine({ blockCount: 2, blockSizeBytes: 4, journalHistoryLimit: 50 })
-    expect(fs.write('/a.txt', 'a'.repeat(8)).ok).toBe(true) // exactly fills both 4-byte blocks
+    expect(fs.write('/a.txt', 'a'.repeat(8)).ok).toBe(true)
 
-    const result = fs.write('/b.txt', 'x') // needs a 3rd block; none free
+    const result = fs.write('/b.txt', 'x')
     expect(result).toEqual({ ok: false, error: 'write: /b.txt: No space left on device' })
     expect(fs.read('/b.txt')).toEqual({ ok: false, error: 'cat: /b.txt: No such file or directory' })
   })
@@ -88,12 +86,11 @@ describe('FilesystemEngine — crash / fsck recovery', () => {
     expect(pendingBefore).toHaveLength(1)
     expect(pendingBefore[0]).toMatchObject({ op: 'write', path: '/a.txt', status: 'pending' })
 
-    // Every mutation — and reads — must be refused while the fs is down; nothing should leak through.
     expect(fs.write('/b.txt', 'x').ok).toBe(false)
     expect(fs.create('/c.txt').ok).toBe(false)
     expect(fs.delete('/a.txt').ok).toBe(false)
     expect(fs.read('/a.txt').ok).toBe(false)
-    expect(fs.getInodes().map((i) => i.id)).toHaveLength(1) // still just a.txt — b.txt never landed
+    expect(fs.getInodes().map((i) => i.id)).toHaveLength(1)
 
     const { replayed } = fs.fsck()
     expect(replayed).toHaveLength(1)
@@ -101,10 +98,8 @@ describe('FilesystemEngine — crash / fsck recovery', () => {
     expect(fs.isCrashed()).toBe(false)
     expect(fs.getJournal().every((e) => e.status === 'committed')).toBe(true)
 
-    // The replayed write actually landed.
     expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hi [uncommitted]' })
 
-    // And the fs is usable again.
     expect(fs.write('/b.txt', 'x')).toEqual({ ok: true })
   })
 
@@ -116,11 +111,7 @@ describe('FilesystemEngine — crash / fsck recovery', () => {
     expect(fs.getJournal().length).toBe(journalLengthAfterFirst)
   })
 
-  it('mkdir then crash then fsck does not corrupt the tree with a duplicate file+dir sibling (found by code review)', () => {
-    // crash() always fabricates a pending op:'write' entry targeting
-    // lastTouchedPath, whatever that path actually refers to — mkdir()
-    // sets lastTouchedPath to a directory. fsck() replaying that entry
-    // must not create a shadow file entry alongside the real directory.
+  it('mkdir then crash then fsck does not corrupt the tree with a duplicate file+dir sibling', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
     fs.mkdir('/d')
 
@@ -129,17 +120,12 @@ describe('FilesystemEngine — crash / fsck recovery', () => {
     expect(replayed).toHaveLength(1)
     expect(replayed[0]).toMatchObject({ op: 'write', path: '/d' })
 
-    expect(fs.list('/')).toEqual({ ok: true, entries: [{ name: 'd', type: 'dir' }] }) // still exactly one entry
-    expect(fs.read('/d')).toEqual({ ok: false, error: 'cat: /d: No such file or directory' }) // still a dir, not readable as a file
-    expect(fs.list('/d')).toEqual({ ok: true, entries: [] }) // still an empty, usable directory
+    expect(fs.list('/')).toEqual({ ok: true, entries: [{ name: 'd', type: 'dir' }] })
+    expect(fs.read('/d')).toEqual({ ok: false, error: 'cat: /d: No such file or directory' })
+    expect(fs.list('/d')).toEqual({ ok: true, entries: [] })
   })
 
   it('fsck() tolerates an unrecognized journal op instead of throwing (defends against a corrupted persisted journal)', () => {
-    // A pending journal entry can only normally exist via crash()'s own
-    // fabricated 'write' entry, so an unrecognized op can't arise from
-    // normal use — but a persisted (IndexedDB) journal is untrusted input,
-    // reachable via importState(), and TypeScript's JournalOp type isn't
-    // enforced at runtime for data coming from outside the program.
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
     const snapshot = fs.exportState()
     const corrupted = {
@@ -171,10 +157,10 @@ describe('FilesystemEngine — mkdir', () => {
     expect(fs.mkdir('/etc')).toEqual({ ok: true })
     expect(fs.list('/etc')).toEqual({ ok: true, entries: [] })
 
-    expect(fs.mkdir('/etc').ok).toBe(false) // already exists as a dir
+    expect(fs.mkdir('/etc').ok).toBe(false)
     fs.write('/etc/passwd', 'root')
-    expect(fs.mkdir('/etc/passwd').ok).toBe(false) // already exists as a file
-    expect(fs.mkdir('/etc/passwd/x').ok).toBe(false) // ancestor is a file, not a directory
+    expect(fs.mkdir('/etc/passwd').ok).toBe(false)
+    expect(fs.mkdir('/etc/passwd/x').ok).toBe(false)
   })
 })
 
@@ -188,7 +174,7 @@ describe('FilesystemEngine — mv', () => {
     expect(fs.read('/a.txt').ok).toBe(false)
     expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello' })
     expect(fs.getInodes()).toHaveLength(1)
-    expect(fs.getInodes()[0]!.id).toBe(inodeIdBefore) // same inode, just relocated
+    expect(fs.getInodes()[0]!.id).toBe(inodeIdBefore)
   })
 
   it('rejects moving a directory, or onto an existing path', () => {
@@ -199,21 +185,20 @@ describe('FilesystemEngine — mv', () => {
 
     expect(fs.move('/dir', '/dir2').ok).toBe(false)
     expect(fs.move('/nope.txt', '/x.txt').ok).toBe(false)
-    expect(fs.move('/a.txt', '/b.txt').ok).toBe(false) // destination already exists
+    expect(fs.move('/a.txt', '/b.txt').ok).toBe(false)
   })
 })
 
 describe('FilesystemEngine — cp', () => {
   it('copies a file into an independent inode with its own blocks', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
-    fs.write('/a.txt', 'hello') // 2 blocks
+    fs.write('/a.txt', 'hello')
 
     expect(fs.copy('/a.txt', '/b.txt')).toEqual({ ok: true })
-    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hello' }) // source untouched
+    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hello' })
     expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello' })
     expect(fs.getInodes()).toHaveLength(2)
 
-    // Independent inodes: writing to the copy doesn't touch the original.
     fs.write('/b.txt', '!')
     expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hello' })
     expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello!' })
@@ -221,10 +206,10 @@ describe('FilesystemEngine — cp', () => {
 
   it('rejects copying onto an existing path or when the disk is full', () => {
     const fs = new FilesystemEngine({ blockCount: 2, blockSizeBytes: 4, journalHistoryLimit: 50 })
-    fs.write('/a.txt', 'ab') // 1 block
-    fs.write('/b.txt', 'cd') // 1 block, disk now full
+    fs.write('/a.txt', 'ab')
+    fs.write('/b.txt', 'cd')
 
-    expect(fs.copy('/a.txt', '/b.txt').ok).toBe(false) // dest exists
+    expect(fs.copy('/a.txt', '/b.txt').ok).toBe(false)
     expect(fs.copy('/a.txt', '/c.txt')).toEqual({ ok: false, error: 'cp: /c.txt: No space left on device' })
   })
 })
@@ -236,12 +221,11 @@ describe('FilesystemEngine — ln (hard links)', () => {
     const inodeIdBefore = fs.getInodes()[0]!.id
 
     expect(fs.link('/a.txt', '/b.txt')).toEqual({ ok: true })
-    expect(fs.getInodes()).toHaveLength(1) // still one inode, not two
+    expect(fs.getInodes()).toHaveLength(1)
     expect(fs.getInodes()[0]!.id).toBe(inodeIdBefore)
     expect(fs.getInodes()[0]!.links).toBe(2)
     expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello' })
 
-    // writing through either path is visible through the other — they share content.
     fs.write('/a.txt', '!')
     expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello!' })
   })
@@ -252,13 +236,13 @@ describe('FilesystemEngine — ln (hard links)', () => {
     fs.link('/a.txt', '/b.txt')
 
     expect(fs.delete('/a.txt')).toEqual({ ok: true })
-    expect(fs.getInodes()).toHaveLength(1) // inode survives — /b.txt still links to it
+    expect(fs.getInodes()).toHaveLength(1)
     expect(fs.getInodes()[0]!.links).toBe(1)
     expect(fs.read('/a.txt').ok).toBe(false)
     expect(fs.read('/b.txt')).toEqual({ ok: true, content: 'hello' })
 
     expect(fs.delete('/b.txt')).toEqual({ ok: true })
-    expect(fs.getInodes()).toHaveLength(0) // last link gone — inode and blocks actually freed
+    expect(fs.getInodes()).toHaveLength(0)
     expect(fs.getBlocks().every((b) => b.owner === null)).toBe(true)
   })
 
@@ -270,11 +254,11 @@ describe('FilesystemEngine — ln (hard links)', () => {
 
     expect(fs.link('/dir', '/dir2').ok).toBe(false)
     expect(fs.link('/nope.txt', '/x.txt').ok).toBe(false)
-    expect(fs.link('/a.txt', '/b.txt').ok).toBe(false) // destination already exists
+    expect(fs.link('/a.txt', '/b.txt').ok).toBe(false)
   })
 })
 
-describe('FilesystemEngine — chmod / permissions (roadmap-v3.md §2.3)', () => {
+describe('FilesystemEngine — chmod / permissions', () => {
   it('a new file defaults to rw- and is actually readable/writable/deletable', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
     fs.write('/a.txt', 'hi')
@@ -285,13 +269,12 @@ describe('FilesystemEngine — chmod / permissions (roadmap-v3.md §2.3)', () =>
   it('removing the write bit actually rejects write and rm, not just cosmetically', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
     fs.write('/a.txt', 'hi')
-    expect(fs.chmod('/a.txt', 0b100)).toEqual({ ok: true }) // r-- : read-only
+    expect(fs.chmod('/a.txt', 0b100)).toEqual({ ok: true })
 
     expect(fs.write('/a.txt', ' more')).toEqual({ ok: false, error: 'write: /a.txt: Permission denied' })
     expect(fs.delete('/a.txt')).toEqual({ ok: false, error: 'rm: /a.txt: Permission denied' })
-    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hi' }) // read still works — only w was removed
+    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hi' })
 
-    // and it's a real, reversible mode change, not a one-way lock
     expect(fs.chmod('/a.txt', 0b110)).toEqual({ ok: true })
     expect(fs.write('/a.txt', ' more')).toEqual({ ok: true })
     expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hi more' })
@@ -300,11 +283,11 @@ describe('FilesystemEngine — chmod / permissions (roadmap-v3.md §2.3)', () =>
   it('removing the read bit rejects cat and cp (as the source), independent of the write bit', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
     fs.write('/a.txt', 'secret')
-    fs.chmod('/a.txt', 0b010) // -w- : write-only, unreadable
+    fs.chmod('/a.txt', 0b010)
 
     expect(fs.read('/a.txt')).toEqual({ ok: false, error: 'cat: /a.txt: Permission denied' })
     expect(fs.copy('/a.txt', '/b.txt')).toEqual({ ok: false, error: 'cp: /a.txt: Permission denied' })
-    expect(fs.write('/a.txt', '!')).toEqual({ ok: true }) // write bit is independent and still present
+    expect(fs.write('/a.txt', '!')).toEqual({ ok: true })
   })
 
   it('rejects chmod on a directory or a missing path, and a malformed mode string', () => {
@@ -314,25 +297,20 @@ describe('FilesystemEngine — chmod / permissions (roadmap-v3.md §2.3)', () =>
 
     expect(fs.chmod('/dir', 0o7).ok).toBe(false)
     expect(fs.chmod('/nope.txt', 0o6).ok).toBe(false)
-    expect(fs.chmod('/a.txt', 6)).toEqual({ ok: true }) // sanity: a valid call still works
+    expect(fs.chmod('/a.txt', 6)).toEqual({ ok: true })
   })
 
-  it('regression: crash() + fsck() cannot bypass the write-permission check (found by code review)', () => {
-    // crash() always fabricates a pending 'write' entry against
-    // lastTouchedPath, regardless of what actually last happened — fsck()
-    // used to replay it straight through apply(), which never checked
-    // MODE_WRITE, silently appending to a file whose write bit had since
-    // been removed.
+  it('regression: crash() + fsck() cannot bypass the write-permission check', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
     fs.write('/a.txt', 'hi')
-    fs.chmod('/a.txt', 0b100) // r-- : read-only, also sets lastTouchedPath to /a.txt
+    fs.chmod('/a.txt', 0b100)
 
     fs.crash()
     const { replayed } = fs.fsck()
     expect(replayed).toHaveLength(1)
 
-    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hi' }) // unchanged — the replay was silently skipped
-    expect(fs.isCrashed()).toBe(false) // fsck() still clears crashed state even though the replay itself was a no-op
+    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'hi' })
+    expect(fs.isCrashed()).toBe(false)
   })
 })
 
@@ -340,9 +318,9 @@ describe('FilesystemEngine — internal permission-bypassing writes (swap coordi
   it('writeIgnoringPermissions/deleteIgnoringPermissions succeed against a read-only file', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 64, journalHistoryLimit: 50 })
     fs.write('/swap/1-0.swp', 'x')
-    fs.chmod('/swap/1-0.swp', 0b100) // r-- : simulate a user locking it down
+    fs.chmod('/swap/1-0.swp', 0b100)
 
-    expect(fs.write('/swap/1-0.swp', '!').ok).toBe(false) // the normal path still enforces permissions
+    expect(fs.write('/swap/1-0.swp', '!').ok).toBe(false)
     expect(fs.writeIgnoringPermissions('/swap/1-0.swp', '!')).toEqual({ ok: true })
     expect(fs.read('/swap/1-0.swp')).toEqual({ ok: true, content: 'x!' })
 
@@ -366,7 +344,6 @@ describe('FilesystemEngine — export / import round-trip (persistence)', () => 
     expect(fs2.list('/etc')).toEqual({ ok: true, entries: [] })
     expect(fs2.getInodes()).toEqual(fs.getInodes())
 
-    // The two engines are independent after import — mutating one doesn't touch the other.
     fs2.write('/home/user/notes.txt', '!')
     expect(fs.read('/home/user/notes.txt')).toEqual({ ok: true, content: 'hello' })
     expect(fs2.read('/home/user/notes.txt')).toEqual({ ok: true, content: 'hello!' })
@@ -379,9 +356,6 @@ describe('FilesystemEngine — export / import round-trip (persistence)', () => 
     const fs2 = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
     fs2.importState(snapshot)
 
-    // Structural mutations (new dir/file entries) on either engine, or on
-    // a stale reference to the already-exported snapshot, must never leak
-    // into the other engine's tree.
     fs.mkdir('/shared/only-in-fs')
     fs2.mkdir('/shared/only-in-fs2')
 
@@ -396,16 +370,10 @@ describe('FilesystemEngine — export / import round-trip (persistence)', () => 
 
     expect(fs.importState({ ...snapshot, schemaVersion: 999 })).toBe(false)
     expect(fs.importState({ ...snapshot, blockCount: 4 })).toBe(false)
-    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'keep-me' }) // unchanged
+    expect(fs.read('/a.txt')).toEqual({ ok: true, content: 'keep-me' })
   })
 
   it('rejects a snapshot that is malformed in some other way (not just version/count) without throwing or partially mutating', () => {
-    // A persisted IndexedDB record can pass the schemaVersion/blockCount
-    // checks and still be corrupted some other way (hand-edited, a
-    // browser crash mid-write, a bug in an older build). importState()
-    // must reject cleanly rather than throw an uncaught exception that
-    // would strand app startup (see app/App.tsx's boot sequence, which
-    // has no recovery path for a promise that never resolves).
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
     fs.write('/keep.txt', 'safe')
     const snapshot = fs.exportState()
@@ -416,7 +384,7 @@ describe('FilesystemEngine — export / import round-trip (persistence)', () => 
       result = fs.importState(malformed)
     }).not.toThrow()
     expect(result).toBe(false)
-    expect(fs.read('/keep.txt')).toEqual({ ok: true, content: 'safe' }) // untouched, not half-imported
+    expect(fs.read('/keep.txt')).toEqual({ ok: true, content: 'safe' })
   })
 })
 
@@ -433,10 +401,10 @@ describe('FilesystemEngine — resetToEmpty', () => {
     expect(fs.getJournal()).toHaveLength(0)
     expect(fs.getBlocks().every((b) => b.owner === null)).toBe(true)
     expect(fs.getTree()).toEqual({ name: '/', type: 'dir', children: [] })
-    expect(fs.write('/fresh.txt', 'x')).toEqual({ ok: true }) // fully usable afterwards
+    expect(fs.write('/fresh.txt', 'x')).toEqual({ ok: true })
   })
 
-  it('also resets the I/O scheduler (roadmap-v4.md §1.1) so no stale requests survive a wipe', () => {
+  it('also resets the I/O scheduler so no stale requests survive a wipe', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
     fs.write('/a.txt', 'data')
     expect(fs.getIoState().pending.length).toBeGreaterThan(0)
@@ -448,17 +416,12 @@ describe('FilesystemEngine — resetToEmpty', () => {
   })
 })
 
-describe('FilesystemEngine — I/O scheduling (roadmap-v4.md §1.1)', () => {
-  // A request at a cylinder the head starts on/already passed this sweep
-  // isn't serviced until the head sweeps to the far end and back — see
-  // ioScheduler.test.ts's "catches a request enqueued behind the head" case
-  // — so draining fully needs a worst-case double sweep (2 * (blockCount-1)
-  // ticks), not just one tick per block.
+describe('FilesystemEngine — I/O scheduling', () => {
   const FULL_DRAIN_TICKS = 20
 
   it('write() enqueues an I/O request per allocated block, and advanceTick() drains the queue via SCAN', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
-    fs.write('/a.txt', 'hello') // 5 bytes -> 2 blocks -> 2 pending requests
+    fs.write('/a.txt', 'hello')
 
     expect(fs.getIoState().pending).toHaveLength(2)
 
@@ -471,7 +434,7 @@ describe('FilesystemEngine — I/O scheduling (roadmap-v4.md §1.1)', () => {
   it('read() enqueues one request against the file, and delete() enqueues one per freed block', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
     fs.write('/a.txt', 'hello')
-    for (let i = 0; i < FULL_DRAIN_TICKS; i++) fs.advanceTick() // drain the write's requests first
+    for (let i = 0; i < FULL_DRAIN_TICKS; i++) fs.advanceTick()
     expect(fs.getIoState().pending).toHaveLength(0)
 
     fs.read('/a.txt')
@@ -479,7 +442,7 @@ describe('FilesystemEngine — I/O scheduling (roadmap-v4.md §1.1)', () => {
     for (let i = 0; i < FULL_DRAIN_TICKS; i++) fs.advanceTick()
 
     fs.delete('/a.txt')
-    expect(fs.getIoState().pending).toHaveLength(2) // both blocks freed
+    expect(fs.getIoState().pending).toHaveLength(2)
   })
 
   it('importState() resets the I/O scheduler rather than carrying stale requests over the swapped disk', () => {
@@ -494,12 +457,11 @@ describe('FilesystemEngine — I/O scheduling (roadmap-v4.md §1.1)', () => {
   })
 })
 
-describe('FilesystemEngine — symbolic links (roadmap-v5.md §2.2)', () => {
+describe('FilesystemEngine — symbolic links', () => {
   function fresh() {
     return new FilesystemEngine({ blockCount: 16, blockSizeBytes: 16, journalHistoryLimit: 50 })
   }
 
-  /** list() that throws rather than returning an error result, so a test reads as one line. */
   function entriesOf(fs: FilesystemEngine, path = '/') {
     const result = fs.list(path)
     if (!result.ok) throw new Error(result.error)
@@ -519,7 +481,6 @@ describe('FilesystemEngine — symbolic links (roadmap-v5.md §2.2)', () => {
     fs.symlink('/notes.txt', '/link')
     fs.write('/link', 'b')
     expect(fs.read('/notes.txt')).toEqual({ ok: true, content: 'ab' })
-    // And the link is still a link, not a file that shadowed the target.
     expect(entriesOf(fs).find((e) => e.name === 'link')).toMatchObject({ type: 'symlink', target: '/notes.txt' })
   })
 
@@ -536,7 +497,7 @@ describe('FilesystemEngine — symbolic links (roadmap-v5.md §2.2)', () => {
   it('may dangle: creating a link to a path that does not exist is legal, and it starts working when the target appears', () => {
     const fs = fresh()
     expect(fs.symlink('/later.txt', '/link')).toEqual({ ok: true })
-    expect(fs.read('/link').ok).toBe(false) // nothing there yet
+    expect(fs.read('/link').ok).toBe(false)
 
     fs.write('/later.txt', 'now')
     expect(fs.read('/link')).toEqual({ ok: true, content: 'now' })
@@ -594,10 +555,8 @@ describe('FilesystemEngine — symbolic links (roadmap-v5.md §2.2)', () => {
     fs.symlink('/notes.txt', '/link')
     expect(fs.link('/link', '/hard')).toEqual({ ok: true })
 
-    // The hard link shares content with the original file...
     fs.write('/hard', '!')
     expect(fs.read('/notes.txt')).toEqual({ ok: true, content: 'shared!' })
-    // ...and the inode's link count reflects two real names, not three.
     expect(fs.getInodes()[0]!.links).toBe(2)
   })
 
@@ -607,8 +566,8 @@ describe('FilesystemEngine — symbolic links (roadmap-v5.md §2.2)', () => {
     fs.symlink('/notes.txt', '/link')
     expect(fs.move('/link', '/moved')).toEqual({ ok: true })
 
-    expect(fs.read('/notes.txt')).toEqual({ ok: true, content: 'hello' }) // untouched
-    expect(fs.read('/moved')).toEqual({ ok: true, content: 'hello' }) // still resolves
+    expect(fs.read('/notes.txt')).toEqual({ ok: true, content: 'hello' })
+    expect(fs.read('/moved')).toEqual({ ok: true, content: 'hello' })
     expect(entriesOf(fs).find((e) => e.name === 'moved')).toMatchObject({ type: 'symlink' })
   })
 
@@ -616,9 +575,9 @@ describe('FilesystemEngine — symbolic links (roadmap-v5.md §2.2)', () => {
     const fs = fresh()
     fs.write('/notes.txt', 'x')
     fs.symlink('/notes.txt', '/link')
-    fs.chmod('/link', 4) // r--
+    fs.chmod('/link', 4)
 
-    expect(fs.write('/notes.txt', 'more').ok).toBe(false) // the target really lost its write bit
+    expect(fs.write('/notes.txt', 'more').ok).toBe(false)
     expect(fs.read('/link')).toEqual({ ok: true, content: 'x' })
   })
 
@@ -630,12 +589,7 @@ describe('FilesystemEngine — symbolic links (roadmap-v5.md §2.2)', () => {
     expect(fs.getInodes()).toHaveLength(0)
   })
 
-  it('regression: crash + fsck after ln -s does not grow a phantom file beside the link (found by code review)', () => {
-    // `ln -s` sets lastTouchedPath to the link, and crash() always
-    // fabricates a generic `write` against whatever that is. Replaying it
-    // used to run applyCreate, which checked only for an existing file or
-    // directory — so it pushed a second entry with the same name, of type
-    // 'file', holding an inode and blocks nothing could ever reach again.
+  it('regression: crash + fsck after ln -s does not grow a phantom file beside the link', () => {
     const fs = fresh()
     fs.write('/notes.txt', 'hello')
     fs.symlink('/notes.txt', '/link')
@@ -646,7 +600,7 @@ describe('FilesystemEngine — symbolic links (roadmap-v5.md §2.2)', () => {
     expect(named).toHaveLength(1)
     expect(named[0]!.type).toBe('symlink')
     expect(fs.read('/link')).toEqual({ ok: true, content: 'hello' })
-    expect(fs.getInodes()).toHaveLength(1) // no orphaned inode
+    expect(fs.getInodes()).toHaveLength(1)
   })
 
   it('regression: the same holds after mv of a link, which sets lastTouchedPath the same way', () => {
@@ -681,12 +635,12 @@ describe('FilesystemEngine — symbolic links (roadmap-v5.md §2.2)', () => {
   })
 })
 
-describe('FilesystemEngine — free-space bit vector (roadmap-v5.md §2.2)', () => {
+describe('FilesystemEngine — free-space bit vector', () => {
   it('reports usage straight from the bitmap the allocator consults', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
     expect(fs.getMetrics()).toMatchObject({ usedBlocks: 0, freeBlocks: 8, totalBlocks: 8 })
 
-    fs.write('/a.txt', 'hello') // 5 bytes -> 2 blocks
+    fs.write('/a.txt', 'hello')
     expect(fs.getMetrics()).toMatchObject({ usedBlocks: 2, freeBlocks: 6 })
     expect(fs.getFreeSpaceBitmap().filter(Boolean)).toHaveLength(2)
   })
@@ -707,9 +661,9 @@ describe('FilesystemEngine — free-space bit vector (roadmap-v5.md §2.2)', () 
 
   it('reuses freed blocks, lowest first', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
-    fs.write('/a.txt', 'aaaa') // block 0
-    fs.write('/b.txt', 'bbbb') // block 1
-    fs.delete('/a.txt') // frees block 0
+    fs.write('/a.txt', 'aaaa')
+    fs.write('/b.txt', 'bbbb')
+    fs.delete('/a.txt')
     fs.write('/c.txt', 'cccc')
 
     expect(fs.getInodes().find((i) => i.blockIds.includes(0))).toBeDefined()
@@ -718,10 +672,10 @@ describe('FilesystemEngine — free-space bit vector (roadmap-v5.md §2.2)', () 
 
   it('rebuilds the bitmap from the disk on import, rather than carrying over stale bits', () => {
     const fs = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
-    fs.write('/a.txt', 'hello world') // 3 blocks
+    fs.write('/a.txt', 'hello world')
 
     const other = new FilesystemEngine({ blockCount: 8, blockSizeBytes: 4, journalHistoryLimit: 50 })
-    other.write('/x.txt', 'x') // 1 block of its own first
+    other.write('/x.txt', 'x')
     expect(other.importState(fs.exportState())).toBe(true)
     expect(other.getMetrics().usedBlocks).toBe(3)
     expect(other.getFreeSpaceBitmap().filter(Boolean)).toHaveLength(3)

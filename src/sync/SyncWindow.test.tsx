@@ -1,9 +1,4 @@
 // @vitest-environment jsdom
-//
-// Component test for the shared-session-link wiring (roadmap-v4.md §3.1)
-// specifically — does SyncWindow actually read the URL on mount and write
-// it back on a tab change? urlState.test.ts already covers the read/write
-// functions themselves in isolation.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
@@ -16,7 +11,6 @@ let snapshot: ReturnType<typeof useSimStore.getState>
 beforeEach(() => {
   snapshot = useSimStore.getState()
   window.history.replaceState(null, '', '/')
-  // Closed by default (see store.ts's WINDOW_DEFAULTS) — force it open so there's something to query.
   useSimStore.setState((s) => ({ windows: { ...s.windows, sync: { ...s.windows.sync, open: true } } }))
 })
 
@@ -26,7 +20,7 @@ afterEach(() => {
   window.history.replaceState(null, '', '/')
 })
 
-describe('SyncWindow — shared session link (roadmap-v4.md §3.1)', () => {
+describe('SyncWindow — shared session link', () => {
   it('defaults to the bounded-buffer tab when the URL names nothing', () => {
     render(<SyncWindow />)
     expect(screen.getByRole('tab', { name: 'Bounded buffer' })).toHaveAttribute('aria-selected', 'true')

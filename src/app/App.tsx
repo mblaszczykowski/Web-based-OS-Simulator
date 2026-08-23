@@ -17,42 +17,17 @@ export function App() {
   const isNarrow = useIsNarrowViewport(SMALL_SCREEN_BREAKPOINT_PX)
 
   useEffect(() => {
-    // Below the small-screen breakpoint we show SmallScreenNotice instead
-    // of ever booting — without this guard, the boot/hydration work (and,
-    // via `ready` below, the tick interval) ran anyway in the background
-    // on a screen the user can't even see the result of, contradicting
-    // SmallScreenNotice.tsx's own "skips the boot sequence and desktop
-    // entirely" comment (found by code review). If the viewport later
-    // widens past the breakpoint, this effect re-runs and boots normally.
     if (isNarrow) return
     if (bootstrapped.current) return
     bootstrapped.current = true
-    // The boot animation is purely cosmetic (roadmap.md §1.2) and runs on
-    // its own fixed timer; real filesystem hydration (§1.5) happens
-    // concurrently. We wait for both so the desktop never mounts with a
-    // half-loaded disk.
     const cosmetic = new Promise<void>((resolve) => window.setTimeout(resolve, BOOT_DURATION_MS))
     Promise.all([hydrateAndBootstrap(), cosmetic])
       .catch((error: unknown) => {
-        // Should be unreachable — hydrateAndBootstrap()'s persistence step
-        // is designed to never reject (a malformed disk falls back to a
-        // fresh one; see FilesystemEngine.importState()). This is
-        // defense-in-depth so a boot-time exception can never strand the
-        // user on the boot screen forever, matching the same best-effort
-        // philosophy applied one layer down.
         console.error('Boot sequence failed unexpectedly; continuing with default state.', error)
       })
       .then(() => {
-        // A shared session link (roadmap-v4.md §3.1) can ask to boot
-        // straight into the unsafe/race-condition sync demo — applied
-        // once here, before the first tick, the same restart resetSync()
-        // already does for the `race on|off` terminal command. Which
-        // SyncWindow tab to open is read directly by that component
-        // itself (it has no other boot-order dependency), not here.
         const shared = readSharedSessionState()
         if (shared.raceOn !== null) resetSync(shared.raceOn)
-        // Without this, the desktop would render empty for one full tick
-        // interval before the bootstrapped processes/files ever show up.
         stepOnce()
         setReady(true)
       })

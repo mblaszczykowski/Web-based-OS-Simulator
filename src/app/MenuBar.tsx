@@ -9,7 +9,7 @@ export function MenuBar() {
   const demo = useSimStore((s) => s.demo)
   const startDemo = useSimStore((s) => s.startDemo)
   const stopDemo = useSimStore((s) => s.stopDemo)
-  useSimStore((s) => s.version) // subscribed purely so this bar re-renders on every tick/command
+  useSimStore((s) => s.version)
 
   const cpu = Math.round(scheduler.getMetrics().cpuUtilization * 100)
   const frames = memory.getFrames()

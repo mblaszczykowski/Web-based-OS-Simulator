@@ -4,7 +4,7 @@ dist-ssr
 *.local
 *.tsbuildinfo
 
-# Playwright (roadmap-v4.md §2.3)
+# Playwright
 /test-results/
 /playwright-report/
 /blob-report/
@@ -21,3 +21,6 @@ yarn-debug.log*
 yarn-error.log*
 
 .DS_Store
+
+# Local tooling
+.claude/

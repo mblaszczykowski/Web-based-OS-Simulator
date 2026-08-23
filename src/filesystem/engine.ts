@@ -7,12 +7,6 @@ export interface FilesystemConfig {
   blockCount: number
   blockSizeBytes: number
   journalHistoryLimit: number
-  /**
-   * Cylinders the SCAN head crosses per tick. Optional, defaulting to the
-   * plain one-cylinder-per-tick model every hand-traced test in this
-   * module is written against; the live engine runs it faster — see
-   * DEFAULT_FS_CONFIG and IoScheduler's constructor for why.
-   */
   seekCylindersPerTick?: number
 }
 
@@ -20,10 +14,6 @@ export const DEFAULT_FS_CONFIG: FilesystemConfig = {
   blockCount: 64,
   blockSizeBytes: 64,
   journalHistoryLimit: 50,
-  // A full 64-cylinder sweep therefore takes 16 ticks, so an average
-  // request waits ~8 — the same order of magnitude as the CPU bursts it
-  // interleaves with (generateBursts() in scheduler/engine.ts), now that
-  // processes genuinely block on these requests (roadmap-v5.md §1.1).
   seekCylindersPerTick: 4,
 }
 
@@ -34,23 +24,15 @@ interface InternalInode extends Inode {
   content: string
 }
 
-// File permissions (roadmap-v3.md §2.3) — a single rwx triplet per inode,
-// since this simulator has exactly one user (`guest`); there's no
-// owner/group/other distinction to model. MODE_EXEC is tracked and shown
-// (ls -l, chmod) for a realistic-looking mode string, but nothing in this
-// filesystem ever "executes" a file from disk — `run <name>` spawns a
-// scheduler process unrelated to any inode — so it's honestly inert,
-// exactly like a regular file's +x bit on a real system that never runs it.
 export const MODE_READ = 0b100
 export const MODE_WRITE = 0b010
 export const MODE_EXEC = 0b001
-export const DEFAULT_FILE_MODE = MODE_READ | MODE_WRITE // rw- : matches a typical default umask's owner bits
+export const DEFAULT_FILE_MODE = MODE_READ | MODE_WRITE
 
 export function rwxTriplet(mode: number): string {
   return `${mode & MODE_READ ? 'r' : '-'}${mode & MODE_WRITE ? 'w' : '-'}${mode & MODE_EXEC ? 'x' : '-'}`
 }
 
-/** Bumped whenever the shape of FilesystemState changes, so a persisted disk from an older build gets discarded instead of misread. */
 export const FS_SCHEMA_VERSION = 2
 
 export interface FilesystemState {
@@ -68,12 +50,10 @@ export interface FilesystemState {
 }
 
 /**
- * A small inode-based filesystem over a simulated block device, with a
- * write-ahead log so a "crash" mid-write can be replayed back to a
- * consistent state on the next mount — see plan.md §2.3. This intentionally
- * does not aim for the crash-consistency guarantees of a real journaling
- * fs; it exists to demonstrate the idea (log-before-write, replay pending
- * entries) rather than to be production-grade.
+ * Inode-based filesystem over a simulated block device, with a write-ahead
+ * log so a crash mid-write can be replayed to a consistent state on the
+ * next fsck. Aims to demonstrate the idea — log before write, replay what
+ * is pending — not to match a production journaling filesystem.
  */
 export class FilesystemEngine {
   private blocks: DiskBlock[]
@@ -86,13 +66,7 @@ export class FilesystemEngine {
   private crashed = false
   private lastTouchedPath: string | null = null
   private ioScheduler: IoScheduler
-  /** See drainAbandonedIoWaiters(). */
   private abandonedIoWaiters: number[] = []
-  /**
-   * The authority on which blocks are free — roadmap-v5.md §2.2. Kept in
-   * lockstep with `blocks[].owner` by claimBlock()/releaseBlock() below,
-   * which are the only two places allowed to change either.
-   */
   private freeSpace: FreeSpaceBitmap
 
   constructor(private config: FilesystemConfig = DEFAULT_FS_CONFIG) {
@@ -101,12 +75,9 @@ export class FilesystemEngine {
     this.freeSpace = new FreeSpaceBitmap(config.blockCount)
   }
 
-  /**
-   * The only place a block becomes allocated, and the only place it
-   * becomes free again. Both representations — the bitmap that decides
-   * availability and the owner field the grid renders — are updated here
-   * together, so they cannot drift apart.
-   */
+  // The only two places a block changes hands. Both representations — the
+  // bitmap that decides availability and the owner the grid renders — move
+  // together here, so they cannot drift apart.
   private claimBlock(blockIndex: number, inodeId: number): void {
     this.freeSpace.claim(blockIndex)
     const block = this.blocks[blockIndex]
@@ -119,36 +90,15 @@ export class FilesystemEngine {
     if (block) block.owner = null
   }
 
-  /**
-   * Advances the disk by one tick and returns everything the head
-   * serviced. Processes blocked on those requests (roadmap-v5.md §1.1)
-   * are woken by the caller in app/engines.ts — this engine stays
-   * scheduler-unaware, exactly like it stays memory-unaware for swap.
-   */
   advanceTick(): CompletedIoRequest[] {
     this.tick++
     return this.ioScheduler.step(this.tick)
   }
 
-  /**
-   * Submits one I/O request on behalf of a process that is about to block
-   * on it — roadmap-v5.md §1.1. Distinct from the filesystem's own
-   * internal enqueues (block allocation, `cat`'s read) in exactly one way:
-   * it carries the waiter's pid, so completing it can release that
-   * process. Returns false if the request can't be queued at all, which is
-   * the caller's signal to fall back rather than block a process forever.
-   */
   requestDeviceIo(blockIndex: number, kind: 'read' | 'write', waiterPid: number): boolean {
     return this.ioScheduler.enqueue(blockIndex, kind, this.tick, waiterPid)
   }
 
-  /**
-   * Pids that were blocked on a request the disk queue threw away (a
-   * `reset-fs`, or a cross-tab import replacing the disk under them).
-   * Drained by the caller each tick and woken — without this they would
-   * sit in WAITING forever, since the only event that could ever release
-   * them was discarded along with the queue.
-   */
   drainAbandonedIoWaiters(): number[] {
     const abandoned = this.abandonedIoWaiters
     this.abandonedIoWaiters = []
@@ -171,16 +121,6 @@ export class FilesystemEngine {
     return this.mutate('delete', path)
   }
 
-  /**
-   * write()/delete() that skip the permission check (roadmap-v3.md §2.3
-   * still applies to every OTHER caller) — for the memory subsystem's
-   * swap-to-disk coordinator (app/engines.ts) only, never exposed through
-   * CommandContext/the terminal. `/swap/*` files are kernel-managed
-   * bookkeeping, not user data, even though they're deliberately visible
-   * for inspection (`ls /swap`, `free`'s hint) — a user chmod'ing one
-   * read-only must not be able to permanently leak a disk block by
-   * blocking its own cleanup (found by code review).
-   */
   writeIgnoringPermissions(path: string, text: string): FsResult {
     return this.mutate('write', path, text, { skipPermissionCheck: true })
   }
@@ -192,8 +132,6 @@ export class FilesystemEngine {
   mkdir(path: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
-    // The directory being created is the final component, so it is never
-    // followed — but the path leading to it may run through symlinks.
     const resolved = this.resolveLinks(path, false)
     if (!resolved.ok) return { ok: false, error: `mkdir: ${resolved.error}` }
     if (this.findFileEntry(resolved.path) || this.findDirEntry(resolved.path) || this.findSymlinkEntry(resolved.path)) {
@@ -205,12 +143,9 @@ export class FilesystemEngine {
     return { ok: true }
   }
 
-  /** Moves/renames a file (not a directory — kept in scope with the rest of this shell's file ops). */
   move(srcPath: string, destPath: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
-    // Neither end follows its final component: `mv link elsewhere` moves
-    // the link, it does not move what the link points at.
     const src = this.resolveLinks(srcPath, false)
     if (!src.ok) return { ok: false, error: `mv: ${src.error}` }
     const dest = this.resolveLinks(destPath, false)
@@ -228,18 +163,9 @@ export class FilesystemEngine {
     return { ok: true }
   }
 
-  /**
-   * Creates a second directory entry pointing at the same inode as
-   * `srcPath` — a real hard link (roadmap-v3.md §2.1), not a copy:
-   * `Inode.links` goes to 2, and the inode (and its blocks) only actually
-   * disappears once every linked entry has been `delete()`d — see
-   * applyDelete()'s link-count check below.
-   */
   link(srcPath: string, destPath: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
-    // A hard link points at an inode, so its source IS followed through a
-    // symlink — the new name ends up on the real file, not on the link.
     const src = this.resolveLinks(srcPath, true)
     if (!src.ok) return { ok: false, error: `ln: ${src.error}` }
     const dest = this.resolveLinks(destPath, false)
@@ -256,12 +182,9 @@ export class FilesystemEngine {
   }
 
   /**
-   * Creates a symbolic link at `linkPath` pointing at `targetPath` —
-   * roadmap-v5.md §2.2, `ln -s`. Unlike link() next door, the target is
-   * neither resolved nor required to exist: a symlink stores a *name*, and
-   * a dangling one is a legal and useful thing (it starts working the
-   * moment its target is created). That is the whole difference from the
-   * hard link this sits beside.
+   * Unlike a hard link, the target is neither resolved nor required to
+   * exist: a symlink stores a name, and a dangling one starts working the
+   * moment its target appears.
    */
   symlink(targetPath: string, linkPath: string): FsResult {
     const crashedError = this.rejectIfCrashed()
@@ -277,12 +200,9 @@ export class FilesystemEngine {
     return { ok: true }
   }
 
-  /** Sets the rwx mode on `path`'s inode — roadmap-v3.md §2.3. `mode` must already be a validated 0-7 bitmask (see commands.ts's parseMode). */
   chmod(path: string, mode: number): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
-    // Permissions live on the inode, and a symlink has none — so chmod
-    // follows it through to the file it names, like the real one does.
     const resolved = this.resolveLinks(path, true)
     if (!resolved.ok) return { ok: false, error: `chmod: ${resolved.error}` }
     if (this.findDirEntry(resolved.path)) return { ok: false, error: `chmod: ${path}: Is a directory` }
@@ -295,8 +215,6 @@ export class FilesystemEngine {
   copy(srcPath: string, destPath: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
-    // `cp` copies content, so the source is followed; the destination is
-    // a new name and never is.
     const src = this.resolveLinks(srcPath, true)
     if (!src.ok) return { ok: false, error: `cp: ${src.error}` }
     const dest = this.resolveLinks(destPath, false)
@@ -341,8 +259,6 @@ export class FilesystemEngine {
         const inode = this.inodes.get(c.inode!)
         return { name: c.name, type: c.type, mode: inode?.mode, size: inode?.size }
       }
-      // A symlink carries its target rather than a mode or a size — it has
-      // neither, and the target is the only thing worth showing for one.
       if (c.type === 'symlink') return { name: c.name, type: c.type, target: c.target }
       return { name: c.name, type: c.type }
     })
@@ -352,7 +268,6 @@ export class FilesystemEngine {
   read(path: string): FsReadResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
-    // Reading through a symlink reads its target — roadmap-v5.md §2.2.
     const resolved = this.resolveLinks(path, true)
     if (!resolved.ok) return { ok: false, error: `cat: ${resolved.error}` }
     path = resolved.path
@@ -360,16 +275,11 @@ export class FilesystemEngine {
     if (!entry) return { ok: false, error: `cat: ${path}: No such file or directory` }
     const inode = this.inodes.get(entry.inode!)!
     if (!(inode.mode & MODE_READ)) return { ok: false, error: `cat: ${path}: Permission denied` }
-    // Simplification: content lives directly on the inode (not read block by
-    // block — see the class comment), so a real per-block read trace isn't
-    // possible here. Enqueuing one 'read' against the file's first block is
-    // enough to make `cat` show up as disk activity in the I/O scheduler
-    // without pretending this models byte-accurate block I/O.
     if (inode.blockIds.length > 0) this.ioScheduler.enqueue(inode.blockIds[0]!, 'read', this.tick)
     return { ok: true, content: inode.content }
   }
 
-  /** Simulate power loss mid-write: log an entry describing the write but never apply it. */
+  /** Simulated power loss: log an entry describing a write, then never apply it. */
   crash(): void {
     if (this.crashed) return
     const path = this.lastTouchedPath ?? '/crash-test.tmp'
@@ -386,7 +296,7 @@ export class FilesystemEngine {
     simBus.emit('fs:crashed', {})
   }
 
-  /** Replay every pending journal entry (fsck / next mount). Returns the entries it replayed. */
+  /** Replay every pending journal entry, as a real mount would. */
   fsck(): { replayed: JournalEntry[] } {
     const pending = this.journal.filter((entry) => entry.status === 'pending')
     for (const entry of pending) {
@@ -402,16 +312,10 @@ export class FilesystemEngine {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError
 
-    // Writing through a symlink writes its target; `rm link` removes the
-    // link and leaves the target alone (roadmap-v5.md §2.2). Getting the
-    // delete case wrong is how `rm` on a symlink deletes the wrong file.
     const resolved = this.resolveLinks(path, op !== 'delete')
     if (!resolved.ok) return { ok: false, error: `${op}: ${resolved.error}` }
     path = resolved.path
 
-    // `rm` on a symlink removes the link itself — it owns no inode and no
-    // blocks, so this is a pure directory-entry removal and never touches
-    // whatever it pointed at.
     if (op === 'delete' && this.findSymlinkEntry(path)) {
       this.commitJournalEntry('delete', { path, touchedPath: null })
       return { ok: true }
@@ -430,12 +334,6 @@ export class FilesystemEngine {
     if (op === 'create' && this.findFileEntry(path)) {
       return { ok: false, error: `create: ${path}: already exists` }
     }
-    // Permission check (roadmap-v3.md §2.3) — only meaningful against an
-    // EXISTING file: writing a brand-new one has nothing to deny yet (it
-    // gets DEFAULT_FILE_MODE once applyCreate() actually makes it), and
-    // rm's existence check above guarantees the file is there by this point.
-    // Skipped for the swap coordinator's internal calls — see
-    // writeIgnoringPermissions()/deleteIgnoringPermissions() above.
     if ((op === 'write' || op === 'delete') && !opts.skipPermissionCheck) {
       const existing = this.findFileEntry(path)
       if (existing) {
@@ -460,18 +358,7 @@ export class FilesystemEngine {
     return this.crashed ? { ok: false, error: 'filesystem is in a crashed state — run `fsck` to recover' } : null
   }
 
-  /**
-   * Shared tail for every mutating op (mutate()'s create/write/delete, and
-   * mkdir/move/copy): log it pending, apply it, mark it committed, update
-   * lastTouchedPath, and announce it. Every caller has already done its
-   * own op-specific validation by this point — this only ever runs on an
-   * operation that's going to succeed. `skipPermissionCheck` only ever
-   * comes from mutate() forwarding writeIgnoringPermissions()/
-   * deleteIgnoringPermissions()'s own opt-out — fsck()'s replay call
-   * below never passes it, so a replayed entry is always re-checked
-   * against the file's CURRENT mode regardless of what let the original
-   * write commit (see applyWrite()/applyDelete()).
-   */
+  /** Shared tail for every mutation: log it pending, apply it, mark it committed, announce it. */
   private commitJournalEntry(
     op: JournalOp,
     opts: { path: string; content?: string; target?: string; touchedPath: string | null; skipPermissionCheck?: boolean },
@@ -515,12 +402,6 @@ export class FilesystemEngine {
       case 'chmod':
         return this.applyChmod(path, content)
       default: {
-        // Exhaustiveness check: a future JournalOp member missing a case
-        // above fails to compile here. At runtime this only fires for an
-        // `op` that isn't one of the known literals at all — possible only
-        // via a corrupted persisted journal entry (fsck() replay reads
-        // straight from imported state) — and skipping it is the correct
-        // "reject, don't corrupt" behavior, consistent with importState().
         const exhaustive: never = op
         void exhaustive
       }
@@ -563,13 +444,6 @@ export class FilesystemEngine {
     inode.links++
   }
 
-  /**
-   * `path` is the link's own location and `target` is what it points at,
-   * stored verbatim. Note the argument order is the reverse of
-   * applyLink()'s: a hard link needs its source to exist and is created
-   * *from* it, while a symlink is just a name holding a string and is
-   * perfectly legal when its target doesn't exist at all.
-   */
   private applySymlink(path: string, target: string): void {
     if (this.findFileEntry(path) || this.findDirEntry(path) || this.findSymlinkEntry(path)) return
     const segments = this.splitPath(path)
@@ -604,20 +478,6 @@ export class FilesystemEngine {
 
   private applyCreate(path: string): void {
     if (this.findFileEntry(path)) return
-    // Guards against a stale 'write'/'create' replay whose target is
-    // actually something other than a file — e.g. `mkdir /d` sets
-    // lastTouchedPath to '/d', and crash()'s fabricated journal entry is
-    // always op:'write' regardless of what lastTouchedPath actually is.
-    // Without this, fsck() replaying that entry via applyWrite ->
-    // applyCreate would push a second, same-named file entry alongside
-    // the existing one — two siblings named 'd', tree corrupted.
-    //
-    // The symlink half of this was missed when links were added
-    // (roadmap-v5.md §2.2) and is reachable the same way: `ln -s`, and
-    // `mv` of a link, both set lastTouchedPath to the link, so
-    // `ln -s /notes.txt /link; crash; fsck` produced a phantom '/link'
-    // file beside the real symlink — holding an inode and disk blocks
-    // nothing could ever reach again (found by code review).
     if (this.findDirEntry(path) || this.findSymlinkEntry(path)) return
     const segments = this.splitPath(path)
     const name = segments.pop()
@@ -643,12 +503,6 @@ export class FilesystemEngine {
       if (!fileEntry) return
     }
     const inode = this.inodes.get(fileEntry.inode!)!
-    // write()/mutate() already check this for a normal call, but fsck()
-    // always calls apply() with skipPermissionCheck left at its default
-    // (false) — without this, crash()+fsck() could silently bypass the
-    // write-permission check entirely (crash() always fabricates a
-    // generic 'write' op against whatever path was last touched,
-    // regardless of its current mode — found by code review).
     if (!skipPermissionCheck && !(inode.mode & MODE_WRITE)) return
     inode.content += text
     inode.size = inode.content.length
@@ -662,13 +516,10 @@ export class FilesystemEngine {
   }
 
   private applyDelete(path: string, skipPermissionCheck = false): void {
-    // A symlink is a name and nothing else: no inode, no blocks, no
-    // permission bits to check — removing the directory entry is the
-    // whole operation (roadmap-v5.md §2.2).
     const symlinkEntry = this.findSymlinkEntry(path)
     if (symlinkEntry) {
       const linkSegments = this.splitPath(path)
-      linkSegments.pop() // the link's own name; the entry itself is matched by identity below
+      linkSegments.pop()
       const linkDir = this.resolveDir(linkSegments, false)
       if (linkDir?.children) linkDir.children = linkDir.children.filter((c) => c !== symlinkEntry)
       return
@@ -676,21 +527,12 @@ export class FilesystemEngine {
     const fileEntry = this.findFileEntry(path)
     if (!fileEntry) return
     const inode = this.inodes.get(fileEntry.inode!)
-    // Same reasoning as applyWrite() above — fsck() replay must not be
-    // able to bypass the write-permission check that gates a normal rm().
     if (inode && !skipPermissionCheck && !(inode.mode & MODE_WRITE)) return
     if (inode) {
-      // A hard-linked file (roadmap-v3.md §2.1) has more than one
-      // directory entry pointing at this inode — only the entry named by
-      // `path` is removed below; the inode (and its blocks) survives
-      // until its link count actually reaches zero.
       inode.links--
       if (inode.links <= 0) {
         for (const blockIndex of inode.blockIds) {
           this.releaseBlock(blockIndex)
-          // Freeing a block is still a physical touch of it (clearing its
-          // owner) — modeled as a 'write' for scheduling purposes, same as
-          // allocation; there's no separate "erase" kind worth adding.
           this.ioScheduler.enqueue(blockIndex, 'write', this.tick)
         }
         this.inodes.delete(inode.id)
@@ -702,14 +544,6 @@ export class FilesystemEngine {
     if (dir?.children) dir.children = dir.children.filter((c) => c.name !== name)
   }
 
-  /**
-   * Claims `count` blocks for an inode, walking the free-space bit vector
-   * (roadmap-v5.md §2.2) rather than scanning every DiskBlock. All or
-   * nothing: a partial allocation would leave an inode holding fewer
-   * blocks than its content needs, which no caller here is prepared for.
-   * Every caller has already checked free space itself, so this only
-   * fires if that check and this one ever disagree.
-   */
   private allocateFreeBlocks(inodeId: number, count: number): number[] {
     if (count <= 0 || count > this.freeSpace.freeCount) return []
     const allocated: number[] = []
@@ -729,14 +563,8 @@ export class FilesystemEngine {
     return path.split('/').filter(Boolean)
   }
 
-  /**
-   * How many links deep resolution will go before giving up — the ELOOP
-   * limit every real kernel has, for exactly the same reason: `ln -s /a /a`
-   * is legal to create and impossible to follow.
-   */
   private static readonly MAX_SYMLINK_DEPTH = 8
 
-  /** Collapses `.`/`..` inside a symlink target, which is written by the user and may contain either. */
   private static collapse(segments: string[]): string[] {
     const out: string[] = []
     for (const seg of segments) {
@@ -748,21 +576,13 @@ export class FilesystemEngine {
   }
 
   /**
-   * Rewrites `path` with every symbolic link along it replaced by what it
-   * points at — roadmap-v5.md §2.2. Everything below this method then
-   * works on plain, link-free paths, which is why symlinks needed no
-   * changes to `resolveDir`, `findFileEntry`, the journal or replay.
+   * Rewrites a path with every symlink along it replaced by its target, so
+   * everything below works on plain link-free paths.
    *
-   * `followFinal` distinguishes the two things a caller can mean by a path
-   * that names a link. `cat link` wants the target (true); `rm link`,
-   * `mv link`, and creating a link in the first place want the link itself
-   * (false). Getting this backwards is how `rm` on a symlink deletes the
-   * wrong file.
-   *
-   * A component that doesn't exist stops resolution and the rest of the
-   * path is returned unchanged — the caller's own existence check reports
-   * it. That is also what makes a dangling symlink behave correctly:
-   * following it lands on a name that isn't there, and the caller says so.
+   * `followFinal` is the load-bearing part: `cat link` wants the target,
+   * `rm link` and `mv link` want the link itself. A component that doesn't
+   * exist stops resolution and the rest is returned untouched, which is
+   * also what makes a dangling link report correctly.
    */
   private resolveLinks(path: string, followFinal: boolean, depth = 0): { ok: true; path: string } | { ok: false; error: string } {
     if (depth > FilesystemEngine.MAX_SYMLINK_DEPTH) {
@@ -778,16 +598,12 @@ export class FilesystemEngine {
       const isFinal = i === segments.length - 1
 
       if (!child) {
-        // Nothing here (yet) — leave the remainder alone.
         out.push(...segments.slice(i))
         break
       }
 
       if (child.type === 'symlink' && (!isFinal || followFinal)) {
         const target = child.target ?? ''
-        // An absolute target restarts from the root; a relative one is
-        // interpreted against the directory the link lives in, which is
-        // what makes `ln -s notes.txt here` work the way it reads.
         const base = target.startsWith('/') ? this.splitPath(target) : [...out, ...this.splitPath(target)]
         const combined = FilesystemEngine.collapse([...base, ...segments.slice(i + 1)])
         return this.resolveLinks(`/${combined.join('/')}`, followFinal, depth + 1)
@@ -797,9 +613,6 @@ export class FilesystemEngine {
       if (child.type === 'dir') {
         dir = child
       } else {
-        // A file (or an unfollowed link) mid-path: the caller's own
-        // ancestorIsFile()/existence checks are what reject that, so the
-        // remainder is passed through untouched.
         out.push(...segments.slice(i + 1))
         break
       }
@@ -835,27 +648,19 @@ export class FilesystemEngine {
     return dir.children?.find((c) => c.name === name && c.type === 'file')
   }
 
-  /**
-   * Does any segment BEFORE the final component already exist as a file?
-   * resolveDir(..., true) only checks for an existing type:'dir' match by
-   * name — if that segment exists but is a file, it would otherwise just
-   * create a second, same-named directory entry alongside it rather than
-   * erroring, corrupting the tree (two siblings named the same).
-   */
   private ancestorIsFile(path: string): boolean {
     const segments = this.splitPath(path)
-    segments.pop() // the final component is the file/dir being created — not an ancestor
+    segments.pop()
     let node = this.root
     for (const seg of segments) {
       const child = node.children?.find((c) => c.name === seg)
-      if (!child) return false // doesn't exist yet — resolveDir(..., true) will create it
+      if (!child) return false
       if (child.type === 'file') return true
       node = child
     }
     return false
   }
 
-  /** Would growing this file by `text` need more blocks than the disk has free? */
   private growthExceedsFreeSpace(path: string, text: string): boolean {
     const existing = this.findFileEntry(path)
     const currentContent = existing ? this.inodes.get(existing.inode!)!.content : ''
@@ -866,7 +671,6 @@ export class FilesystemEngine {
     return grow > this.freeSpace.freeCount
   }
 
-  /** The symlink entry at `path`, if the final component is one. Never follows it — see resolveLinks(). */
   private findSymlinkEntry(path: string): DirEntry | undefined {
     const segments = this.splitPath(path)
     const name = segments.pop()
@@ -880,7 +684,6 @@ export class FilesystemEngine {
     return dir.children?.find((c) => c.name === name && c.type === 'symlink')
   }
 
-  /** Does `path` already exist as a directory? Used to reject file ops that would collide with one. */
   private findDirEntry(path: string): DirEntry | undefined {
     const segments = this.splitPath(path)
     const name = segments.pop()
@@ -916,7 +719,6 @@ export class FilesystemEngine {
     return this.journal
   }
 
-  /** SCAN disk-head state (pending queue, position, direction) — roadmap-v4.md §1.1. */
   getIoState(): IoSchedulerState {
     return this.ioScheduler.getState()
   }
@@ -925,7 +727,6 @@ export class FilesystemEngine {
     return this.ioScheduler.getMetrics()
   }
 
-  /** The free-space bit vector, allocated = true — roadmap-v5.md §2.2. */
   getFreeSpaceBitmap(): boolean[] {
     return this.freeSpace.toArray()
   }
@@ -939,17 +740,12 @@ export class FilesystemEngine {
     }
   }
 
-  /** Serializes everything needed to reconstruct this disk exactly — see roadmap.md §1.5. */
   exportState(): FilesystemState {
     return {
       schemaVersion: FS_SCHEMA_VERSION,
       blockCount: this.config.blockCount,
       blocks: this.blocks.map((b) => ({ ...b })),
       inodes: [...this.inodes.values()].map((i) => ({ ...i })),
-      // Deep-cloned: root is a nested tree, and this must be an independent
-      // point-in-time snapshot — a shared reference would let later
-      // mutations on this engine (or on another engine imported from the
-      // same snapshot) silently leak into whatever holds the exported object.
       root: structuredClone(this.root),
       journal: this.journal.map((j) => ({ ...j })),
       nextInodeId: this.nextInodeId,
@@ -960,30 +756,14 @@ export class FilesystemEngine {
     }
   }
 
-  /**
-   * Restores a previously-exported disk. Rejects (returns false, changes
-   * nothing) if the schema version or block count don't match this
-   * engine's config — a persisted disk from a stale build is discarded
-   * rather than misread, matching the "fallback: fresh empty disk" call in
-   * roadmap.md §1.5.
-   */
   importState(state: FilesystemState): boolean {
     if (state.schemaVersion !== FS_SCHEMA_VERSION) return false
     if (state.blockCount !== this.config.blockCount) return false
 
-    // A persisted record can pass the two checks above (right schema
-    // version, right block count) and still be malformed in some other
-    // way — e.g. hand-edited, corrupted by a browser crash mid-write, or
-    // written by a build with a bug. Build the replacement state in local
-    // variables first and only assign it to `this` once every step has
-    // succeeded, so a mid-import throw can never leave the engine
-    // half-imported (blocks replaced, inodes not) and never escapes to
-    // the caller — "rejects, changes nothing" holds even for malformed
-    // input, not just a version/count mismatch.
     try {
       const blocks = state.blocks.map((b) => ({ ...b }))
       const inodes = new Map(state.inodes.map((i) => [i.id, { ...i }]))
-      const root = structuredClone(state.root) // independent copy — see the note in exportState()
+      const root = structuredClone(state.root)
       const journal = state.journal.map((j) => ({ ...j }))
 
       this.blocks = blocks
@@ -995,14 +775,7 @@ export class FilesystemEngine {
       this.tick = state.tick
       this.crashed = state.crashed
       this.lastTouchedPath = state.lastTouchedPath
-      // Pending I/O requests reference block indices under the disk that
-      // just got replaced — transient scheduling state, deliberately not
-      // part of FilesystemState/exportState() (same category as the live
-      // process/frame state the scheduler and memory engines never
-      // persist either), so it's reset rather than carried over stale.
       this.abandonedIoWaiters.push(...this.ioScheduler.reset())
-      // Ground truth for a freshly imported disk is the blocks it came
-      // with, so the bitmap is rebuilt from them rather than carried over.
       this.freeSpace.rebuild((index) => this.blocks[index]?.owner != null)
       return true
     } catch {
@@ -1010,7 +783,6 @@ export class FilesystemEngine {
     }
   }
 
-  /** Wipes the disk back to a fresh, empty state in place — used by the `reset-fs` escape hatch. */
   resetToEmpty(): void {
     this.blocks = Array.from({ length: this.config.blockCount }, (_, index) => ({ index, owner: null }))
     this.inodes = new Map()

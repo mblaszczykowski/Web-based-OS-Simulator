@@ -15,7 +15,7 @@ export function SyscallWindow() {
     <WindowFrame
       id="syscalls"
       title="Syscall trace"
-      subtitle="fictional, for flavour"
+      subtitle="live kernel boundary"
       accent="var(--accent)"
       icon={<TraceIcon />}
     >

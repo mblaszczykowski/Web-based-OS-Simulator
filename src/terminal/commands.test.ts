@@ -90,7 +90,6 @@ function makeContext(overrides: Partial<CommandContext> = {}): CommandContext {
   }
 }
 
-/** Pull just the text out, for assertions that don't care about error/ok classification. */
 function texts(input: string, ctx: CommandContext): string[] {
   return executeCommand(input, ctx).map((l) => l.text)
 }
@@ -256,7 +255,7 @@ describe('executeCommand', () => {
     expect(executeCommand('ln a.txt b.txt', ctx)).toEqual([{ text: 'ln: /b.txt: already exists', isError: true }])
   })
 
-  describe('chmod / ls -l (roadmap-v3.md §2.3)', () => {
+  describe('chmod / ls -l', () => {
     it('accepts 1 or 3 octal digits, using only the leftmost as the effective mode', () => {
       const fsChmod = vi.fn(() => ({ ok: true as const }))
       const ctx = makeContext({ fsChmod })
@@ -332,7 +331,7 @@ describe('executeCommand', () => {
     expect(out).toEqual([{ text: 'Removed /a.txt.' }, { text: 'Removed /b.txt.' }])
   })
 
-  it('rm with a literal "?" in the pattern only matches files that actually contain one (found by code review)', () => {
+  it('rm with a literal "?" in the pattern only matches files that actually contain one', () => {
     const fsDelete = vi.fn(() => ({ ok: true as const }))
     const ctx = makeContext({
       fsList: () => ({
@@ -349,7 +348,7 @@ describe('executeCommand', () => {
     expect(fsDelete).not.toHaveBeenCalledWith('/logs.txt')
   })
 
-  describe('working directory (roadmap-v3.md §1.1)', () => {
+  describe('working directory', () => {
     it('cd with no argument goes to root', () => {
       const ctx = makeContext()
       executeCommand('cd /home', ctx)
@@ -369,7 +368,7 @@ describe('executeCommand', () => {
       const failing = makeContext({ fsList: () => ({ ok: false, error: 'no such dir' }) })
       const result = executeCommand('cd nope', failing)
       expect(result[0]).toMatchObject({ isError: true })
-      expect(failing.getCwd()).toBe('/') // rejected — cwd unchanged
+      expect(failing.getCwd()).toBe('/')
     })
 
     it('pwd prints the current working directory', () => {
@@ -378,7 +377,7 @@ describe('executeCommand', () => {
       expect(texts('pwd', ctx)).toEqual(['/var/log'])
     })
 
-    it('regression: reset-fs also resets cwd to root, since the wiped disk only has root (found by code review)', () => {
+    it('regression: reset-fs also resets cwd to root, since the wiped disk only has root', () => {
       const ctx = makeContext()
       executeCommand('cd /home/guest', ctx)
       expect(ctx.getCwd()).toBe('/home/guest')
@@ -405,7 +404,7 @@ describe('executeCommand', () => {
     })
   })
 
-  describe('command chaining (roadmap-v3.md §1.2)', () => {
+  describe('command chaining', () => {
     it('; runs every segment regardless of prior failure', () => {
       const ctx = makeContext({ killProcess: () => false })
       const lines = texts('kill 1 ; run a', ctx)
@@ -453,7 +452,7 @@ describe('executeCommand', () => {
     })
   })
 
-  describe('stress (roadmap-v3.md §1.3)', () => {
+  describe('stress', () => {
     it('spawns the default count with no argument', () => {
       const spawnStress = vi.fn((n: number) => Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1 })))
       const ctx = makeContext({ spawnStress })
@@ -477,7 +476,7 @@ describe('executeCommand', () => {
     })
   })
 
-  describe('run --threads (roadmap-v4.md §2.1)', () => {
+  describe('run --threads', () => {
     it('spawns the requested thread count under the given name', () => {
       const spawnThreads = vi.fn((name: string, n: number) =>
         Array.from({ length: n }, (_, i) => makeProcess({ pid: i + 1, name: `${name}:t${i + 1}` })),
@@ -511,7 +510,7 @@ describe('executeCommand', () => {
     })
   })
 
-  describe('free — TLB hit ratio and thrashing (roadmap-v4.md §2.2)', () => {
+  describe('free — TLB hit ratio and thrashing', () => {
     it('reports the TLB hit ratio alongside the page-table hit ratio', () => {
       const ctx = makeContext({
         memoryMetrics: () => ({
@@ -553,7 +552,7 @@ describe('executeCommand', () => {
     })
   })
 
-  describe('environment variables (roadmap-v4.md §1.2)', () => {
+  describe('environment variables', () => {
     it('export sets a variable and echo $VAR substitutes its value', () => {
       const ctx = makeContext()
       executeCommand('export FOO=bar', ctx)
@@ -590,8 +589,6 @@ describe('executeCommand', () => {
     })
 
     it('a value containing a space is not silently truncated at the first word', () => {
-      // Found by code review: `export GREETING=hello world` used to set
-      // GREETING to just "hello", dropping "world" with no indication.
       const ctx = makeContext()
       executeCommand('export GREETING=hello world', ctx)
       expect(texts('echo $GREETING', ctx)).toEqual(['hello world'])
@@ -620,7 +617,7 @@ describe('executeCommand', () => {
     })
   })
 
-  describe('man (roadmap-v4.md §1.4)', () => {
+  describe('man', () => {
     it('shows a manual entry for a known command', () => {
       const lines = texts('man ls', makeContext())
       expect(lines[0]).toMatch(/^ls -/)
@@ -642,10 +639,6 @@ describe('executeCommand', () => {
     })
 
     it('a name colliding with an inherited Object.prototype member errors instead of crashing', () => {
-      // Found by code review: MAN_PAGES is a plain object literal, so
-      // `MAN_PAGES['constructor']`/`MAN_PAGES['toString']` used to resolve
-      // via the prototype chain to a builtin function instead of undefined,
-      // skip the "no entry" guard, and throw on the spread below it.
       expect(executeCommand('man constructor', makeContext())[0]).toMatchObject({
         isError: true,
         text: 'No manual entry for constructor',
@@ -655,7 +648,7 @@ describe('executeCommand', () => {
     })
   })
 
-  describe('iostat (roadmap-v4.md §1.1)', () => {
+  describe('iostat', () => {
     it('reports the SCAN scheduler status', () => {
       const ctx = makeContext({
         ioMetrics: () => ({
@@ -679,7 +672,7 @@ describe('executeCommand', () => {
   })
 })
 
-describe('pipe — kernel pipes between two processes (roadmap-v5.md §1.2)', () => {
+describe('pipe — kernel pipes between two processes', () => {
   it('spawns both endpoints and names them in the output', () => {
     const spawnPipeline = vi.fn(
       (w: string, r: string) => [makeProcess({ pid: 7, name: w }), makeProcess({ pid: 8, name: r })] as [ReturnType<typeof makeProcess>, ReturnType<typeof makeProcess>],
@@ -731,7 +724,7 @@ describe('pipe — kernel pipes between two processes (roadmap-v5.md §1.2)', ()
   })
 })
 
-describe('ps / top / iostat report what a process is blocked on (roadmap-v5.md §1.1)', () => {
+describe('ps / top / iostat report what a process is blocked on', () => {
   it('ps distinguishes a disk wait from a pipe wait instead of showing a bare WAITING', () => {
     const ctx = makeContext({
       listProcesses: () => [
@@ -773,7 +766,7 @@ describe('ps / top / iostat report what a process is blocked on (roadmap-v5.md �
   })
 })
 
-describe('fork — copy-on-write duplication (roadmap-v5.md §1.3)', () => {
+describe('fork — copy-on-write duplication', () => {
   it('names both the parent and the new child', () => {
     const forkProcess = vi.fn((pid: number) => makeProcess({ pid: pid + 10, name: 'compiler' }))
     const [line] = executeCommand('fork 3', makeContext({ forkProcess }))
@@ -816,7 +809,7 @@ describe('fork — copy-on-write duplication (roadmap-v5.md §1.3)', () => {
   })
 })
 
-describe('lsof — open file descriptors (roadmap-v5.md §2.2)', () => {
+describe('lsof — open file descriptors', () => {
   it('lists each process’s descriptors with what they refer to', () => {
     const ctx = makeContext({
       openFiles: () => [
@@ -836,7 +829,7 @@ describe('lsof — open file descriptors (roadmap-v5.md §2.2)', () => {
   })
 })
 
-describe('ln -s / df — symbolic links and free-space reporting (roadmap-v5.md §2.2)', () => {
+describe('ln -s / df — symbolic links and free-space reporting', () => {
   it('ln -s passes the target through verbatim, so a relative link stays relative', () => {
     const fsSymlink = vi.fn(() => ({ ok: true as const }))
     const fsLink = vi.fn(() => ({ ok: true as const }))
@@ -844,8 +837,6 @@ describe('ln -s / df — symbolic links and free-space reporting (roadmap-v5.md 
 
     executeCommand('cd /home; ln -s notes.txt link', ctx)
 
-    // The link's own location is resolved against the cwd; the target is
-    // not — resolving it here would freeze the link to this directory.
     expect(fsSymlink).toHaveBeenCalledWith('notes.txt', '/home/link')
     expect(fsLink).not.toHaveBeenCalled()
   })
@@ -879,7 +870,7 @@ describe('ln -s / df — symbolic links and free-space reporting (roadmap-v5.md 
     expect(long[1]).toContain('link -> /notes.txt')
   })
 
-  it('regression: rm with a wildcard removes symlinks too, like rm on one by name does (found by code review)', () => {
+  it('regression: rm with a wildcard removes symlinks too, like rm on one by name does', () => {
     const deleted: string[] = []
     const ctx = makeContext({
       fsList: () => ({
@@ -897,8 +888,6 @@ describe('ln -s / df — symbolic links and free-space reporting (roadmap-v5.md 
     })
 
     executeCommand('rm /*', ctx)
-    // Filtering to type 'file' silently skipped every link in the
-    // directory; directories are still correctly left alone.
     expect(deleted).toEqual(['/a.txt', '/a.link'])
   })
 
@@ -928,7 +917,7 @@ describe('ln -s / df — symbolic links and free-space reporting (roadmap-v5.md 
     })
     const lines = executeCommand('df -m', ctx).map((l) => l.text)
     expect(lines.some((l) => l.includes('Free-space bitmap'))).toBe(true)
-    expect(lines.at(-2)).toContain('#...............') // block 0 allocated
-    expect(lines.at(-1)).toContain('.#..............') // block 17 allocated
+    expect(lines.at(-2)).toContain('#...............')
+    expect(lines.at(-1)).toContain('.#..............')
   })
 })

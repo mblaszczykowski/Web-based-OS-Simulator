@@ -7,12 +7,9 @@ export interface SchedulerMetricsView {
   avgWaitingTicks: number
   avgTurnaroundTicks: number
   contextSwitches: number
-  /** Fraction of *core*-ticks spent running something — roadmap-v5.md §2.3. */
   cpuUtilization: number
   coreCount: number
-  /** Times the load balancer moved a process between CPUs. */
   migrations: number
-  /** Runnable processes on each CPU right now — queued plus the one on the CPU. */
   loadPerCore: number[]
 }
 
@@ -24,13 +21,9 @@ export interface MemoryMetricsView {
   frameCount: number
   usedFrames: number
   swappedPages: number
-  /** TLB hit ratio — roadmap-v4.md §2.2. */
   tlbHitRatio: number
-  /** Recent-fault-rate thrashing indicator — roadmap-v4.md §2.2. See MemoryEngine.isThrashing()'s doc for exactly what this measures. */
   thrashing: boolean
-  /** Writes that had to copy a shared copy-on-write frame — roadmap-v5.md §1.3. */
   cowFaults: number
-  /** Frames currently mapped by more than one address space. */
   sharedFrames: number
 }
 
@@ -43,17 +36,14 @@ export interface IoMetricsView {
   avgWaitTicks: number
 }
 
-/** One row of `lsof` — roadmap-v5.md §2.2. */
 export interface OpenFileView {
   pid: number
   processName: string
   fd: number
-  /** stdin/stdout/stderr, or the kind of descriptor a process actually opened. */
   kind: string
   target: string
 }
 
-/** One open pipe, as the terminal renders it. */
 export interface PipeStatusView {
   id: number
   writerPid: number
@@ -66,13 +56,11 @@ export interface PipeStatusView {
   readerOpen: boolean
 }
 
-/** Block usage as `df` reports it — roadmap-v5.md §2.2. */
 export interface FsUsageView {
   totalBlocks: number
   usedBlocks: number
   freeBlocks: number
   blockSizeBytes: number
-  /** The free-space bit vector itself, allocated = true — so `df -m` can print it. */
   bitmap: boolean[]
 }
 
@@ -89,33 +77,25 @@ export interface SyncStatusView {
 export interface CommandOutputLine {
   text: string
   isError?: boolean
-  /** Set only by `clear` — a signal for store.ts's runCommand to actually wipe terminalLines, since this module has no access to that state itself. */
   clearScreen?: boolean
 }
 
 /**
- * Everything a terminal command needs from the rest of the simulator. The
- * parser below never touches the engines or the Zustand store directly —
- * this is the seam that keeps it independently testable (per plan.md §5,
- * modules only ever talk through a narrow, explicit contract).
+ * Everything a command needs from the rest of the simulator. The parser
+ * never touches an engine or the store directly, which is what keeps it
+ * independently testable — and what makes this the system-call boundary
+ * the syscall trace wraps.
  */
 export interface CommandContext {
   listProcesses(): Process[]
   spawnProcess(name: string): Process
-  /** Immediately spawns `n` CPU-bound processes — roadmap-v3.md §1.3's `stress`. */
   spawnStress(n: number): Process[]
-  /** `n` threads of one process, sharing a single address space — roadmap-v4.md §2.1's `run --threads=n`. */
   spawnThreads(name: string, n: number): Process[]
-  /** Two processes joined by a real kernel pipe — roadmap-v5.md §1.2's `pipe <writer> <reader>`. */
   spawnPipeline(writerName: string, readerName: string): [Process, Process]
-  /** Duplicates a process with a copy-on-write address space — roadmap-v5.md §1.3's `fork <pid>`. */
   forkProcess(pid: number): Process | undefined
-  /** Open pipes and their buffer occupancy — backs `pipe` with no arguments. */
   pipeStatus(): PipeStatusView[]
-  /** Open file descriptors per live process — roadmap-v5.md §2.2's `lsof`. */
   openFiles(): OpenFileView[]
   killProcess(pid: number): boolean
-  /** SIGSTOP / SIGCONT — roadmap-v3.md §2.2. */
   stopProcess(pid: number): boolean
   contProcess(pid: number): boolean
   schedulerMetrics(): SchedulerMetricsView
@@ -133,21 +113,16 @@ export interface CommandContext {
   fsMove(src: string, dest: string): { ok: true } | { ok: false; error: string }
   fsCopy(src: string, dest: string): { ok: true } | { ok: false; error: string }
   fsLink(target: string, link: string): { ok: true } | { ok: false; error: string }
-  /** Symbolic link — roadmap-v5.md §2.2's `ln -s`. The target is stored verbatim and may not exist. */
   fsSymlink(target: string, link: string): { ok: true } | { ok: false; error: string }
   fsChmod(path: string, mode: number): { ok: true } | { ok: false; error: string }
   fsCrash(): void
   fsFsck(): { replayed: JournalEntry[] }
   fsCrashed(): boolean
   fsReset(): void
-  /** SCAN disk-head scheduler metrics — roadmap-v4.md §1.1. */
   ioMetrics(): IoMetricsView
-  /** Block usage from the free-space bit vector — roadmap-v5.md §2.2's `df`. */
   fsUsage(): FsUsageView
-  /** Current working directory — roadmap-v3.md §1.1. */
   getCwd(): string
   setCwd(path: string): void
-  /** Environment variables — roadmap-v4.md §1.2. A plain key-value store, not a scripting language: see substituteEnvVars(). */
   getEnv(name: string): string | undefined
   setEnv(name: string, value: string): void
   listEnv(): Record<string, string>
@@ -210,7 +185,6 @@ const HELP_TEXT = [
   'Note | is a shell filter over rendered output, not a kernel pipe — see `man pipe`.',
 ]
 
-/** All command names — exported so the terminal UI can tab-complete against them. */
 export const COMMAND_NAMES = [
   'ps',
   'top',
@@ -250,7 +224,6 @@ export const COMMAND_NAMES = [
   'help',
 ]
 
-/** Short manual pages — roadmap-v4.md §1.4. One entry per COMMAND_NAMES; a static map, no per-command logic. */
 const MAN_PAGES: Record<string, string[]> = {
   ps: [
     'ps - list processes',
@@ -332,30 +305,17 @@ const MAN_PAGES: Record<string, string[]> = {
 }
 
 const DEFAULT_STRESS_COUNT = 6
-/** Safety valve on an explicit user request — nothing else in the sim ever spawns this many processes at once. */
 const MAX_STRESS_COUNT = 20
 
-/** roadmap-v4.md §2.1 — below 2 there's no second thread to share memory with (that's just `run`); above 8 the Gantt chart/ps table stop being legible. */
 export const MIN_THREADS = 2
 export const MAX_THREADS = 8
 
 export interface RunFlags {
-  /** Parsed `--threads=<n>` count, or null if the flag was absent, or if present but invalid (see threadsInvalid). */
   threadCount: number | null
-  /** True if a `--threads=` flag was present but failed validation (non-integer, or outside MIN_THREADS..MAX_THREADS). */
   threadsInvalid: boolean
-  /** `args` with the `--threads=<n>` token (if any) removed — still needs the caller's own empty-name fallback. */
   nameArgs: string[]
 }
 
-/**
- * Shared `run --threads=<n>` flag parsing (roadmap-v4.md §2.1) — used by
- * both this dispatcher and syscallTrace.ts's `run` case, so the two can't
- * silently drift apart on what counts as a valid flag (found by code
- * review: syscallTrace.ts used to re-derive this from scratch and never
- * checked validity at all, so a rejected `run --threads=99 foo` still got a
- * fabricated successful fork()/execve() trace).
- */
 export function parseRunFlags(args: string[]): RunFlags {
   const threadsArg = args.find((a) => a.startsWith('--threads='))
   const nameArgs = args.filter((a) => a !== threadsArg)
@@ -365,7 +325,6 @@ export function parseRunFlags(args: string[]): RunFlags {
   return { threadCount: valid ? n : null, threadsInvalid: !valid, nameArgs }
 }
 
-/** Collapses `.`/`..` segments in an already-absolute path. `/a/../b` -> `/b`, `/a/./b` -> `/a/b`. */
 function collapseDots(path: string): string {
   const segments: string[] = []
   for (const seg of path.split('/')) {
@@ -376,41 +335,18 @@ function collapseDots(path: string): string {
   return `/${segments.join('/')}`
 }
 
-/**
- * Resolves a possibly-relative command argument against the current working
- * directory (roadmap-v3.md §1.1) — the one path-handling seam every file
- * command routes through. An absolute argument (leading `/`) is used as-is
- * (after collapsing any `.`/`..` in it); a relative one is joined onto
- * `cwd` first. A missing argument resolves to `cwd` itself, which is the
- * correct default for `ls` (list the current directory) — commands that
- * require an argument (cat, write, ...) still guard for it themselves
- * before calling this.
- */
+/** The one path-handling seam every file command routes through. */
 export function resolvePath(cwd: string, pathArg: string | undefined): string {
   if (!pathArg) return cwd
   const base = pathArg.startsWith('/') ? pathArg : cwd === '/' ? `/${pathArg}` : `${cwd}/${pathArg}`
   return collapseDots(base)
 }
 
-/**
- * Parses a chmod mode argument. Accepts 1-3 octal digits, matching the
- * familiar Unix `chmod 644` shape — but since this simulator has exactly
- * one user, only the OWNER (leftmost) digit is meaningful; `chmod 644` and
- * `chmod 6` do exactly the same thing here. Returns null for anything that
- * isn't 1-3 digits in 0-7.
- */
 function parseMode(input: string | undefined): number | null {
   if (!input || !/^[0-7]{1,3}$/.test(input)) return null
   return Number(input[0])
 }
 
-/**
- * The STATE column in `ps`. WAITING alone stopped being enough once a
- * process could be waiting for genuinely different things (roadmap-v5.md
- * §1.1/§1.2) — "waiting on the disk head" and "waiting for a pipe reader"
- * behave nothing alike, and which one it is now determines whether the
- * process is even reachable by anything the user can do.
- */
 function formatState(p: Process): string {
   if (p.state !== 'WAITING' || p.blockedOn === null) return p.state
   const label = { device: 'disk', pipe: 'pipe', 'io-burst': 'io' }[p.blockedOn]
@@ -421,15 +357,6 @@ function pct(ratio: number): string {
   return `${Math.round(ratio * 100)}%`
 }
 
-/**
- * One `ls -l` row. Directories don't carry a real Inode (only files do), so
- * they're shown as always-traversable `drwx` — this simulator never
- * restricts directory access, only file content (roadmap-v3.md §2.3).
- * A symlink (roadmap-v5.md §2.2) owns neither an inode nor blocks, so its
- * mode is the conventional always-`lrwx` and its size is zero; what matters
- * about it is the target, printed after the arrow the way real `ls -l`
- * does.
- */
 function formatLongEntry(entry: { name: string; type: string; mode?: number; size?: number; target?: string }): string {
   const isDir = entry.type === 'dir'
   const isLink = entry.type === 'symlink'
@@ -440,7 +367,6 @@ function formatLongEntry(entry: { name: string; type: string; mode?: number; siz
   return `${kind}${rwx}  ${size}  ${name}`
 }
 
-/** Splits on whitespace but keeps the tail (e.g. `write`'s text) as one chunk. */
 function tokenize(input: string): string[] {
   return input.trim().split(/\s+/).filter(Boolean)
 }
@@ -448,22 +374,10 @@ function tokenize(input: string): string[] {
 const VAR_REF = /\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)/g
 
 /**
- * Substitutes `$VAR`/`${VAR}` with an exported value, or an empty string if
- * unset — roadmap-v4.md §1.2. Applied per `;`/`&&`-segment, right before
- * that segment runs (see runCommandLine) — NOT once upfront over the whole
- * raw line — so `export X=1 && echo $X` sees the value `export` just set,
- * the same left-to-right ordering a real shell gives you (found by code
- * review: substituting everything upfront meant a later segment always saw
- * whatever VAR held *before* the line started, even one set earlier in the
- * very same line). This is deliberately the ceiling of "variables": no
- * quoting exists in this shell (see splitSequence's comment) and none is
- * added here, so a literal `$` that doesn't match an identifier just
- * passes through unchanged, and there's no way to prevent substitution
- * inside a value that happens to contain one.
- *
- * Takes `getEnv` directly rather than a full `CommandContext` — the only
- * thing this needs from it — rather than threading a whole `CommandContext`
- * through for one lookup.
+ * Applied per `;`/`&&` segment, right before that segment runs, so
+ * `export X=1 && echo $X` sees the value just set. This is the ceiling of
+ * "variables" here: there is no quoting, so a literal `$` that doesn't
+ * match an identifier simply passes through.
  */
 function substituteEnvVars(input: string, getEnv: (name: string) => string | undefined): string {
   return input.replace(VAR_REF, (_match, braced: string | undefined, bare: string | undefined) => {
@@ -472,20 +386,12 @@ function substituteEnvVars(input: string, getEnv: (name: string) => string | und
   })
 }
 
-/**
- * Translates a simple `*`-only glob into an anchored RegExp. `?` is not a
- * supported wildcard here — it must be escaped to a literal along with the
- * other regex metacharacters, not left to compile as "the preceding
- * character is optional" (found by code review: `rm log?*.txt` was
- * matching `log*.txt` too, silently deleting files with no `?` in their
- * name at all).
- */
+/** `*`-only globs. `?` is escaped to a literal rather than left to mean "optional". */
 function globToRegExp(pattern: string): RegExp {
   const escaped = pattern.replace(/[.+^${}()|[\]\\?]/g, '\\$&').replace(/\*/g, '.*')
   return new RegExp(`^${escaped}$`)
 }
 
-/** Splits a possibly-wildcarded path into its containing directory and the final glob segment. */
 function splitPattern(cwd: string, pathArg: string): { dir: string; pattern: string } {
   const normalized = resolvePath(cwd, pathArg)
   const idx = normalized.lastIndexOf('/')
@@ -511,13 +417,6 @@ function err(text: string): CommandOutputLine[] {
   return [{ text, isError: true }]
 }
 
-/**
- * The original single-command dispatcher — every case here is one atomic
- * command, no `;`/`&&`/`|`. `piped` mirrors a real shell's tty-vs-pipe
- * output detection for `ls`: one name per line when something downstream
- * (like `grep`) needs to match line-by-line, the compact space-joined
- * column otherwise.
- */
 function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = false): CommandOutputLine[] {
   switch (cmd) {
     case 'help':
@@ -529,9 +428,6 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
         [
           String(p.pid).padEnd(6),
           formatState(p).padEnd(16),
-          // Which CPU this process is bound to — roadmap-v5.md §2.3. It is
-          // a property of the process, not of this instant: a WAITING one
-          // still belongs to the core it will come back to.
           (p.core === null ? '-' : String(p.core)).padEnd(5),
           (p.state === 'WAITING' || p.state === 'STOPPED' ? '-' : `Q${p.queueLevel}`).padEnd(7),
           p.name,
@@ -624,9 +520,6 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
 
     case 'cd': {
       const target = args[0] ? resolvePath(ctx.getCwd(), args[0]) : '/'
-      // list() only ever succeeds for a path that resolves to an existing
-      // directory (root always does) — reusing it here avoids a second,
-      // parallel "does this directory exist" check living in the fs engine.
       const result = ctx.fsList(target)
       if (!result.ok) return err(`cd: ${args[0] ?? target}: No such file or directory`)
       ctx.setCwd(target)
@@ -683,10 +576,6 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
         const listResult = ctx.fsList(dir)
         if (!listResult.ok) return err(listResult.error)
         const re = globToRegExp(pattern)
-        // Symlinks count: `rm link` removes one, so `rm *` must too.
-        // Filtering to type 'file' silently skipped every symbolic link in
-        // the directory, and made `rm *.link` report "no files matched"
-        // for a pattern that matches several (found by code review).
         const matches = listResult.entries.filter((e) => e.type !== 'dir' && re.test(e.name))
         if (matches.length === 0) return err(`rm: no files matched '${args[0]}'`)
         return matches.flatMap((m) => {
@@ -703,15 +592,9 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
     case 'touch': {
       if (!args[0]) return err('touch: missing file operand')
       const path = resolvePath(ctx.getCwd(), args[0])
-      // Existence is checked via the parent directory listing, not
-      // fsRead(path).ok — fsRead now enforces the read permission bit
-      // (roadmap-v3.md §2.3), and a write-only existing file (real `touch`
-      // needs no read access, just to bump mtime) must still no-op here
-      // rather than being mistaken for "missing" and hitting fsCreate's
-      // "already exists" error instead.
       const siblings = ctx.fsList(parentDir(path))
       const alreadyExists = siblings.ok && siblings.entries.some((e) => e.name === baseName(path) && e.type === 'file')
-      if (alreadyExists) return out(`Touched ${path}.`) // already exists — real touch just bumps mtime, so this is a no-op
+      if (alreadyExists) return out(`Touched ${path}.`)
       const result = ctx.fsCreate(path)
       return result.ok ? out(`Touched ${path}.`) : err(result.error)
     }
@@ -760,9 +643,6 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       const [target, link] = operands
       const linkPath = resolvePath(cwd, link)
       if (symbolic) {
-        // A symbolic link stores the target as written, so a relative one
-        // stays relative — that is what makes it resolve against wherever
-        // the link ends up living rather than being frozen to this cwd.
         const result = ctx.fsSymlink(target!, linkPath)
         return result.ok ? out(`${linkPath} -> ${target} (symbolic link).`) : err(result.error)
       }
@@ -772,9 +652,6 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
     }
 
     case 'grep':
-      // Only meaningful as a pipe target (see applyFilter below) — bare
-      // `grep` has no stdin to read in this simulator (no long-running
-      // processes to actually pipe from).
       return err('grep: no input — use it after a pipe, e.g. `ls | grep foo`')
 
     case 'crash': {
@@ -795,10 +672,6 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
 
     case 'reset-fs': {
       ctx.fsReset()
-      // The wiped disk only has root — leaving cwd pointing at whatever
-      // directory it was in before would break every subsequent
-      // cwd-relative command until the user manually `cd /` (found by
-      // code review).
       ctx.setCwd('/')
       return out('[RESET] disk wiped — a fresh, empty filesystem is now mounted.')
     }
@@ -818,8 +691,6 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
         ].join(''),
       ]
       if (args.includes('-m')) {
-        // One character per block, wrapped to the same 16-wide rows the
-        // Filesystem window's grid uses, so the two read as the same map.
         lines.push('', 'Free-space bitmap (# = allocated, . = free):')
         for (let i = 0; i < u.bitmap.length; i += 16) {
           const row = u.bitmap.slice(i, i + 16).map((used) => (used ? '#' : '.')).join('')
@@ -922,11 +793,6 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
       const eq = args[0]!.indexOf('=')
       if (eq === -1) return err('export: usage: export [KEY=VALUE]')
       const key = args[0]!.slice(0, eq)
-      // No quoting support in this shell (roadmap-v4.md §1.2's stated scope) —
-      // a bare space in the value has nowhere else to go, so the remaining
-      // whitespace-separated args are rejoined into the value instead of
-      // being silently dropped (found by code review: `export G=hello world`
-      // used to set G to just "hello" with no indication "world" went missing).
       const value = [args[0]!.slice(eq + 1), ...args.slice(1)].join(' ')
       if (!/^[A-Za-z_]\w*$/.test(key)) return err(`export: not a valid identifier: ${key}`)
       ctx.setEnv(key, value)
@@ -938,23 +804,12 @@ function runSingle(cmd: string, args: string[], ctx: CommandContext, piped = fal
 
     case 'man': {
       if (!args[0]) return err('man: usage: man <command>')
-      // Object.hasOwn guards against a name that shadows an inherited
-      // Object.prototype member (e.g. `man constructor`) resolving truthy
-      // via the prototype chain instead of hitting the "no entry" error
-      // below (found by code review).
       const page = Object.hasOwn(MAN_PAGES, args[0]) ? MAN_PAGES[args[0]] : undefined
       if (!page) return err(`No manual entry for ${args[0]}`)
       return out(...page)
     }
 
     case 'clear':
-      // The marker is picked up by store.ts's runCommand, which is the only
-      // place that actually holds terminalLines — this dispatcher has no
-      // state to clear itself (found by code review: a store-level fast
-      // path used to guess at this by string-matching the raw line against
-      // 'clear' BEFORE running it through the real substitution/segment
-      // pipeline, so a line like `export X=clear && $X` never matched and
-      // silently never cleared the screen).
       return [{ text: '', clearScreen: true }]
 
     default:
@@ -968,13 +823,6 @@ function runStage(stageText: string, ctx: CommandContext, piped: boolean): Comma
   return runSingle(cmd, args, ctx, piped)
 }
 
-/**
- * Applies a pipe stage to the previous stage's output lines — roadmap-v3.md
- * §1.2. `grep <pattern>` is the only supported filter (a plain substring
- * match, not a real regex engine); this is intentionally not a general
- * "pipe stdin into any command" mechanism — none of the other commands
- * here read stdin, so piping into them wouldn't mean anything.
- */
 function applyFilter(stageText: string, input: CommandOutputLine[]): CommandOutputLine[] {
   const [cmd, ...args] = tokenize(stageText)
   if (cmd === 'grep') {
@@ -985,7 +833,6 @@ function applyFilter(stageText: string, input: CommandOutputLine[]): CommandOutp
   return err(`${cmd}: not supported as a pipe filter (only 'grep' is)`)
 }
 
-/** One `|`-connected pipeline (a single command counts as a pipeline of length 1). */
 function splitPipeline(text: string): string[] {
   return text.split('|').map((s) => s.trim()).filter(Boolean)
 }
@@ -993,13 +840,9 @@ function splitPipeline(text: string): string[] {
 type Connector = '&&' | ';'
 
 /**
- * Splits raw input on `;` and `&&` into an ordered list of pipeline
- * segments, each tagged with the connector that led into it (`null` for
- * the first). Deliberately naive — no quoting support, so a `;`/`&&`/`|`
- * that's meant to be literal text (e.g. inside `write`'s content) will be
- * misparsed as a separator. Real shells solve this with quotes; adding
- * that here would mean a real tokenizer, out of scope per roadmap-v3.md §4
- * ("prawdziwy język skryptowy powłoki").
+ * Splits on `;` and `&&`. Deliberately naive: no quoting, so a separator
+ * meant as literal text is misparsed. Real quoting needs a real tokenizer,
+ * which is a bigger project than this shell wants to be.
  */
 function splitSequence(input: string): { text: string; connector: Connector | null }[] {
   const tokens = input.split(/(&&|;)/)
@@ -1029,18 +872,6 @@ function runPipeline(text: string, ctx: CommandContext): CommandOutputLine[] {
   return lines
 }
 
-/**
- * Top-level entry point: parses `;`/`&&`/`|` (roadmap-v3.md §1.2) and runs
- * every resulting stage against `ctx`, in order. `&&` short-circuits (skips
- * the next segment, without running it) if the previous one produced any
- * error line; `;` always runs regardless.
- *
- * This used to also return the list of atomic commands that ran, purely so
- * syscallTrace.ts could re-derive from the command text what each one had
- * done. Nothing needs that any more: the trace is produced by the kernel
- * boundary itself (kernel/syscalls.ts wraps `ctx`), so it sees the real
- * calls rather than reconstructing them — roadmap-v5.md §2.1.
- */
 export function runCommandLine(input: string, ctx: CommandContext): CommandOutputLine[] {
   const segments = splitSequence(input)
   const lines: CommandOutputLine[] = []
@@ -1057,7 +888,6 @@ export function runCommandLine(input: string, ctx: CommandContext): CommandOutpu
   return lines
 }
 
-/** Alias kept for the many call sites (tests included) that read better as "execute this command". */
 export function executeCommand(input: string, ctx: CommandContext): CommandOutputLine[] {
   return runCommandLine(input, ctx)
 }

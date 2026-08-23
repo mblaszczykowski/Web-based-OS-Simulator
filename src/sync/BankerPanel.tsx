@@ -29,14 +29,6 @@ function Matrix({ title, rows }: { title: string; rows: number[][] }) {
   )
 }
 
-/**
- * Deadlock *avoidance* — roadmap-v3.md §3.1, a second, independent
- * extension of the sync module alongside the Deadlock detection tab's
- * wait-for-graph cycle check. Where detection catches a deadlock after
- * it's already happened, this never lets the system reach an unsafe
- * state in the first place: every request runs the safety algorithm
- * before being granted.
- */
 export function BankerPanel() {
   const [, forceRender] = useState(0)
   const rerender = () => forceRender((n) => n + 1)

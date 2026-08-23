@@ -1,67 +1,28 @@
 import type { PipeLogEntry, PipeState } from '../shared/types'
 
-/**
- * Slots in one pipe's buffer. Deliberately small — a real pipe's 64 KiB
- * kernel buffer almost never fills, which would make the interesting half
- * of the mechanism (a writer blocking on a full pipe) invisible. Four
- * slots means both blocking directions happen within a handful of ticks,
- * for the same reason SYNC_BUFFER_CAPACITY is 6 rather than realistic.
- */
 export const PIPE_CAPACITY = 4
 
 const LOG_LIMIT = 40
 
-/** What one endpoint's attempt to use the pipe did this tick — see PipeEngine.stepEndpoint(). */
 export type PipeStepOutcome =
-  /** This pid isn't an endpoint of any open pipe; nothing happened. */
   | { kind: 'none' }
-  /** An item moved. `wakeCounterpart` is the pid to release if it was parked on this pipe. */
   | { kind: 'transferred'; wakeCounterpart: number }
-  /** The endpoint must block: a full pipe for a writer, an empty one for a reader. */
   | { kind: 'block' }
-  /** A reader found the pipe empty and the writer gone — end of stream, nothing left to wait for. */
   | { kind: 'eof' }
-  /** A writer found the reader gone. Real Unix raises SIGPIPE; here the write simply fails and the writer runs on. */
   | { kind: 'broken' }
 
 interface InternalPipe extends PipeState {
   buffer: number[]
-  /**
-   * Whether the surviving end has already been told the other one is
-   * gone. A half-closed pipe keeps matching its remaining endpoint for as
-   * long as that process lives, and `broken`/`eof` are deliberately
-   * no-ops for the process itself — so without this it re-logs the same
-   * line every tick it is scheduled and, within a couple of dozen ticks,
-   * pushes the whole created/wrote/blocked history out of the capped
-   * event log the IPC panel exists to show (found by code review).
-   */
   endNotified: boolean
 }
 
 /**
- * Anonymous pipes as real kernel objects — roadmap-v5.md §1.2.
+ * Anonymous pipes between real scheduled processes: a bounded buffer where
+ * the writer blocks when it fills and the reader when it empties.
  *
- * The shell's `|` is, and stays, a *shell-level* filter over a command's
- * rendered output (`ls | grep .log`): none of this simulator's terminal
- * commands is a long-running process with a stdout to connect, so there is
- * nothing there for a kernel pipe to sit between. The `pipe` command
- * instead spawns two genuine scheduler processes and connects them, which
- * is where the mechanism actually means something: a bounded buffer, a
- * writer that blocks when it fills, a reader that blocks when it empties,
- * and each one waking the other.
- *
- * This is the bounded-buffer machinery from `sync/engine.ts` pointed at
- * real processes instead of an animated panel. The two stay separate on
- * purpose: SyncEngine demonstrates *how* a semaphore/mutex pair makes the
- * buffer safe (including the unsafe mode that shows what breaks without
- * it), while this models what the buffer is *for* — one process feeding
- * another. Merging them would cost the first its self-contained
- * before/after story.
- *
- * Like every other engine here this is plain, dependency-free TypeScript:
- * it decides who should block and who should wake, and returns that.
- * Actually blocking a process is the scheduler's job, wired up one level
- * above in `app/engines.ts` (ADR-0004).
+ * Decides who *should* block and who should be woken and returns that; the
+ * scheduler does the blocking (wired up in app/engines.ts). The shell's `|`
+ * is a separate thing — a filter over rendered output, not this.
  */
 export class PipeEngine {
   private pipes: InternalPipe[] = []
@@ -70,10 +31,6 @@ export class PipeEngine {
   private log: PipeLogEntry[] = []
   private nextLogId = 1
 
-  /**
-   * Connects two pids with a fresh pipe. The caller is responsible for the
-   * processes themselves already existing — this only models the channel.
-   */
   create(writerPid: number, readerPid: number): PipeState {
     const pipe: InternalPipe = {
       id: this.nextId++,
@@ -106,10 +63,9 @@ export class PipeEngine {
   }
 
   /**
-   * One pipe operation by whichever process is currently on the CPU. A
-   * process only touches its pipe while it is actually running — which is
-   * the whole reason a blocked endpoint can't retry on its own and has to
-   * be woken by the other side.
+   * One pipe operation by whichever process is on the CPU. An endpoint only
+   * touches its pipe while running, which is why a blocked one can't retry
+   * and must be woken by the other side.
    */
   stepEndpoint(pid: number): PipeStepOutcome {
     const found = this.findEndpoint(pid)
@@ -153,15 +109,9 @@ export class PipeEngine {
   }
 
   /**
-   * One endpoint's process is gone. Returns the counterpart pid to wake if
-   * it might be parked on this pipe: a reader blocked on an empty pipe
-   * whose writer just died would otherwise wait forever for data that can
-   * never arrive, and a writer blocked on a full pipe whose reader died
-   * has nobody left to drain it. Waking them is what lets both ends of a
-   * pipeline actually terminate.
-   *
-   * A pipe whose two ends are both closed is dropped entirely, so a long
-   * session doesn't accumulate dead channels.
+   * One end's process is gone. Returns the counterpart to wake: a reader
+   * parked on an empty pipe whose writer just exited would otherwise wait
+   * for data that can never arrive.
    */
   closeEndpoint(pid: number): number[] {
     const wake: number[] = []
@@ -189,19 +139,6 @@ export class PipeEngine {
     return this.log
   }
 
-  /**
-   * Totals across every open pipe.
-   *
-   * Deliberately does NOT report how many endpoints are blocked: this
-   * engine decides who *should* block but never learns who actually is —
-   * that lives in the scheduler (`getBlockedCounts().pipe`), which is the
-   * only place that knows. An earlier version guessed it from buffer
-   * occupancy and got it wrong in both directions: a freshly created pipe
-   * with an empty buffer and both ends runnable counted as blocked, while
-   * a pipe with a blocked writer *and* a blocked reader counted as one
-   * (found by code review). A metric that can't be computed correctly
-   * here is better absent than approximated.
-   */
   getMetrics() {
     return {
       openPipes: this.pipes.length,

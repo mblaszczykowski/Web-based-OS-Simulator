@@ -8,13 +8,6 @@ import { ProcessTree } from './ProcessTree'
 import { buildRunCsv, runExportFilename } from './exportRun'
 import { downloadTextFile } from '../app/download'
 
-/**
- * What a WAITING process is actually waiting for (roadmap-v5.md §1.1/§1.2).
- * Shown as a suffix on the state pill rather than a separate column: it
- * only ever applies to WAITING rows, and "waiting" without a reason stopped
- * being a useful thing to read once the reason could be a real disk request
- * or a pipe rather than a self-timed countdown.
- */
 const BLOCK_REASON_LABEL: Record<string, string> = {
   device: 'disk',
   pipe: 'pipe',
@@ -31,7 +24,7 @@ const STATE_PILL_CLASS: Record<string, string> = {
 }
 
 export function SchedulerWindow() {
-  useSimStore((s) => s.version) // subscribed purely so this window re-renders on every tick/command
+  useSimStore((s) => s.version)
   const ganttLog = useSimStore((s) => s.ganttLog)
   const ganttHistory = useSimStore((s) => s.ganttHistory)
   const ganttHistoryStartTick = useSimStore((s) => s.ganttHistoryStartTick)
@@ -72,8 +65,7 @@ export function SchedulerWindow() {
             </span>
           </div>
 
-          {/* Per-CPU run-queue depth and the balancer's migration count —
-              roadmap-v5.md §2.3. Hidden on a single-core build, where both
+          {/* Per-CPU run-queue depth and the balancer's migration count Hidden on a single-core build, where both
               numbers would say nothing. */}
           {scheduler.coreCount > 1 && (
             <div className="field">
@@ -174,7 +166,7 @@ export function SchedulerWindow() {
               </button>
             </div>
           </div>
-          {/* One row per CPU (roadmap-v5.md §2.3). With a single core this
+          {/* One row per CPU. With a single core this
               renders exactly as it always did — one unlabelled row — so the
               extra structure costs nothing when there is nothing to show. */}
           {scheduler.cores.map((core) => (

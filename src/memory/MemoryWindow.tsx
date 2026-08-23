@@ -5,13 +5,12 @@ import { memory, scheduler } from '../app/engines'
 import { colorForPid, labelColorForPid } from '../app/colors'
 import { TLB_CAPACITY } from './engine'
 
-/** Renders a 0-1 ratio as a whole-number percentage — this file's own single formatting rule (found by code review: five separate call sites each inlined `Math.round(x * 100)}%`). */
 function pct(ratio: number): string {
   return `${Math.round(ratio * 100)}%`
 }
 
 export function MemoryWindow() {
-  useSimStore((s) => s.version) // subscribed purely so this window re-renders on every tick/command
+  useSimStore((s) => s.version)
 
   const frames = memory.getFrames()
   const clockHand = memory.getClockHand()
@@ -23,12 +22,6 @@ export function MemoryWindow() {
 
   const processes = scheduler.getProcesses()
   const focusProcess = scheduler.getRunning() ?? processes.find((p) => p.state !== 'TERMINATED')
-  // A thread (roadmap-v4.md §2.1) has no page table of its own — its
-  // group's shared one lives under memoryOwnerPid, which equals its own
-  // pid for every ordinary process (found while double-checking this
-  // window against the memoryOwnerPid change: this used focusProcess.pid
-  // directly, so focusing a follower thread would have shown an empty
-  // page table instead of the one it actually shares with its leader).
   const pageTable = focusProcess ? memory.getPageTable(focusProcess.memoryOwnerPid) : undefined
 
   const totalArena = blocks.reduce((sum, b) => sum + b.size, 0)
@@ -87,7 +80,7 @@ export function MemoryWindow() {
           </div>
           {/* Only rendered once a fork has actually happened — an
               always-visible "0 shared frames" row would be noise on the
-              overwhelming majority of sessions (roadmap-v5.md §1.3). */}
+              overwhelming majority of sessions. */}
           {(metrics.sharedFrames > 0 || metrics.cowFaults > 0) && (
             <div className="stat-pair">
               <div className="stat">
@@ -189,7 +182,7 @@ export function MemoryWindow() {
                   <span>Ref</span>
                   <span>M</span>
                   <span>Sw</span>
-                  {/* roadmap-v5.md §1.3 — a page shared read-only with another
+                  {/* — a page shared read-only with another
                       address space after fork(), until one side writes to it. */}
                   <span title="Copy-on-write: shared read-only with another process">COW</span>
                 </div>

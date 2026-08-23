@@ -1,8 +1,3 @@
-// Simple network module — roadmap.md §3.2. Explicitly "pure visualisation
-// of packet flow" per plan.md §3: two simulated hosts, no real TCP/IP
-// stack, no sockets. `ping`/`curl` just launch packets that animate across
-// a fixed link over a few ticks and log what a real one would print.
-
 export type PacketKind = 'ping' | 'pong' | 'http-req' | 'http-res'
 export type Direction = 'client-to-server' | 'server-to-client'
 
@@ -10,10 +5,8 @@ export interface Packet {
   id: number
   kind: PacketKind
   direction: Direction
-  /** Position along the link, 0 (client) .. 1 (server) or vice versa depending on direction. Can start negative to stagger a burst. */
   progress: number
   seq: number
-  /** The host this packet's request/reply pair is talking to — captured at launch, not read from shared engine state (see the note on `hostLabel` below). */
   host: string
 }
 
@@ -39,12 +32,6 @@ export class NetworkEngine {
   private nextSeq = 1
   private log: NetworkLogEntry[] = []
   private nextLogId = 1
-  // Only for UI labeling ("ping {hostLabel}" quick-action, the server
-  // node's name) — "most recently referenced host" is a reasonable
-  // convenience there. NOT used for per-packet log lines: a packet
-  // in flight must remember the host *it* was launched against, since a
-  // second ping/curl to a different host can overwrite this before the
-  // first one's replies arrive — see Packet.host.
   private hostLabel = 'server'
 
   private pingsSent = 0
@@ -57,7 +44,6 @@ export class NetworkEngine {
     if (this.log.length > LOG_LIMIT) this.log.shift()
   }
 
-  /** Sends `count` ICMP-style echo requests, staggered slightly so they animate as a visible burst rather than one blob. */
   ping(host = 'server', count = 4): void {
     this.hostLabel = host
     this.pushLog(`PING ${host}: ${count} packets`)
@@ -75,7 +61,6 @@ export class NetworkEngine {
     this.pingsSent += count
   }
 
-  /** Sends a single simulated HTTP request/response round trip. */
   curl(host = 'server'): void {
     this.hostLabel = host
     const seq = this.nextSeq++
@@ -139,7 +124,6 @@ export class NetworkEngine {
     }
   }
 
-  /** In-flight packets that have actually launched (staggered bursts hold some back at negative progress). */
   getPackets(): Packet[] {
     return this.packets.filter((p) => p.progress >= 0)
   }

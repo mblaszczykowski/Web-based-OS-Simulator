@@ -28,7 +28,7 @@ function packetX(p: Packet): number {
 }
 
 export function NetworkWindow() {
-  useSimStore((s) => s.version) // subscribed purely so this window re-renders on every tick/command
+  useSimStore((s) => s.version)
   const runCommand = useSimStore((s) => s.runCommand)
   const logRef = useRef<HTMLDivElement>(null)
 
@@ -36,15 +36,6 @@ export function NetworkWindow() {
   const log = network.getLog()
   const stats = network.getStats()
   const hostLabel = network.getHostLabel()
-  // NetworkEngine.getLog() returns its own array, mutated in place
-  // (push/shift) rather than reassigned, so `log` is the same reference
-  // every render. `log.length` alone isn't enough either: getLog() caps
-  // itself as a ring buffer once LOG_LIMIT is hit (push+shift), so length
-  // stops changing at that point even as entries keep arriving — the
-  // effect below would silently stop re-firing (found by code review).
-  // ids are assigned monotonically and never reused, so the newest
-  // entry's id keeps changing regardless of whether the array is still
-  // growing or already capped.
   const latestLogId = log.at(-1)?.id
 
   useEffect(() => {
@@ -64,7 +55,7 @@ export function NetworkWindow() {
               </span>
             </div>
             <span className="algo-desc">
-              Pure packet-flow visualisation — no real TCP/IP stack or sockets (plan.md §3). `ping`/`curl` in the
+              Pure packet-flow visualisation — no real TCP/IP stack or sockets. `ping`/`curl` in the
               terminal launch packets that animate across a fixed link.
             </span>
           </div>

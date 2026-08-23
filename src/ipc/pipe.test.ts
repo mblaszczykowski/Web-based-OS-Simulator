@@ -1,11 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { PIPE_CAPACITY, PipeEngine } from './pipe'
 
-// roadmap-v5.md §1.2. These test the channel in isolation: who should
-// block, who should be woken, what happens when an end closes. Actually
-// blocking a process is the scheduler's job, wired up in app/engines.ts —
-// see engines.test.ts for the two working together.
-
 describe('PipeEngine — anonymous pipes as kernel objects', () => {
   it('moves one item per write and reports the reader as the endpoint to wake', () => {
     const pipes = new PipeEngine()
@@ -27,7 +22,7 @@ describe('PipeEngine — anonymous pipes as kernel objects', () => {
     expect(pipes.stepEndpoint(1)).toEqual({ kind: 'block' })
 
     expect(pipes.stepEndpoint(2)).toEqual({ kind: 'transferred', wakeCounterpart: 1 })
-    expect(pipes.stepEndpoint(1).kind).toBe('transferred') // room again
+    expect(pipes.stepEndpoint(1).kind).toBe('transferred')
   })
 
   it('blocks the reader on an empty pipe and names the writer as the one to wake', () => {
@@ -55,7 +50,7 @@ describe('PipeEngine — anonymous pipes as kernel objects', () => {
   it('a reader on an empty pipe whose writer has closed gets EOF, not a block', () => {
     const pipes = new PipeEngine()
     pipes.create(1, 2)
-    expect(pipes.closeEndpoint(1)).toEqual([2]) // the reader must be released
+    expect(pipes.closeEndpoint(1)).toEqual([2])
     expect(pipes.stepEndpoint(2)).toEqual({ kind: 'eof' })
   })
 
@@ -68,13 +63,13 @@ describe('PipeEngine — anonymous pipes as kernel objects', () => {
 
     expect(pipes.stepEndpoint(2).kind).toBe('transferred')
     expect(pipes.stepEndpoint(2).kind).toBe('transferred')
-    expect(pipes.stepEndpoint(2)).toEqual({ kind: 'eof' }) // only now
+    expect(pipes.stepEndpoint(2)).toEqual({ kind: 'eof' })
   })
 
   it('a writer whose reader has gone gets a broken pipe rather than filling a buffer nobody will read', () => {
     const pipes = new PipeEngine()
     pipes.create(1, 2)
-    expect(pipes.closeEndpoint(2)).toEqual([1]) // a writer blocked on a full pipe must be released too
+    expect(pipes.closeEndpoint(2)).toEqual([1])
     expect(pipes.stepEndpoint(1)).toEqual({ kind: 'broken' })
   })
 
@@ -82,7 +77,7 @@ describe('PipeEngine — anonymous pipes as kernel objects', () => {
     const pipes = new PipeEngine()
     pipes.create(1, 2)
     pipes.closeEndpoint(1)
-    expect(pipes.getPipes()).toHaveLength(1) // reader still has it open — EOF is still readable
+    expect(pipes.getPipes()).toHaveLength(1)
     pipes.closeEndpoint(2)
     expect(pipes.getPipes()).toHaveLength(0)
   })
@@ -94,22 +89,17 @@ describe('PipeEngine — anonymous pipes as kernel objects', () => {
     expect(pipes.closeEndpoint(1)).toEqual([])
   })
 
-  it('regression: a half-closed pipe reports the dead end once, not once per tick (found by code review)', () => {
-    // The surviving endpoint keeps matching this pipe for as long as its
-    // process lives, and `broken` is a no-op for the process — so the same
-    // line used to be logged every tick it was scheduled, flushing the
-    // whole created/wrote/blocked history out of the capped log within a
-    // couple of dozen ticks. That is the log the IPC panel exists to show.
+  it('regression: a half-closed pipe reports the dead end once, not once per tick', () => {
     const pipes = new PipeEngine()
     pipes.create(1, 2)
-    pipes.stepEndpoint(1) // something worth keeping in the history
+    pipes.stepEndpoint(1)
     pipes.closeEndpoint(2)
 
     for (let i = 0; i < 50; i++) expect(pipes.stepEndpoint(1)).toEqual({ kind: 'broken' })
 
     const log = pipes.getLog()
     expect(log.filter((e) => e.text.includes('SIGPIPE'))).toHaveLength(1)
-    expect(log.some((e) => e.text.includes('created'))).toBe(true) // history survived
+    expect(log.some((e) => e.text.includes('created'))).toBe(true)
     expect(log.some((e) => e.text.includes('wrote'))).toBe(true)
   })
 

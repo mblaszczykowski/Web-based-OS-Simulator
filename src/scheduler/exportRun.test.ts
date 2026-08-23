@@ -19,7 +19,7 @@ describe('buildRunCsv', () => {
     expect(lines).toContain('tick,core0')
     expect(lines).toContain('1,1')
     expect(lines).toContain('2,1')
-    expect(lines).toContain('3,') // idle tick — no pid
+    expect(lines).toContain('3,')
   })
 
   it('gives every CPU its own column rather than flattening a multi-core run', () => {
@@ -35,7 +35,7 @@ describe('buildRunCsv', () => {
     const lines = csv.split('\n')
     expect(lines).toContain('tick,core0,core1')
     expect(lines).toContain('1,1,2')
-    expect(lines).toContain('2,1,') // CPU1 idle that tick
+    expect(lines).toContain('2,1,')
     expect(lines).toContain('migrations,4')
   })
 
@@ -49,9 +49,7 @@ describe('buildRunCsv', () => {
     expect(csv).not.toContain('migrations')
   })
 
-  it('regression: numbers rows from startTick, not from array index, once history has been trimmed (found by code review)', () => {
-    // Simulates a run where GANTT_HISTORY_CAP already trimmed the front —
-    // ganttHistory[0] is really tick 10001, not tick 1.
+  it('regression: numbers rows from startTick, not from array index, once history has been trimmed', () => {
     const csv = buildRunCsv({
       tick: 10003,
       metrics: { completed: 0, avgWaitingTicks: 0, avgTurnaroundTicks: 0, contextSwitches: 0, cpuUtilization: 0 },
@@ -62,7 +60,7 @@ describe('buildRunCsv', () => {
     expect(lines).toContain('10001,5')
     expect(lines).toContain('10002,5')
     expect(lines).toContain('10003,')
-    expect(lines).not.toContain('1,5') // not mislabeled by array position
+    expect(lines).not.toContain('1,5')
   })
 
   it('produces a valid, non-empty export even for a run with no history yet', () => {
@@ -73,7 +71,7 @@ describe('buildRunCsv', () => {
       startTick: 1,
     })
     expect(csv).toContain('tick,core0')
-    expect(csv.split('\n').at(-1)).toBe('tick,core0') // no trailing rows, but no crash either
+    expect(csv.split('\n').at(-1)).toBe('tick,core0')
   })
 
   it('names the file after the tick it was generated at', () => {

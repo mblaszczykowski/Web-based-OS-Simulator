@@ -1,13 +1,6 @@
 import { LogoIcon } from './icons'
 import { SMALL_SCREEN_BREAKPOINT_PX } from './useIsNarrowViewport'
 
-// Small-screen fallback — roadmap-v3.md §2.6. `.app-root` has a hard
-// `min-width: 1100px` (the desktop metaphor doesn't degrade gracefully —
-// overlapping draggable windows have nowhere sensible to go on a phone
-// screen); without this, opening the live demo link on a phone just shows
-// a horizontally-clipped mess. Below the breakpoint (see
-// useIsNarrowViewport.ts) App.tsx skips the boot sequence and desktop
-// entirely and renders this instead.
 export function SmallScreenNotice() {
   return (
     <div className="small-screen-notice" role="status">
