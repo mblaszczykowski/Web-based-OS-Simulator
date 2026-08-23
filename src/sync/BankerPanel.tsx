@@ -64,10 +64,10 @@ export function BankerPanel() {
             <span className="algo-name">Banker&rsquo;s Algorithm</span>
           </div>
           <span className="algo-desc">
-            5 processes, 3 resource types &mdash; Silberschatz&rsquo;s own worked example. Every request runs the
-            safety algorithm <em>before</em> being granted: if it could ever lead to a state where no process can
-            finish, it&rsquo;s denied and rolled back outright &mdash; avoidance, not detection (see the Deadlock
-            detection tab for that complementary approach).
+            5 processes, 3 resource types &mdash; the same numbers as the classic OS-textbook example. Every request
+            runs the safety algorithm <em>before</em> being granted: if it could ever lead to a state where no
+            process can finish, it&rsquo;s denied and rolled back outright &mdash; avoidance, not detection (see the
+            Deadlock detection tab for that complementary approach).
           </span>
         </div>
 
