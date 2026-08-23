@@ -1,6 +1,6 @@
 import { defineConfig, devices } from '@playwright/test'
 
-// One real-browser smoke test on the production build — roadmap-v4.md §2.3.
+// One real-browser smoke test against the production build.
 // The component tests (React Testing Library + jsdom, *.test.tsx next to
 // each window) cover interaction logic; this exists specifically for the
 // things jsdom can't: real layout/pointer-drag, real focus, real keyboard

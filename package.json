@@ -1,7 +1,20 @@
 {
-  "name": "web-os-simulator",
+  "name": "os-sim",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "description": "An operating system's core subsystems running in the browser: MLFQ scheduling, demand paging, a journaling filesystem, pipes and semaphores.",
+  "author": "Michał Błaszczykowski",
+  "license": "MIT",
+  "keywords": [
+    "operating-system",
+    "simulator",
+    "scheduler",
+    "mlfq",
+    "paging",
+    "filesystem",
+    "visualization",
+    "education"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",
