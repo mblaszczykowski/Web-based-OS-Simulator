@@ -34,7 +34,11 @@ export function SchedulerWindow() {
   const processes = scheduler.getProcesses()
   const active = processes.filter((p) => p.state !== 'TERMINATED')
   const [q0, q1, q2] = scheduler.getReadyQueues()
-  const readyByLevel = [...q0, ...q1, ...q2].slice(0, 6)
+  // Capped so they can't wrap; whatever is left out is counted, not dropped.
+  const READY_SHOWN = 6
+  const LEGEND_SHOWN = 5
+  const readyQueue = [...q0, ...q1, ...q2]
+  const readyByLevel = readyQueue.slice(0, READY_SHOWN)
   const metrics = scheduler.getMetrics()
   const [quantum0, quantum1] = DEFAULT_SCHEDULER_CONFIG.quanta
 
@@ -148,12 +152,15 @@ export function SchedulerWindow() {
             <span className="label">Live Gantt chart</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <div className="legend">
-                {active.slice(0, 5).map((p) => (
+                {active.slice(0, LEGEND_SHOWN).map((p) => (
                   <span className="legend-item" key={p.pid}>
                     <span className="dot" style={{ background: colorForPid(p.pid) }} />
                     P{p.pid}
                   </span>
                 ))}
+                {active.length > LEGEND_SHOWN && (
+                  <span className="legend-item term-muted">+{active.length - LEGEND_SHOWN} more</span>
+                )}
               </div>
               <button
                 type="button"
@@ -210,6 +217,11 @@ export function SchedulerWindow() {
                   {i < readyByLevel.length - 1 && <span className="queue-arrow">&rarr;</span>}
                 </span>
               ))}
+              {readyQueue.length > READY_SHOWN && (
+                <span className="term-muted" style={{ fontSize: 11 }}>
+                  &hellip; +{readyQueue.length - READY_SHOWN} more
+                </span>
+              )}
             </div>
           </div>
 

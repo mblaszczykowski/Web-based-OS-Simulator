@@ -230,6 +230,15 @@ export function MemoryWindow() {
                 <span className="alloc-caption">
                   {blocks.filter((b) => b.owner === null).length} free block(s) &middot;{' '}
                   {pct(metrics.externalFragmentation)} fragmented
+                  {/* Without this the strip looks like it is missing processes,
+                      when in fact First-Fit refused them for want of a single
+                      big enough hole — which is the whole point of showing it. */}
+                  {metrics.contiguousDenied > 0 && (
+                    <>
+                      {' '}
+                      &middot; {metrics.contiguousDenied} process(es) did not fit
+                    </>
+                  )}
                 </span>
               </div>
             </div>

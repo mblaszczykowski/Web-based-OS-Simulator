@@ -17,13 +17,8 @@ import { PipeEngine } from '../ipc/pipe'
 import { FdTable } from '../kernel/fdTable'
 import { simBus } from '../shared/eventBus'
 
-// Live simulation state. Plain class instances, not React state: the store
-// holds a tick/version counter and UI state only, and every window reads
-// straight off these at render time. Keeping engines out of the reactive
-// layer avoids the usual "mutated nested state doesn't re-render" traps.
-//
-// Engines never import each other. Everything that spans two of them —
-// swap, blocking I/O, pipes, fork — is coordinated here.
+// Engines never import each other; anything spanning two of them is
+// coordinated here.
 export const scheduler = new SchedulerEngine()
 export const memory = new MemoryEngine()
 export const filesystem = new FilesystemEngine()
@@ -41,10 +36,7 @@ export function resetSync(unsafe: boolean): void {
 
 memory.reserveKernelFrames(2)
 
-// A process's I/O burst becomes a real request to the disk: it stays
-// blocked until the SCAN head reaches its cylinder. The cylinder is drawn
-// uniformly because the synthetic workload owns no files — which is also
-// the reference workload SCAN is judged against.
+// The cylinder is uniform because the synthetic workload owns no files.
 scheduler.setIoPort({
   submit(pid) {
     if (filesystem.isCrashed()) return false
@@ -80,9 +72,8 @@ function swapPath(pid: number, page: number): string {
   return `/swap/${pid}-${page}.swp`
 }
 
-// Swap files are kernel bookkeeping, so these bypass the permission check:
-// a user chmod'ing one read-only must not be able to leak a disk block by
-// blocking its own cleanup.
+// Bypasses the permission check: chmod'ing a swap file read-only must not
+// let a user block its own cleanup and leak the block.
 function swapOut(pid: number, page: number): void {
   if (filesystem.isCrashed()) return
   filesystem.writeIgnoringPermissions(swapPath(pid, page), SWAP_PAGE_CONTENT)
@@ -93,11 +84,7 @@ function swapIn(pid: number, page: number): void {
   filesystem.deleteIgnoringPermissions(swapPath(pid, page))
 }
 
-/**
- * Memory never survives a reload but the disk does, so any /swap files
- * hydrated from a previous session are orphaned by construction. Left in
- * place, a reused pid could append onto a stale one.
- */
+/** Memory doesn't survive a reload but the disk does, so hydrated /swap files are orphans. */
 function clearSwapFiles(): void {
   const result = filesystem.list('/swap')
   if (!result.ok) return
@@ -111,9 +98,7 @@ simBus.on('process:terminated', ({ pid }) => {
   fdTable.closeAll(pid)
 })
 
-// A thread group shares one allocation, so it can only be freed once every
-// member has exited. For an ordinary process this reduces to freeing
-// immediately, since nothing else ever shares its memoryOwnerPid.
+// A thread group shares one allocation, so it survives until every member exits.
 simBus.on('process:terminated', ({ memoryOwnerPid }) => {
   const groupStillAlive = scheduler
     .getProcesses()
@@ -200,12 +185,7 @@ export function spawnStressLoad(count: number): Process[] {
   return Array.from({ length: count }, () => spawnProcess(randomName(), 'cpu-bound', SHELL_PID))
 }
 
-/**
- * Threads: one Process each (own bursts, own queue level, own Gantt row)
- * but a single shared address space, so allocateProcess runs once for the
- * whole group. Followers get the leader as parent, which makes the process
- * tree show the group for free.
- */
+/** One Process per thread, but allocateProcess runs once for the whole group. */
 export function spawnThreadGroup(name: string, count: number, parentPid: number = SHELL_PID): Process[] {
   if (count < 1) return []
   const kind = randomKind()
@@ -228,10 +208,8 @@ export function spawnThreadGroup(name: string, count: number, parentPid: number 
 }
 
 /**
- * Child with a copy-on-write duplicate of the parent's address space. It
- * inherits the parent's remaining bursts, adjusted for parity so it always
- * starts on a CPU burst. Threads are refused: their address space belongs
- * to the group leader, so "fork one thread" has no unambiguous meaning.
+ * The child inherits the parent's remaining bursts, offset by one when the
+ * parent is mid-I/O so it still starts on a CPU burst.
  */
 export function forkProcess(pid: number): Process | undefined {
   const parent = scheduler.getProcess(pid)
@@ -252,11 +230,7 @@ export function forkProcess(pid: number): Process | undefined {
   return child
 }
 
-/**
- * Two ordinary processes joined by a pipe. Spawned interactive on purpose:
- * a process whose life is handing items to another one is I/O-bound, and
- * CPU-bound bursts would hide the blocking this exists to show.
- */
+/** Interactive, not CPU-bound: long bursts between pipe operations would hide the blocking. */
 export function spawnPipeline(writerName: string, readerName: string, parentPid: number = SHELL_PID): [Process, Process] {
   const writer = spawnProcess(writerName, 'interactive', parentPid)
   const reader = spawnProcess(readerName, 'interactive', writer.pid)

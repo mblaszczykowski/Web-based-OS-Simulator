@@ -180,6 +180,19 @@ describe('syscall trace — a log of the real boundary, not a description beside
     expect(trace('ln -s notes.txt /home/link')).toEqual(['symlink("notes.txt", "/home/link") = 0'])
   })
 
+  it('reports pipe2 as a pair of distinct descriptors in the calling process', () => {
+    const lines = trace('pipe producer consumer')
+    expect(lines[0]).toBe('pipe2([3, 4], 0) = 0')
+    expect(lines).toContain('close(3) = 0')
+    expect(lines).toContain('close(4) = 0')
+  })
+
+  it('leaks no descriptor when a pipeline is created', () => {
+    const fdTable = new FdTable()
+    trace('pipe producer consumer', {}, fdTable)
+    expect(fdTable.all().filter((d) => d.pid < 0)).toEqual([])
+  })
+
   it('records one clone() per thread actually created, and none for a rejected flag', () => {
     const lines = trace('run --threads=3 worker')
     expect(lines.filter((l) => l.startsWith('clone('))).toHaveLength(3)

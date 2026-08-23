@@ -72,8 +72,10 @@ const run = async () => {
   await type(page, 'ln -s /notes.txt /home/notes')
   await wait(6000)
   await type(page, 'fork 3')
-  // Long enough for processes to complete, so the averages are real.
-  await wait(14000)
+  // The turnaround and waiting averages only count processes that have
+  // finished, so let enough of them finish to make the figures mean
+  // something before the first capture.
+  await wait(32000)
 
   console.log('capturing…')
 

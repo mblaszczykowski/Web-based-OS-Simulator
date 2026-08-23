@@ -17,12 +17,8 @@ interface InternalPipe extends PipeState {
 }
 
 /**
- * Anonymous pipes between real scheduled processes: a bounded buffer where
- * the writer blocks when it fills and the reader when it empties.
- *
- * Decides who *should* block and who should be woken and returns that; the
- * scheduler does the blocking (wired up in app/engines.ts). The shell's `|`
- * is a separate thing — a filter over rendered output, not this.
+ * Anonymous pipes between scheduled processes. Decides who should block and
+ * who should be woken and returns that; the scheduler does the blocking.
  */
 export class PipeEngine {
   private pipes: InternalPipe[] = []
@@ -62,11 +58,7 @@ export class PipeEngine {
     return undefined
   }
 
-  /**
-   * One pipe operation by whichever process is on the CPU. An endpoint only
-   * touches its pipe while running, which is why a blocked one can't retry
-   * and must be woken by the other side.
-   */
+  /** An endpoint only touches its pipe while running, so a blocked one must be woken by the other side. */
   stepEndpoint(pid: number): PipeStepOutcome {
     const found = this.findEndpoint(pid)
     if (!found) return { kind: 'none' }
@@ -108,11 +100,7 @@ export class PipeEngine {
     return { kind: 'transferred', wakeCounterpart: pipe.writerPid }
   }
 
-  /**
-   * One end's process is gone. Returns the counterpart to wake: a reader
-   * parked on an empty pipe whose writer just exited would otherwise wait
-   * for data that can never arrive.
-   */
+  /** Returns the counterpart to wake, which is what lets a pipeline's other half terminate. */
   closeEndpoint(pid: number): number[] {
     const wake: number[] = []
     for (const pipe of this.pipes) {

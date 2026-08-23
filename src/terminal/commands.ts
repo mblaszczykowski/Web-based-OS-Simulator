@@ -840,9 +840,7 @@ function splitPipeline(text: string): string[] {
 type Connector = '&&' | ';'
 
 /**
- * Splits on `;` and `&&`. Deliberately naive: no quoting, so a separator
- * meant as literal text is misparsed. Real quoting needs a real tokenizer,
- * which is a bigger project than this shell wants to be.
+ * No quoting support, so a separator meant as literal text is misparsed.
  */
 function splitSequence(input: string): { text: string; connector: Connector | null }[] {
   const tokens = input.split(/(&&|;)/)

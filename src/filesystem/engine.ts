@@ -50,10 +50,8 @@ export interface FilesystemState {
 }
 
 /**
- * Inode-based filesystem over a simulated block device, with a write-ahead
- * log so a crash mid-write can be replayed to a consistent state on the
- * next fsck. Aims to demonstrate the idea — log before write, replay what
- * is pending — not to match a production journaling filesystem.
+ * Inode filesystem over a block device with a write-ahead log: log before
+ * write, replay what is pending on the next fsck.
  */
 export class FilesystemEngine {
   private blocks: DiskBlock[]
@@ -75,9 +73,8 @@ export class FilesystemEngine {
     this.freeSpace = new FreeSpaceBitmap(config.blockCount)
   }
 
-  // The only two places a block changes hands. Both representations — the
-  // bitmap that decides availability and the owner the grid renders — move
-  // together here, so they cannot drift apart.
+  // The only two places a block changes hands, so the bitmap and the owner
+  // field can't drift apart.
   private claimBlock(blockIndex: number, inodeId: number): void {
     this.freeSpace.claim(blockIndex)
     const block = this.blocks[blockIndex]
@@ -181,11 +178,7 @@ export class FilesystemEngine {
     return { ok: true }
   }
 
-  /**
-   * Unlike a hard link, the target is neither resolved nor required to
-   * exist: a symlink stores a name, and a dangling one starts working the
-   * moment its target appears.
-   */
+  /** The target is neither resolved nor required to exist; a dangling link is legal. */
   symlink(targetPath: string, linkPath: string): FsResult {
     const crashedError = this.rejectIfCrashed()
     if (crashedError) return crashedError

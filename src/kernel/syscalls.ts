@@ -1,6 +1,6 @@
 import { SHELL_PID } from '../shared/types'
 import type { CommandContext } from '../terminal/commands'
-import { FIRST_USER_FD, FdTable } from './fdTable'
+import { FdTable } from './fdTable'
 
 export interface SyscallTrace {
   ctx: CommandContext
@@ -18,13 +18,9 @@ function argv(name: string): string {
 }
 
 /**
- * Wraps a CommandContext so every crossing of it is recorded as the call it
- * really is, with the real arguments and the real return value.
- *
- * getCwd/getEnv/listEnv are deliberately not recorded: in a real shell the
- * working directory and environment are process state, so resolving a
- * relative path costs no syscall. Logging them would bury every real line
- * under one getcwd() per argument.
+ * Records every crossing of CommandContext as the call it really is.
+ * getCwd/getEnv/listEnv are not recorded: they are shell-local state, and
+ * resolving a relative path costs no syscall.
  */
 export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTrace {
   const lines: string[] = []
@@ -45,7 +41,7 @@ export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTra
 
     listProcesses: () => {
       const processes = ctx.listProcesses()
-      emit('openat(AT_FDCWD, "/proc", O_DIRECTORY) = 3', `getdents64(3, ...) = ${processes.length}`, 'close(3) = 0')
+      withFd('/proc', 'openat(AT_FDCWD, "/proc", O_DIRECTORY)', (fd) => [`getdents64(${fd}, ...) = ${processes.length}`])
       return processes
     },
 
@@ -87,15 +83,21 @@ export function traceSyscalls(ctx: CommandContext, fdTable: FdTable): SyscallTra
 
     spawnPipeline: (writerName, readerName) => {
       const [writer, reader] = ctx.spawnPipeline(writerName, readerName)
-      const readEnd = fdTable.forPid(reader.pid).find((d) => d.kind === 'pipe-read')?.fd ?? FIRST_USER_FD
-      const writeEnd = fdTable.forPid(writer.pid).find((d) => d.kind === 'pipe-write')?.fd ?? FIRST_USER_FD
+      // pipe2() returns both descriptors to the caller, so they come from the
+      // shell's table; each child would otherwise number its single end 3.
+      const readEnd = fdTable.open(SHELL_PID, 'pipe-read', `pipe:[${reader.pid}]`)
+      const writeEnd = fdTable.open(SHELL_PID, 'pipe-write', `pipe:[${writer.pid}]`)
       emit(
         `pipe2([${readEnd}, ${writeEnd}], 0) = 0`,
         `fork() = ${writer.pid}`,
         `execve("/bin/${writer.name}", ${argv(writer.name)}) = 0`,
         `fork() = ${reader.pid}`,
         `execve("/bin/${reader.name}", ${argv(reader.name)}) = 0`,
+        `close(${readEnd}) = 0`,
+        `close(${writeEnd}) = 0`,
       )
+      fdTable.close(SHELL_PID, readEnd)
+      fdTable.close(SHELL_PID, writeEnd)
       return [writer, reader]
     },
 

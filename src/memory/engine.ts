@@ -37,13 +37,10 @@ function tlbKey(pid: number, page: number): string {
 }
 
 /**
- * Demand-paged memory using Clock (Second-Chance) replacement, with an
- * 8-entry TLB in front of the page table and copy-on-write sharing after
- * fork(). A First-Fit contiguous allocator runs alongside purely as a
- * historical reference visualisation — it does not back the paging path.
- *
- * Tracks only *that* an evicted page is swapped; writing the page file is
- * the coordinator's job in app/engines.ts, so this stays filesystem-free.
+ * Demand paging with Clock replacement, a TLB, and copy-on-write sharing.
+ * The First-Fit allocator alongside it is a visualisation only and does not
+ * back the paging path. Swapping is recorded here but written to disk by
+ * the coordinator, so this stays filesystem-free.
  */
 export class MemoryEngine {
   private frames: Frame[]
@@ -97,10 +94,8 @@ export class MemoryEngine {
   }
 
   /**
-   * Copy-on-write duplicate of an address space. Resident pages are shared,
-   * not copied — nothing is duplicated until somebody writes. A page that
-   * isn't resident is given to the child as a plain empty entry rather than
-   * sharing the parent's swap slot, which is keyed by pid.
+   * Resident pages are shared, not copied. A non-resident page becomes an
+   * empty entry rather than a second reference to a swap slot keyed by pid.
    */
   forkAddressSpace(parentPid: number, childPid: number): boolean {
     const parentTable = this.pageTables.get(parentPid)
@@ -231,11 +226,7 @@ export class MemoryEngine {
     return { fault: true, victimFrame: victimIndex, victims, wasSwapped, tlbHit: false, cowCopy: false }
   }
 
-  /**
-   * Invalidates every mapping of a frame, not just the owner's — a shared
-   * frame is mapped by several address spaces, and leaving a stale mapping
-   * behind is one process reading another's memory.
-   */
+  /** Every mapping, not just the owner's: a stale one is a process reading another's memory. */
   private evictFrame(frameIndex: number): { pid: number; page: number }[] {
     const frame = this.frames[frameIndex]!
     const mappings = [...(frame.owner ? [frame.owner] : []), ...frame.shares]
@@ -258,11 +249,7 @@ export class MemoryEngine {
     return evicted
   }
 
-  /**
-   * The copy half of copy-on-write. The writer gets a private frame; the
-   * rest keep the original. If that leaves a single mapping its COW flag is
-   * cleared too, or that process would pay a second, pointless copy.
-   */
+  /** Leaving one mapping behind clears its COW flag too, or it pays a second pointless copy. */
   private copyOnWrite(pid: number, page: number, entry: PageTableEntry): AccessResult {
     const sourceIndex = entry.frame!
     this.cowFaultCount++
@@ -310,9 +297,8 @@ export class MemoryEngine {
   }
 
   /**
-   * One Clock sweep, or -1 if no frame may be taken. Bounded at two passes
-   * (one to clear reference bits, one to find what it demoted): with
-   * `exclude` set there may be no eligible frame at all, and an unbounded
+   * One Clock sweep, or -1 if nothing may be taken. Bounded at two passes:
+   * with `exclude` set there may be no eligible frame, and an unbounded
    * sweep would spin.
    */
   private selectVictimFrame(exclude?: number): number {
@@ -345,6 +331,12 @@ export class MemoryEngine {
     const table = this.pageTables.get(pid)
     if (!table) return []
     return table.filter((e) => e.swapped).map((e) => e.page)
+  }
+
+  /** Address spaces First-Fit had no single free block big enough for. They page normally. */
+  private contiguousDeniedCount(): number {
+    const owners = new Set(this.blocks.filter((b) => b.owner !== null).map((b) => b.owner))
+    return [...this.pageTables.keys()].filter((pid) => !owners.has(pid)).length
   }
 
   private firstFitAllocate(pid: number, size: number): void {
@@ -425,6 +417,7 @@ export class MemoryEngine {
       tlbHitRatio: this.tlbAccessCount > 0 ? this.tlbHitCount / this.tlbAccessCount : 0,
       cowFaults: this.cowFaultCount,
       sharedFrames: this.getSharedFrameCount(),
+      contiguousDenied: this.contiguousDeniedCount(),
       thrashing: this.isThrashing(),
       recentFaultRate: this.getRecentFaultRate(),
     }

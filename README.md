@@ -232,7 +232,7 @@ Which sync tab is open, and whether the race demo is running, live in the query 
 
 ## Testing
 
-372 tests across 26 files.
+374 tests across 26 files.
 
 - **Engine tests** hand-trace textbook scenarios: exact tick-by-tick MLFQ demotion traces, a classic Second-Chance reference string, a crash-and-replay round trip, SCAN sweeps with reversals.
 - **Property tests** (fast-check) cover invariants that break quietly. Block accounting always reconciles across arbitrary operation sequences. Clock never evicts a kernel frame. After a fork, every frame mapping is live and points back at the page table entry that points at it.

@@ -38,11 +38,6 @@ export function resetPidCounter(start = 1): void {
   pidCounter = start
 }
 
-/**
- * Alternating CPU/IO burst sequence, always starting and ending on a CPU
- * burst. Interactive processes get many short bursts; CPU-bound ones get
- * few long ones.
- */
 export function generateBursts(kind: ProcessKind): number[] {
   const bursts: number[] = []
   if (kind === 'interactive') {
@@ -97,12 +92,7 @@ export function createProcess(
   }
 }
 
-/**
- * Lets a device take ownership of a process's I/O wait. Keeps this engine
- * free of any knowledge of disks: it only knows a wait may be owned
- * elsewhere. Returning false falls back to the self-timed countdown, so a
- * process can never be lost.
- */
+/** Returning false falls back to the self-timed countdown, so a process can never be lost. */
 export interface IoPort {
   submit(pid: number, sizeHint: number): boolean
 }
